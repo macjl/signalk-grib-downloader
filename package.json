@@ -1,0 +1,60 @@
+{
+  "name": "signalk-grib-downloader",
+  "version": "0.1.0",
+  "description": "Orchestrates automatic or manual GRIB downloads (GFS, AROME, ARPEGE, ICON-EU) through containerised jobs — feeds signalk-grib-weather-provider",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "watch": "tsc -w",
+    "pretest": "npm run build",
+    "test": "node --test",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "signalk-node-server-plugin",
+    "signalk-webapp",
+    "signalk-category-weather",
+    "signalk",
+    "weather",
+    "grib",
+    "grib2",
+    "downloader",
+    "marine"
+  ],
+  "author": "Jean-Laurent Girod (@macjl)",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/macjl/signalk-grib-downloader.git"
+  },
+  "homepage": "https://github.com/macjl/signalk-grib-downloader#readme",
+  "bugs": {
+    "url": "https://github.com/macjl/signalk-grib-downloader/issues"
+  },
+  "files": [
+    "dist/",
+    "public/",
+    "test/",
+    "README.md",
+    "CHANGELOG.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "signalk-plugin-enabled-by-default": false,
+  "signalk": {
+    "displayName": "GRIB Downloader",
+    "appIcon": "./icon.svg",
+    "requires": [
+      "signalk-container"
+    ]
+  },
+  "peerDependencies": {
+    "@signalk/server-api": ">=2.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@signalk/server-api": "^2.25.0",
+    "typescript": "^5.0.0"
+  }
+}

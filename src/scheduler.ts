@@ -1,0 +1,82 @@
+import { ModelId, SourceSetting, Bbox } from './types'
+
+// Model run timing: cycle cadence and delay before the *complete* run
+// (all requested forecast hours) is published on the distribution server.
+const MODEL_TIMING: Record<ModelId, { cadenceH: number; delayH: number }> = {
+  gfs:       { cadenceH: 6, delayH: 5.5 },   // f384 lands ~5h15 after cycle time
+  arome:     { cadenceH: 3, delayH: 2.75 },
+  arpege:    { cadenceH: 6, delayH: 4.5 },
+  'icon-eu': { cadenceH: 6, delayH: 4.0 },
+}
+
+export const MODEL_MAX_HOURS: Record<ModelId, number> = {
+  gfs: 384,
+  arome: 51,
+  arpege: 102,
+  'icon-eu': 120,
+}
+
+// Météo-France time-range package groups per (model, resolution).
+const MF_GROUPS: Record<string, { group: string; fromH: number }[]> = {
+  'arome/0025': [
+    '00H06H', '07H12H', '13H18H', '19H24H', '25H30H',
+    '31H36H', '37H42H', '43H48H', '49H51H',
+  ].map(g => ({ group: g, fromH: parseInt(g, 10) })),
+  'arome/001': Array.from({ length: 52 }, (_, h) => ({
+    group: `${String(h).padStart(2, '0')}H`, fromH: h,
+  })),
+  'arpege/01': [
+    '000H012H', '013H024H', '025H036H', '037H048H', '049H060H',
+    '061H072H', '073H084H', '085H096H', '097H102H',
+  ].map(g => ({ group: g, fromH: parseInt(g, 10) })),
+  'arpege/025': [
+    '000H024H', '025H048H', '049H072H', '073H102H',
+  ].map(g => ({ group: g, fromH: parseInt(g, 10) })),
+}
+
+export function defaultResolution(model: ModelId): string | undefined {
+  if (model === 'gfs') return '0p25'
+  if (model === 'arome') return '0025'
+  if (model === 'arpege') return '01'
+  return undefined
+}
+
+// Stamp ("YYYYMMDDTHH") of the most recent run expected to be fully
+// published at `now`, per the model's cadence and publication delay.
+export function expectedRunStamp(model: ModelId, now: Date = new Date()): string {
+  const { cadenceH, delayH } = MODEL_TIMING[model]
+  const t = new Date(now.getTime() - delayH * 3_600_000)
+  const cycleHour = Math.floor(t.getUTCHours() / cadenceH) * cadenceH
+  const y = t.getUTCFullYear()
+  const m = String(t.getUTCMonth() + 1).padStart(2, '0')
+  const d = String(t.getUTCDate()).padStart(2, '0')
+  return `${y}${m}${d}T${String(cycleHour).padStart(2, '0')}`
+}
+
+// Build the per-source entry of the downloader config from a SourceSetting.
+// `dataRoot` is the path of the gribs root *inside the job container*.
+export function downloaderSourceConfig(s: SourceSetting, dataRoot: string, bbox?: Bbox) {
+  const model = s.model
+  const res = s.resolution || defaultResolution(model)
+  const hours = Math.min(s.hours ?? MODEL_MAX_HOURS[model], MODEL_MAX_HOURS[model])
+  const entry: Record<string, unknown> = {
+    name: s.name,
+    model,
+    directory: `${dataRoot}/${s.name}`,
+    keep_runs: 1,
+  }
+  if (model === 'gfs') {
+    entry.resolution = res
+    entry.steps = { from: 0, to: hours, by: 3 }
+    if (bbox) entry.bbox = [bbox.latMin, bbox.lonMin, bbox.latMax, bbox.lonMax]
+  } else if (model === 'icon-eu') {
+    entry.steps = { from: 0, to: hours, by: 3 }
+  } else {
+    entry.resolution = res
+    entry.packages = ['SP1']
+    const groups = MF_GROUPS[`${model}/${res}`]
+    if (!groups) throw new Error(`Unknown ${model} resolution: ${res}`)
+    entry.groups = groups.filter(g => g.fromH <= hours).map(g => g.group)
+  }
+  return entry
+}

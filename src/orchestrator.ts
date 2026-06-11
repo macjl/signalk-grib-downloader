@@ -1,0 +1,192 @@
+import * as fs from 'fs'
+import * as path from 'path'
+import { Bbox, SourceSetting, SourceStatus } from './types'
+import { downloaderSourceConfig, expectedRunStamp, MODEL_MAX_HOURS } from './scheduler'
+
+const PLUGIN_ID = 'signalk-grib-downloader'
+const JOB_TIMEOUT_S = 3600
+const LOG_TAIL = 30
+
+interface SourceState {
+  running: boolean
+  lastError: string | null
+  lastFinishedAt: string | null
+  lastLog: string[]
+}
+
+export class Orchestrator {
+  private states = new Map<string, SourceState>()
+  private configPath: string | null = null
+
+  constructor(
+    private sources: SourceSetting[],
+    private gribsRoot: string,
+    private image: string,
+    private dataDir: string,        // plugin data dir (SignalK-visible)
+    private log: (msg: string) => void,
+    private onChange: () => void,   // notify status updates
+    private bbox?: Bbox
+  ) {
+    for (const s of sources) {
+      this.states.set(s.name, {
+        running: false, lastError: null, lastFinishedAt: null, lastLog: [],
+      })
+    }
+  }
+
+  private containers(): any {
+    return (globalThis as any).__signalk_containerManager ?? null
+  }
+
+  enabledSources(): SourceSetting[] {
+    return this.sources.filter(s => s.enabled !== false)
+  }
+
+  // Latest completed run stamp, read from the downloader's marker files.
+  lastRunStamp(source: SourceSetting): string | null {
+    const dir = path.join(this.gribsRoot, source.name)
+    try {
+      const stamps = fs.readdirSync(dir)
+        .map(f => /^\.run-(\d{8}T\d{2})\.complete$/.exec(f)?.[1])
+        .filter((s): s is string => !!s)
+      return stamps.length > 0 ? stamps.sort().reverse()[0] : null
+    } catch {
+      return null
+    }
+  }
+
+  status(): SourceStatus[] {
+    return this.sources.map(s => {
+      const st = this.states.get(s.name)!
+      const lastRun = this.lastRunStamp(s)
+      const expected = expectedRunStamp(s.model)
+      return {
+        name: s.name,
+        model: s.model,
+        enabled: s.enabled !== false,
+        lastRun,
+        expectedRun: expected,
+        upToDate: lastRun !== null && lastRun >= expected,
+        running: st.running,
+        lastError: st.lastError,
+        lastFinishedAt: st.lastFinishedAt,
+        lastLog: st.lastLog,
+      }
+    })
+  }
+
+  // Sources whose expected run is newer than the last completed one.
+  staleSources(): SourceSetting[] {
+    return this.enabledSources().filter(s => {
+      const last = this.lastRunStamp(s)
+      return last === null || last < expectedRunStamp(s.model)
+    })
+  }
+
+  // Write the downloader config (JSON is valid YAML) into the plugin data
+  // dir so the job container can mount and read it.
+  private writeConfig(dataRootInJob: string): string {
+    const config = {
+      sources: this.enabledSources().map(s =>
+        downloaderSourceConfig(s, dataRootInJob, this.bbox)
+      ),
+    }
+    const p = path.join(this.dataDir, 'downloader-config.json')
+    fs.mkdirSync(this.dataDir, { recursive: true })
+    fs.writeFileSync(p, JSON.stringify(config, null, 2))
+    return p
+  }
+
+  // Download one source (no-op if its job is already running).
+  // Returns true if a job was executed.
+  async downloadSource(source: SourceSetting): Promise<boolean> {
+    const st = this.states.get(source.name)!
+    if (st.running) return false
+
+    const containers = this.containers()
+    if (!containers?.getRuntime?.()) {
+      st.lastError = 'signalk-container not available'
+      this.onChange()
+      return false
+    }
+
+    const rData = await containers.resolveHostPath(this.gribsRoot)
+    const rCfg = await containers.resolveHostPath(this.dataDir)
+    if (!rData || !rCfg) {
+      st.lastError = `path not reachable from container runtime (${!rData ? this.gribsRoot : this.dataDir})`
+      this.onChange()
+      return false
+    }
+    const dataRootInJob = rData.subPath ? `/data/${rData.subPath}` : '/data'
+    const cfgInJob = (rCfg.subPath ? `/cfg/${rCfg.subPath}` : '/cfg') + '/downloader-config.json'
+
+    fs.mkdirSync(path.join(this.gribsRoot, source.name), { recursive: true })
+    this.writeConfig(dataRootInJob)
+
+    st.running = true
+    st.lastError = null
+    st.lastLog = []
+    this.onChange()
+    this.log(`${source.name}: starting download job`)
+
+    try {
+      const result = await containers.runJob({
+        image: this.image,
+        command: [
+          'python3', '/app/downloader.py',
+          '--config', cfgInJob,
+          '--once', '--source', source.name,
+        ],
+        inputs:  { '/cfg': rCfg.source },
+        outputs: { '/data': rData.source },
+        timeout: JOB_TIMEOUT_S,
+        ownerPluginId: PLUGIN_ID,
+        label: `grib-download ${source.name}`,
+        onProgress: (line: string) => {
+          st.lastLog.push(line)
+          if (st.lastLog.length > LOG_TAIL) st.lastLog.shift()
+          this.log(`  ${source.name}: ${line}`)
+        },
+      })
+      if (result.status !== 'completed' || result.exitCode !== 0) {
+        st.lastError = `job ${result.status} (exit ${result.exitCode}): ${result.log?.slice(-3).join(' | ')}`
+        this.log(`${source.name}: ${st.lastError}`)
+      } else {
+        this.log(`${source.name}: download job finished`)
+      }
+      return true
+    } catch (err) {
+      st.lastError = String(err)
+      this.log(`${source.name}: job error: ${err}`)
+      return false
+    } finally {
+      st.running = false
+      st.lastFinishedAt = new Date().toISOString()
+      this.onChange()
+    }
+  }
+
+  // Download the given sources sequentially (bandwidth-friendly).
+  async downloadAll(sources?: SourceSetting[]): Promise<void> {
+    for (const s of sources ?? this.enabledSources()) {
+      await this.downloadSource(s)
+    }
+  }
+
+  // Auto-mode tick: download every source whose expected run is missing.
+  async tick(): Promise<void> {
+    const stale = this.staleSources().filter(s => !this.states.get(s.name)!.running)
+    if (stale.length > 0) {
+      this.log(`auto: ${stale.length} source(s) behind: ${stale.map(s => s.name).join(', ')}`)
+      await this.downloadAll(stale)
+    }
+  }
+
+  findSource(name: string): SourceSetting | undefined {
+    return this.sources.find(s => s.name === name)
+  }
+
+  maxHours(model: SourceSetting['model']): number {
+    return MODEL_MAX_HOURS[model]
+  }
+}

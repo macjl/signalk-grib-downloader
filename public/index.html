@@ -1,0 +1,413 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GRIB Downloader — SignalK</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin=""/>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { height: 100%; font-family: system-ui, -apple-system, sans-serif; background: #1a2535; color: #e8edf4; }
+    #layout { display: grid; grid-template-columns: minmax(420px, 540px) 1fr; height: 100%; }
+    @media (max-width: 900px) { #layout { grid-template-columns: 1fr; grid-template-rows: auto 50vh; } }
+
+    #side { overflow-y: auto; padding: 16px; }
+    #map  { height: 100%; min-height: 300px; }
+
+    h1 { font-size: 17px; margin-bottom: 12px; display: flex; align-items: center; gap: 8px; }
+    h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .5px; color: #9fb0c5; margin: 18px 0 8px; }
+
+    .card { background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.09); border-radius: 10px; padding: 12px; margin-bottom: 10px; }
+
+    label { font-size: 12px; color: #9fb0c5; }
+    input, select {
+      background: #25344a; color: #e8edf4; border: 1px solid #3a4d68; border-radius: 6px;
+      padding: 5px 8px; font-size: 13px; width: 100%;
+    }
+    input[type="checkbox"] { width: auto; }
+    input:focus, select:focus { outline: none; border-color: #4d9fff; }
+
+    button {
+      background: #2563b0; color: #fff; border: none; border-radius: 7px;
+      padding: 7px 14px; font-size: 13px; font-weight: 600; cursor: pointer;
+    }
+    button:hover { background: #2e75cc; }
+    button:disabled { background: #3a4d68; cursor: default; }
+    button.secondary { background: #31425c; }
+    button.secondary:hover { background: #3d5273; }
+    button.danger { background: #8a3038; }
+    button.small { padding: 4px 9px; font-size: 12px; }
+
+    .mode-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+    .mode-row .seg { display: flex; border-radius: 7px; overflow: hidden; border: 1px solid #3a4d68; }
+    .mode-row .seg button { border-radius: 0; background: #25344a; font-weight: 500; }
+    .mode-row .seg button.active { background: #2563b0; font-weight: 700; }
+
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th { text-align: left; font-size: 11px; color: #9fb0c5; padding: 4px 6px; font-weight: 600; }
+    td { padding: 4px 6px; vertical-align: middle; }
+    tr.src-row { border-top: 1px solid rgba(255,255,255,0.07); }
+
+    .badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 700; white-space: nowrap; }
+    .badge.ok    { background: #1d4d2b; color: #7fe39a; }
+    .badge.stale { background: #4d3a1d; color: #e3c47f; }
+    .badge.run   { background: #1d3a4d; color: #7fc4e3; }
+    .badge.err   { background: #4d1d22; color: #e37f8a; }
+    .badge.off   { background: #31425c; color: #9fb0c5; }
+
+    .src-status { font-size: 11px; color: #9fb0c5; margin-top: 2px; }
+    .log { font-family: ui-monospace, monospace; font-size: 11px; background: #131c29; border-radius: 6px;
+           padding: 8px; margin-top: 6px; white-space: pre-wrap; max-height: 130px; overflow-y: auto; color: #b8c6d9; }
+
+    #bbox-inputs { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; margin-top: 8px; }
+    #save-bar { position: sticky; bottom: 0; background: #1a2535; padding: 10px 0 2px; display: flex; gap: 8px; align-items: center; }
+    #save-note { font-size: 12px; color: #9fb0c5; }
+    #save-note.dirty { color: #e3c47f; font-weight: 600; }
+    .row-actions { display: flex; gap: 4px; }
+  </style>
+</head>
+<body>
+<div id="layout">
+  <div id="side">
+    <h1>⚓ <span data-i18n="title">GRIB Downloader</span></h1>
+    <div id="login-banner" class="card" style="display:none; border-color:#e3c47f; color:#e3c47f;"></div>
+
+    <div class="card">
+      <div class="mode-row">
+        <div class="seg">
+          <button id="mode-auto" data-i18n="auto">Auto</button>
+          <button id="mode-manual" data-i18n="manual">Manuel</button>
+        </div>
+        <span id="mode-desc" style="font-size:12px;color:#9fb0c5"></span>
+        <span style="flex:1"></span>
+        <button id="btn-download-all"></button>
+      </div>
+      <div id="auto-interval" style="margin-top:8px; display:flex; align-items:center; gap:8px;">
+        <label data-i18n="checkEvery">Vérifier toutes les</label>
+        <input id="interval" type="number" min="1" style="width:70px"> <span style="font-size:12px">min</span>
+      </div>
+    </div>
+
+    <h2 data-i18n="sources">Sources</h2>
+    <div class="card">
+      <table id="src-table">
+        <thead>
+          <tr>
+            <th></th><th data-i18n="thName">Nom</th><th data-i18n="thModel">Modèle</th>
+            <th data-i18n="thRes">Résol.</th><th data-i18n="thHours">Durée (h)</th>
+            <th data-i18n="thState">État</th><th></th>
+          </tr>
+        </thead>
+        <tbody id="src-body"></tbody>
+      </table>
+      <div style="margin-top:8px"><button class="secondary small" id="btn-add" data-i18n="addSource">+ Ajouter une source</button></div>
+    </div>
+
+    <h2 data-i18n="zone">Zone de téléchargement (GFS)</h2>
+    <div class="card">
+      <div style="font-size:12px;color:#9fb0c5" data-i18n="zoneHint">
+        Glissez les coins du rectangle sur la carte — appliqué aux modèles avec découpe serveur (GFS).
+        AROME / Arpège / ICON distribuent leur domaine entier.
+      </div>
+      <div id="bbox-inputs">
+        <div><label data-i18n="north">Nord</label><input id="bb-latmax" type="number" step="0.5"></div>
+        <div><label data-i18n="south">Sud</label><input id="bb-latmin" type="number" step="0.5"></div>
+        <div><label data-i18n="west">Ouest</label><input id="bb-lonmin" type="number" step="0.5"></div>
+        <div><label data-i18n="east">Est</label><input id="bb-lonmax" type="number" step="0.5"></div>
+      </div>
+    </div>
+
+    <div id="save-bar">
+      <button id="btn-save" data-i18n="save">Enregistrer</button>
+      <span id="save-note"></span>
+    </div>
+  </div>
+  <div id="map"></div>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
+<script>
+'use strict'
+
+// ── i18n ─────────────────────────────────────────────────────────────────────
+const LANG = (navigator.language || 'en').toLowerCase().startsWith('fr') ? 'fr' : 'en'
+const I18N = {
+  fr: {
+    title: 'GRIB Downloader', auto: 'Auto', manual: 'Manuel',
+    autoDesc: 'télécharge après chaque run', manualDesc: 'téléchargement à la demande',
+    checkEvery: 'Vérifier toutes les', sources: 'Sources',
+    thName: 'Nom', thModel: 'Modèle', thRes: 'Résol.', thHours: 'Durée (h)', thState: 'État',
+    addSource: '+ Ajouter une source', zone: 'Zone de téléchargement (GFS)',
+    zoneHint: 'Glissez les coins du rectangle sur la carte — appliqué aux modèles avec découpe serveur (GFS). AROME / Arpège / ICON distribuent leur domaine entier.',
+    north: 'Nord', south: 'Sud', west: 'Ouest', east: 'Est',
+    save: 'Enregistrer', saved: 'Enregistré ✓', dirty: 'Modifications non enregistrées',
+    saveError: 'Erreur : ', downloadAll: 'Tout télécharger', download: '⬇',
+    stUpToDate: 'à jour', stStale: 'en retard', stRunning: 'téléchargement…', stError: 'erreur',
+    stDisabled: 'désactivé', stNoData: 'aucune donnée',
+    lastRun: 'dernier run', expected: 'attendu', confirmDelete: 'Supprimer cette source ?',
+    loginRequired: 'Connexion requise — <a href="/admin/#/login" style="color:#7fc4e3">connectez-vous à SignalK</a> puis rechargez cette page.',
+  },
+  en: {
+    title: 'GRIB Downloader', auto: 'Auto', manual: 'Manual',
+    autoDesc: 'downloads after each model run', manualDesc: 'download on demand',
+    checkEvery: 'Check every', sources: 'Sources',
+    thName: 'Name', thModel: 'Model', thRes: 'Res.', thHours: 'Hours', thState: 'State',
+    addSource: '+ Add source', zone: 'Download area (GFS)',
+    zoneHint: 'Drag the rectangle corners on the map — applies to models with server-side subsetting (GFS). AROME / Arpège / ICON distribute their whole domain.',
+    north: 'North', south: 'South', west: 'West', east: 'East',
+    save: 'Save', saved: 'Saved ✓', dirty: 'Unsaved changes',
+    saveError: 'Error: ', downloadAll: 'Download all', download: '⬇',
+    stUpToDate: 'up to date', stStale: 'behind', stRunning: 'downloading…', stError: 'error',
+    stDisabled: 'disabled', stNoData: 'no data',
+    lastRun: 'last run', expected: 'expected', confirmDelete: 'Delete this source?',
+    loginRequired: 'Login required — <a href="/admin/#/login" style="color:#7fc4e3">log in to SignalK</a> and reload this page.',
+  },
+}
+const t = I18N[LANG]
+document.querySelectorAll('[data-i18n]').forEach(el => { el.textContent = t[el.dataset.i18n] || el.textContent })
+
+// ── Constants ────────────────────────────────────────────────────────────────
+const API = '/plugins/signalk-grib-downloader'
+const MODELS = {
+  gfs:       { resolutions: ['0p25', '0p50', '1p00'], maxHours: 384 },
+  arome:     { resolutions: ['0025', '001'],          maxHours: 51 },
+  arpege:    { resolutions: ['01', '025'],            maxHours: 102 },
+  'icon-eu': { resolutions: [],                       maxHours: 120 },
+}
+
+// ── State ────────────────────────────────────────────────────────────────────
+let config = { mode: 'auto', checkIntervalMinutes: 10, bbox: { latMin: 35, lonMin: -6, latMax: 45, lonMax: 17 }, sources: [] }
+let statusBySource = {}
+let dirty = false
+
+function markDirty() { dirty = true; renderSaveBar() }
+function renderSaveBar() {
+  const note = document.getElementById('save-note')
+  note.textContent = dirty ? t.dirty : ''
+  note.className = dirty ? 'dirty' : ''
+}
+
+// ── Map with editable bbox ───────────────────────────────────────────────────
+const map = L.map('map', { zoomControl: true }).setView([40, 5], 5)
+L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  attribution: '© OpenStreetMap', maxZoom: 12,
+}).addTo(map)
+
+let rect = null, swMarker = null, neMarker = null
+const cornerIcon = L.divIcon({
+  html: '<div style="width:14px;height:14px;border-radius:50%;background:#4d9fff;border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,.5)"></div>',
+  className: '', iconSize: [14, 14], iconAnchor: [7, 7],
+})
+
+function bboxFromInputs() {
+  return {
+    latMin: parseFloat(document.getElementById('bb-latmin').value),
+    lonMin: parseFloat(document.getElementById('bb-lonmin').value),
+    latMax: parseFloat(document.getElementById('bb-latmax').value),
+    lonMax: parseFloat(document.getElementById('bb-lonmax').value),
+  }
+}
+function bboxToInputs(b) {
+  document.getElementById('bb-latmin').value = b.latMin
+  document.getElementById('bb-lonmin').value = b.lonMin
+  document.getElementById('bb-latmax').value = b.latMax
+  document.getElementById('bb-lonmax').value = b.lonMax
+}
+
+function refreshRect(fit) {
+  const b = config.bbox
+  const bounds = [[b.latMin, b.lonMin], [b.latMax, b.lonMax]]
+  if (!rect) {
+    rect = L.rectangle(bounds, { color: '#4d9fff', weight: 2, fillOpacity: 0.08 }).addTo(map)
+    swMarker = L.marker([b.latMin, b.lonMin], { icon: cornerIcon, draggable: true }).addTo(map)
+    neMarker = L.marker([b.latMax, b.lonMax], { icon: cornerIcon, draggable: true }).addTo(map)
+    const onDrag = () => {
+      const sw = swMarker.getLatLng(), ne = neMarker.getLatLng()
+      config.bbox = {
+        latMin: Math.round(Math.min(sw.lat, ne.lat) * 2) / 2,
+        latMax: Math.round(Math.max(sw.lat, ne.lat) * 2) / 2,
+        lonMin: Math.round(Math.min(sw.lng, ne.lng) * 2) / 2,
+        lonMax: Math.round(Math.max(sw.lng, ne.lng) * 2) / 2,
+      }
+      rect.setBounds([[config.bbox.latMin, config.bbox.lonMin], [config.bbox.latMax, config.bbox.lonMax]])
+      bboxToInputs(config.bbox)
+      markDirty()
+    }
+    swMarker.on('drag', onDrag); neMarker.on('drag', onDrag)
+  } else {
+    rect.setBounds(bounds)
+    swMarker.setLatLng([b.latMin, b.lonMin])
+    neMarker.setLatLng([b.latMax, b.lonMax])
+  }
+  bboxToInputs(b)
+  if (fit) map.fitBounds(bounds, { padding: [40, 40] })
+}
+
+;['bb-latmin', 'bb-lonmin', 'bb-latmax', 'bb-lonmax'].forEach(id => {
+  document.getElementById(id).addEventListener('change', () => {
+    const b = bboxFromInputs()
+    if ([b.latMin, b.lonMin, b.latMax, b.lonMax].some(isNaN)) return
+    config.bbox = b
+    refreshRect(false)
+    markDirty()
+  })
+})
+
+// ── Sources table ────────────────────────────────────────────────────────────
+function sourceStateBadge(s) {
+  const st = statusBySource[s.name]
+  if (s.enabled === false) return `<span class="badge off">${t.stDisabled}</span>`
+  if (!st) return ''
+  if (st.running) return `<span class="badge run">${t.stRunning}</span>`
+  if (st.lastError) return `<span class="badge err" title="${st.lastError.replace(/"/g, '&quot;')}">${t.stError}</span>`
+  if (!st.lastRun) return `<span class="badge stale">${t.stNoData}</span>`
+  return st.upToDate
+    ? `<span class="badge ok">${t.stUpToDate}</span>`
+    : `<span class="badge stale">${t.stStale}</span>`
+}
+
+function sourceStatusLine(s) {
+  const st = statusBySource[s.name]
+  if (!st || !st.lastRun) return ''
+  let line = `${t.lastRun}: ${st.lastRun}`
+  if (!st.upToDate) line += ` — ${t.expected}: ${st.expectedRun}`
+  return line
+}
+
+function renderSources() {
+  const body = document.getElementById('src-body')
+  body.innerHTML = ''
+  config.sources.forEach((s, idx) => {
+    const tr = document.createElement('tr')
+    tr.className = 'src-row'
+    const resOpts = MODELS[s.model]?.resolutions ?? []
+    tr.innerHTML = `
+      <td><input type="checkbox" ${s.enabled !== false ? 'checked' : ''} data-f="enabled"></td>
+      <td><input value="${s.name ?? ''}" data-f="name" style="width:95px"></td>
+      <td><select data-f="model">${Object.keys(MODELS).map(m => `<option ${m === s.model ? 'selected' : ''}>${m}</option>`).join('')}</select></td>
+      <td><select data-f="resolution" ${resOpts.length === 0 ? 'disabled' : ''}>
+        ${resOpts.map(r => `<option ${r === s.resolution ? 'selected' : ''}>${r}</option>`).join('')}
+      </select></td>
+      <td><input type="number" value="${s.hours ?? MODELS[s.model]?.maxHours ?? ''}" min="3" max="${MODELS[s.model]?.maxHours ?? 384}" data-f="hours" style="width:65px"></td>
+      <td>${sourceStateBadge(s)}<div class="src-status">${sourceStatusLine(s)}</div></td>
+      <td class="row-actions">
+        <button class="small" data-act="dl" title="${t.download}">⬇</button>
+        <button class="small danger" data-act="del">✕</button>
+      </td>`
+
+    tr.querySelectorAll('[data-f]').forEach(el => {
+      el.addEventListener('change', () => {
+        const f = el.dataset.f
+        if (f === 'enabled') s.enabled = el.checked
+        else if (f === 'hours') s.hours = parseInt(el.value, 10) || undefined
+        else s[f] = el.value
+        if (f === 'model') {
+          s.resolution = (MODELS[s.model]?.resolutions ?? [])[0]
+          s.hours = MODELS[s.model]?.maxHours
+          renderSources()
+        }
+        markDirty()
+      })
+    })
+    tr.querySelector('[data-act="dl"]').addEventListener('click', () => triggerDownload(s.name))
+    tr.querySelector('[data-act="del"]').addEventListener('click', () => {
+      if (confirm(t.confirmDelete)) { config.sources.splice(idx, 1); renderSources(); markDirty() }
+    })
+    body.appendChild(tr)
+
+    const st = statusBySource[s.name]
+    if (st && st.running && st.lastLog?.length) {
+      const logTr = document.createElement('tr')
+      logTr.innerHTML = `<td colspan="7"><div class="log">${st.lastLog.join('\n')}</div></td>`
+      body.appendChild(logTr)
+    }
+  })
+}
+
+document.getElementById('btn-add').addEventListener('click', () => {
+  config.sources.push({ name: '', model: 'gfs', resolution: '0p25', hours: 384, enabled: true })
+  renderSources()
+  markDirty()
+})
+
+// ── Mode ─────────────────────────────────────────────────────────────────────
+function renderMode() {
+  document.getElementById('mode-auto').classList.toggle('active', config.mode !== 'manual')
+  document.getElementById('mode-manual').classList.toggle('active', config.mode === 'manual')
+  document.getElementById('mode-desc').textContent = config.mode === 'manual' ? t.manualDesc : t.autoDesc
+  document.getElementById('auto-interval').style.display = config.mode === 'manual' ? 'none' : 'flex'
+  document.getElementById('interval').value = config.checkIntervalMinutes ?? 10
+}
+document.getElementById('mode-auto').addEventListener('click', () => { config.mode = 'auto'; renderMode(); markDirty() })
+document.getElementById('mode-manual').addEventListener('click', () => { config.mode = 'manual'; renderMode(); markDirty() })
+document.getElementById('interval').addEventListener('change', e => {
+  config.checkIntervalMinutes = parseInt(e.target.value, 10) || 10
+  markDirty()
+})
+
+// ── Actions ──────────────────────────────────────────────────────────────────
+document.getElementById('btn-download-all').textContent = t.downloadAll
+document.getElementById('btn-download-all').addEventListener('click', () => triggerDownload())
+
+async function triggerDownload(name) {
+  try {
+    await fetch(`${API}/download${name ? '/' + encodeURIComponent(name) : ''}`, { method: 'POST' })
+    setTimeout(pollStatus, 800)
+  } catch (e) { console.error(e) }
+}
+
+document.getElementById('btn-save').addEventListener('click', async () => {
+  const note = document.getElementById('save-note')
+  try {
+    const r = await fetch(`${API}/settings`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(config),
+    })
+    if (!r.ok) {
+      const body = await r.json().catch(() => ({}))
+      throw new Error(body.error || `HTTP ${r.status}`)
+    }
+    dirty = false
+    renderSaveBar()
+    note.textContent = t.saved
+    setTimeout(() => { if (!dirty) note.textContent = '' }, 3000)
+  } catch (e) {
+    note.textContent = t.saveError + e.message
+    note.className = 'dirty'
+  }
+})
+
+// ── Polling ──────────────────────────────────────────────────────────────────
+async function pollStatus() {
+  try {
+    const r = await fetch(`${API}/status`)
+    if (!r.ok) return
+    const data = await r.json()
+    statusBySource = {}
+    for (const s of data.sources) statusBySource[s.name] = s
+    if (!dirty) renderSources()  // don't clobber unsaved edits' focus
+  } catch { /* server unreachable — keep last state */ }
+}
+
+async function loadConfig() {
+  const r = await fetch(`${API}/settings`)
+  if (r.status === 401 || r.status === 403) {
+    const banner = document.getElementById('login-banner')
+    banner.innerHTML = t.loginRequired
+    banner.style.display = 'block'
+  } else if (r.ok) {
+    const c = await r.json()
+    config = Object.assign({ mode: 'auto', checkIntervalMinutes: 10, sources: [] }, c)
+    config.bbox = c.bbox ?? { latMin: 35, lonMin: -6, latMax: 45, lonMax: 17 }
+  }
+  renderMode()
+  renderSources()
+  refreshRect(true)
+}
+
+loadConfig().then(pollStatus)
+setInterval(pollStatus, 5000)
+</script>
+</body>
+</html>
