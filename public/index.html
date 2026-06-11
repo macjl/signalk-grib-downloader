@@ -146,6 +146,7 @@ const I18N = {
     stUpToDate: 'à jour', stStale: 'en retard', stRunning: 'téléchargement…', stError: 'erreur',
     stDisabled: 'désactivé', stNoData: 'aucune donnée',
     lastRun: 'dernier run', expected: 'attendu', confirmDelete: 'Supprimer cette source ?',
+    lastAttempt: 'dernière tentative', noAttempt: 'aucune tentative depuis le démarrage', logTitle: 'Journal du dernier téléchargement',
     loginRequired: 'Connexion requise — <a href="/admin/#/login" style="color:#7fc4e3">connectez-vous à SignalK</a> puis rechargez cette page.',
   },
   en: {
@@ -161,6 +162,7 @@ const I18N = {
     stUpToDate: 'up to date', stStale: 'behind', stRunning: 'downloading…', stError: 'error',
     stDisabled: 'disabled', stNoData: 'no data',
     lastRun: 'last run', expected: 'expected', confirmDelete: 'Delete this source?',
+    lastAttempt: 'last attempt', noAttempt: 'no attempt since startup', logTitle: 'Last download log',
     loginRequired: 'Login required — <a href="/admin/#/login" style="color:#7fc4e3">log in to SignalK</a> and reload this page.',
   },
 }
@@ -179,6 +181,7 @@ const MODELS = {
 // ── State ────────────────────────────────────────────────────────────────────
 let config = { mode: 'auto', checkIntervalMinutes: 10, bbox: { latMin: 35, lonMin: -6, latMax: 45, lonMax: 17 }, sources: [] }
 let statusBySource = {}
+let expanded = new Set()
 let dirty = false
 
 function markDirty() { dirty = true; renderSaveBar() }
@@ -300,6 +303,7 @@ function renderSources() {
       <td>${sourceStateBadge(s)}<div class="src-status">${sourceStatusLine(s)}</div></td>
       <td class="row-actions">
         <button class="small" data-act="dl" title="${t.download}">⬇</button>
+        <button class="small secondary" data-act="more">${expanded.has(dirName(s)) ? '▾' : '▸'}</button>
         <button class="small danger" data-act="del">✕</button>
       </td>`
 
@@ -318,15 +322,29 @@ function renderSources() {
       })
     })
     tr.querySelector('[data-act="dl"]').addEventListener('click', () => triggerDownload(dirName(s)))
+    tr.querySelector('[data-act="more"]').addEventListener('click', () => {
+      const k = dirName(s)
+      expanded.has(k) ? expanded.delete(k) : expanded.add(k)
+      renderSources()
+    })
     tr.querySelector('[data-act="del"]').addEventListener('click', () => {
       if (confirm(t.confirmDelete)) { config.sources.splice(idx, 1); renderSources(); markDirty() }
     })
     body.appendChild(tr)
 
     const st = statusBySource[dirName(s)]
-    if (st && st.running && st.lastLog?.length) {
+    if (st && (st.running || expanded.has(dirName(s)))) {
       const logTr = document.createElement('tr')
-      logTr.innerHTML = `<td colspan="7"><div class="log">${st.lastLog.join('\n')}</div></td>`
+      const when = st.lastFinishedAt
+        ? `${t.lastAttempt} : ${new Date(st.lastFinishedAt).toLocaleString()}`
+        : (st.running ? '' : t.noAttempt)
+      const err = st.lastError
+        ? `<div style="color:#e37f8a;font-size:12px;margin-top:4px">⚠ ${st.lastError}</div>` : ''
+      const logHtml = st.lastLog?.length
+        ? `<div class="log">${st.lastLog.map(l => l.replace(/</g, '&lt;')).join('\n')}</div>`
+        : ''
+      logTr.innerHTML = `<td colspan="8" style="padding:2px 6px 8px">
+        <div style="font-size:11px;color:#9fb0c5">${t.logTitle} — ${when}</div>${err}${logHtml}</td>`
       body.appendChild(logTr)
     }
   })
