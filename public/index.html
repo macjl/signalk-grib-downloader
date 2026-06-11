@@ -153,6 +153,8 @@ const I18N = {
     lastRun: 'dernier run', expected: 'attendu', confirmDelete: 'Supprimer cette source ?',
     lastAttempt: 'dernière tentative', noAttempt: 'aucune tentative depuis le démarrage', logTitle: 'Journal du dernier téléchargement',
     maxLbl: 'max', totalVol: 'Volume estimé par run :', perRun: '/ run',
+    archivesLbl: 'archives', archivesTitle: 'Runs précédents conservés dans <source>/archive/ (0 = aucun)',
+    confirmDeleteData: n => `Supprimer aussi les données téléchargées de « ${n} » (gribs, archives) ?\nElles seront effacées à l'enregistrement.`,
     loginRequired: 'Connexion requise — <a href="/admin/#/login" style="color:#7fc4e3">connectez-vous à SignalK</a> puis rechargez cette page.',
   },
   en: {
@@ -170,6 +172,8 @@ const I18N = {
     lastRun: 'last run', expected: 'expected', confirmDelete: 'Delete this source?',
     lastAttempt: 'last attempt', noAttempt: 'no attempt since startup', logTitle: 'Last download log',
     maxLbl: 'max', totalVol: 'Estimated volume per run:', perRun: '/ run',
+    archivesLbl: 'archives', archivesTitle: 'Past runs kept in <source>/archive/ (0 = none)',
+    confirmDeleteData: n => `Also delete the downloaded data of "${n}" (gribs, archives)?\nDeleted when you save.`,
     loginRequired: 'Login required — <a href="/admin/#/login" style="color:#7fc4e3">log in to SignalK</a> and reload this page.',
   },
 }
@@ -211,6 +215,7 @@ function fmtVol(mb) {
 let config = { mode: 'auto', checkIntervalMinutes: 10, bbox: { latMin: 35, lonMin: -6, latMax: 45, lonMax: 17 }, sources: [] }
 let statusBySource = {}
 let expanded = new Set()
+let pendingDataDeletions = new Set()
 let dirty = false
 
 function markDirty() { dirty = true; renderSaveBar() }
@@ -353,6 +358,11 @@ function renderSources() {
           <b data-r="hval">${hours}</b> h <span class="max">/ ${t.maxLbl} ${model.maxHours} h</span>
         </span>
         <span class="vol" data-r="vol">≈ ${fmtVol(mb)}</span>
+        <span style="font-size:12px;color:#9fb0c5;white-space:nowrap" title="${t.archivesTitle}">
+          ${t.archivesLbl}
+          <input type="number" data-f="archiveRuns" min="0" step="1" value="${s.archiveRuns ?? 0}"
+                 style="width:52px;display:inline-block">
+        </span>
       </div>
       <div class="src-status" style="padding-left:24px">${sourceStatusLine(s)}</div>`
 
@@ -376,6 +386,7 @@ function renderSources() {
       }
       el.addEventListener('change', () => {
         if (f === 'enabled') s.enabled = el.checked
+        else if (f === 'archiveRuns') s.archiveRuns = Math.max(0, parseInt(el.value, 10) || 0)
         else s[f] = el.value
         if (f === 'model') {
           s.resolution = (MODELS[s.model]?.resolutions ?? [])[0]
@@ -391,7 +402,11 @@ function renderSources() {
       renderSources()
     })
     card.querySelector('[data-act="del"]').addEventListener('click', () => {
-      if (confirm(t.confirmDelete)) { config.sources.splice(idx, 1); renderSources(); markDirty() }
+      if (!confirm(t.confirmDelete)) return
+      if (confirm(t.confirmDeleteData(name))) pendingDataDeletions.add(name)
+      config.sources.splice(idx, 1)
+      renderSources()
+      markDirty()
     })
     list.appendChild(card)
 
@@ -458,6 +473,11 @@ document.getElementById('btn-save').addEventListener('click', async () => {
       const body = await r.json().catch(() => ({}))
       throw new Error(body.error || `HTTP ${r.status}`)
     }
+    for (const name of pendingDataDeletions) {
+      try { await fetch(`${API}/source-data/${encodeURIComponent(name)}`, { method: 'DELETE' }) }
+      catch (e) { console.error('data deletion failed for', name, e) }
+    }
+    pendingDataDeletions.clear()
     dirty = false
     renderSaveBar()
     note.textContent = t.saved

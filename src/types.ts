@@ -7,6 +7,7 @@ export interface SourceSetting {
   model: ModelId
   resolution?: string   // gfs: 0p25|0p50|1p00 ; arome: 0025|001 ; arpege: 01|025
   hours?: number        // forecast duration to download (capped per model)
+  archiveRuns?: number  // past runs kept in <source>/archive/ (0 = none, no upper limit)
   enabled?: boolean     // default true
 }
 

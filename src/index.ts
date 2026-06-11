@@ -164,6 +164,10 @@ module.exports = (server: ServerAPI): Plugin => {
         if (new Set(names).size !== names.length) {
           return res.status(400).json({ error: 'duplicate source: each (model, resolution) pair must be unique' })
         }
+        if ((next.sources ?? []).some(s =>
+            s.archiveRuns !== undefined && (!Number.isFinite(s.archiveRuns) || s.archiveRuns < 0))) {
+          return res.status(400).json({ error: 'archiveRuns must be a number ≥ 0' })
+        }
         try {
           saveSettings(next)
         } catch (err) {
@@ -182,6 +186,22 @@ module.exports = (server: ServerAPI): Plugin => {
         res.status(202).json({
           started: orchestrator.enabledSources().map(sourceDirName),
           behind: stale.map(sourceDirName),
+        })
+      })
+
+      // Delete a source's downloaded data (gribs, markers, archive). The
+      // provider unregisters the source and purges its caches at next scan.
+      router.delete('/source-data/:name', (req: any, res: any) => {
+        const name = req.params.name
+        if (!/^[A-Za-z0-9._-]+$/.test(name)) {
+          return res.status(400).json({ error: 'invalid source name' })
+        }
+        const dir = path.join(infra.gribsRoot ?? DEFAULT_ROOT, name)
+        if (!fs.existsSync(dir)) return res.json({ ok: true, existed: false })
+        fs.rm(dir, { recursive: true, force: true }, (err) => {
+          if (err) return res.status(500).json({ error: String(err) })
+          server.debug(`deleted source data: ${dir}`)
+          res.json({ ok: true, existed: true })
         })
       })
 

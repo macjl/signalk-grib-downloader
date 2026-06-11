@@ -72,7 +72,7 @@ export function downloaderSourceConfig(s: SourceSetting, dataRoot: string, bbox?
     name: dirName,
     model,
     directory: `${dataRoot}/${dirName}`,
-    keep_runs: 1,
+    archive_runs: Math.max(0, Math.floor(s.archiveRuns ?? 0)),
   }
   if (model === 'gfs') {
     entry.resolution = res
