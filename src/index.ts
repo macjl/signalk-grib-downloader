@@ -32,9 +32,9 @@ const buildSchema = (defaultRoot: string) => ({
       description:
         'Each source downloads into <root>/<model>-<resolution>. Point the ' +
         'signalk-grib-weather-provider root at the same directory. ' +
-        'When SignalK runs in a container, the path must live inside a ' +
-        'mounted volume — the default (inside the SignalK data directory) ' +
-        'always works. "~" is expanded.',
+        '"~" is expanded. When SignalK runs in a container, the path must ' +
+        'live inside a mounted volume — the default (under ~/.signalk) ' +
+        'always works.',
       default: defaultRoot,
     },
     downloaderImage: {
@@ -58,9 +58,8 @@ module.exports = (server: ServerAPI): Plugin => {
   let infra: PluginSettings = {}
   let settings: AppSettings = { ...DEFAULT_APP_SETTINGS }
 
-  // SignalK config dir = parent of plugin-config-data/<id>
-  const defaultRoot = () => path.resolve(server.getDataDirPath(), '..', '..', 'gribs')
-  const gribsRoot = () => expandHome(infra.gribsRoot || defaultRoot())
+  const DEFAULT_ROOT = '~/.signalk/gribs'
+  const gribsRoot = () => expandHome(infra.gribsRoot || DEFAULT_ROOT)
 
   const settingsPath = () => path.join(server.getDataDirPath(), 'settings.json')
 
@@ -138,7 +137,7 @@ module.exports = (server: ServerAPI): Plugin => {
   const plugin: Plugin = {
     id: PLUGIN_ID,
     name: 'GRIB Downloader',
-    schema: () => buildSchema(defaultRoot()),
+    schema: () => buildSchema(DEFAULT_ROOT),
 
     start: (options: PluginSettings & AppSettings) => {
       infra = { gribsRoot: options?.gribsRoot, downloaderImage: options?.downloaderImage }
