@@ -89,3 +89,38 @@ export function downloaderSourceConfig(s: SourceSetting, dataRoot: string, bbox?
   }
   return entry
 }
+
+// Canonical fingerprint of the parameters that shape a source's downloaded
+// data — must mirror downloader.py's fetch_fingerprint/normalize_params
+// (floats rounded to 2 decimals, dict keys sorted, operational keys
+// excluded). Stored by the downloader in run markers; a run is only up to
+// date if its marker fingerprint matches the current settings.
+const FP_EXCLUDE = new Set(['name', 'model', 'directory', 'archive_runs', 'keep_runs'])
+
+function normalizeParams(v: unknown): unknown {
+  if (typeof v === 'number') return Number.isInteger(v) ? v : Math.round(v * 100) / 100
+  if (Array.isArray(v)) return v.map(normalizeParams)
+  if (v !== null && typeof v === 'object') {
+    const out: Record<string, unknown> = {}
+    for (const k of Object.keys(v as object).sort()) {
+      out[k] = normalizeParams((v as Record<string, unknown>)[k])
+    }
+    return out
+  }
+  return v
+}
+
+export function fetchFingerprint(s: SourceSetting, bbox?: Bbox): unknown {
+  const entry = downloaderSourceConfig(s, '', bbox)
+  const params: Record<string, unknown> = {}
+  for (const [k, v] of Object.entries(entry)) {
+    if (!FP_EXCLUDE.has(k)) params[k] = v
+  }
+  return normalizeParams(params)
+}
+
+export function fingerprintsEqual(a: unknown, b: unknown): boolean {
+  // Normalize both sides: the marker side comes from Python's json.dump
+  // and may differ in float formatting or key order.
+  return JSON.stringify(normalizeParams(a)) === JSON.stringify(normalizeParams(b))
+}

@@ -41,7 +41,7 @@ export interface SourceStatus {
   lastRun: string | null      // stamp of last completed run (from marker files)
   expectedRun: string         // stamp of the run that should be available now
   upToDate: boolean
-  bboxStale: boolean          // GFS: data on disk covers a different download area
+  configStale: boolean        // data on disk was fetched with different parameters (area, duration, …)
   running: boolean
   lastError: string | null
   lastOutcome: 'downloaded' | 'up-to-date' | 'unavailable' | 'failed' | null

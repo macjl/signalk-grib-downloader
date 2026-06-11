@@ -150,7 +150,7 @@ const I18N = {
     save: 'Enregistrer', saved: 'Enregistré ✓', dirty: 'Modifications non enregistrées',
     saveError: 'Erreur : ', downloadAll: 'Tout télécharger', download: '⬇',
     stUpToDate: 'à jour', stStale: 'en retard', stRunning: 'téléchargement…', stError: 'erreur',
-    stWaiting: 'attente publication', stZoneChanged: 'zone modifiée',
+    stWaiting: 'attente publication', stConfigChanged: 'config modifiée',
     stDisabled: 'désactivé', stNoData: 'aucune donnée',
     lastRun: 'dernier run', expected: 'attendu', confirmDelete: 'Supprimer cette source ?',
     lastAttempt: 'dernière tentative', noAttempt: 'aucune tentative depuis le démarrage', logTitle: 'Journal du dernier téléchargement',
@@ -170,7 +170,7 @@ const I18N = {
     save: 'Save', saved: 'Saved ✓', dirty: 'Unsaved changes',
     saveError: 'Error: ', downloadAll: 'Download all', download: '⬇',
     stUpToDate: 'up to date', stStale: 'behind', stRunning: 'downloading…', stError: 'error',
-    stWaiting: 'awaiting publication', stZoneChanged: 'area changed',
+    stWaiting: 'awaiting publication', stConfigChanged: 'settings changed',
     stDisabled: 'disabled', stNoData: 'no data',
     lastRun: 'last run', expected: 'expected', confirmDelete: 'Delete this source?',
     lastAttempt: 'last attempt', noAttempt: 'no attempt since startup', logTitle: 'Last download log',
@@ -311,7 +311,7 @@ function sourceStateBadge(s) {
   if (st.running) return `<span class="badge run">${t.stRunning}</span>`
   if (st.lastError) return `<span class="badge err" title="${st.lastError.replace(/"/g, '&quot;')}">${t.stError}</span>`
   if (st.upToDate) return `<span class="badge ok">${t.stUpToDate}</span>`
-  if (st.bboxStale) return `<span class="badge stale">${t.stZoneChanged}</span>`
+  if (st.configStale) return `<span class="badge stale">${t.stConfigChanged}</span>`
   // Not up to date: if the last attempt found nothing newer published
   // upstream, we are merely waiting — not behind.
   if (st.lastOutcome === 'unavailable' || st.lastOutcome === 'up-to-date') {
@@ -343,6 +343,7 @@ function renderSources() {
 
     const card = document.createElement('div')
     card.className = 'src-card'
+    card.dataset.name = name
     card.innerHTML = `
       <div class="src-main">
         <input type="checkbox" ${s.enabled !== false ? 'checked' : ''} data-f="enabled">
@@ -352,7 +353,7 @@ function renderSources() {
         </select>
         <code style="font-size:12px;color:#9fb0c5">${name}</code>
         <span style="flex:1"></span>
-        ${sourceStateBadge(s)}
+        <span class="badge-slot">${sourceStateBadge(s)}</span>
         <span class="row-actions">
           <button class="small" data-act="dl" title="${t.download}">⬇</button>
           <button class="small secondary" data-act="more">${expanded.has(name) ? '▾' : '▸'}</button>
@@ -372,7 +373,8 @@ function renderSources() {
                  style="width:52px;display:inline-block">
         </span>
       </div>
-      <div class="src-status" style="padding-left:24px">${sourceStatusLine(s)}</div>`
+      <div class="src-status" style="padding-left:24px">${sourceStatusLine(s)}</div>
+      <div class="src-details"></div>`
 
     card.querySelectorAll('[data-f]').forEach(el => {
       const f = el.dataset.f
@@ -405,9 +407,10 @@ function renderSources() {
       })
     })
     card.querySelector('[data-act="dl"]').addEventListener('click', () => triggerDownload(name))
-    card.querySelector('[data-act="more"]').addEventListener('click', () => {
+    card.querySelector('[data-act="more"]').addEventListener('click', (e) => {
       expanded.has(name) ? expanded.delete(name) : expanded.add(name)
-      renderSources()
+      e.target.textContent = expanded.has(name) ? '▾' : '▸'
+      fillDetails(card, name)
     })
     card.querySelector('[data-act="del"]').addEventListener('click', () => {
       if (!confirm(t.confirmDelete)) return
@@ -416,22 +419,8 @@ function renderSources() {
       renderSources()
       markDirty()
     })
+    fillDetails(card, name)
     list.appendChild(card)
-
-    const st = statusBySource[name]
-    if (st && (st.running || expanded.has(name))) {
-      const det = document.createElement('div')
-      const when = st.lastFinishedAt
-        ? `${t.lastAttempt} : ${new Date(st.lastFinishedAt).toLocaleString()}`
-        : (st.running ? '' : t.noAttempt)
-      const err = st.lastError
-        ? `<div style="color:#e37f8a;font-size:12px;margin-top:4px">⚠ ${st.lastError}</div>` : ''
-      const logHtml = st.lastLog?.length
-        ? `<div class="log">${st.lastLog.map(l => l.replace(/</g, '&lt;')).join('\n')}</div>`
-        : ''
-      det.innerHTML = `<div style="font-size:11px;color:#9fb0c5;padding-left:24px">${t.logTitle} — ${when}</div>${err}${logHtml}`
-      list.appendChild(det)
-    }
   })
   document.getElementById('total-vol').innerHTML =
     `${t.totalVol} <b>≈ ${fmtVol(totalMB)}</b> ${t.perRun}`
@@ -497,6 +486,39 @@ document.getElementById('btn-save').addEventListener('click', async () => {
 })
 
 // ── Polling ──────────────────────────────────────────────────────────────────
+function fillDetails(card, name) {
+  const slot = card.querySelector('.src-details')
+  if (!slot) return
+  const st = statusBySource[name]
+  if (!st || (!st.running && !expanded.has(name))) { slot.innerHTML = ''; return }
+  const when = st.lastFinishedAt
+    ? `${t.lastAttempt} : ${new Date(st.lastFinishedAt).toLocaleString()}`
+    : (st.running ? '' : t.noAttempt)
+  const err = st.lastError
+    ? `<div style="color:#e37f8a;font-size:12px;margin-top:4px">⚠ ${st.lastError}</div>` : ''
+  const logHtml = st.lastLog?.length
+    ? `<div class="log">${st.lastLog.map(l => l.replace(/</g, '&lt;')).join('\n')}</div>`
+    : ''
+  slot.innerHTML = `<div style="font-size:11px;color:#9fb0c5;padding-left:24px;margin-top:4px">${t.logTitle} — ${when}</div>${err}${logHtml}`
+}
+
+// Refresh only the dynamic parts of each card — badges, status line,
+// details. Never rebuilds inputs, so a slider drag or focused field
+// survives the polling cycle.
+function updateStatusUI() {
+  const list = document.getElementById('src-list')
+  for (const s of config.sources) {
+    const name = dirName(s)
+    const card = list.querySelector(`.src-card[data-name="${name}"]`)
+    if (!card) continue
+    const badgeSlot = card.querySelector('.badge-slot')
+    if (badgeSlot) badgeSlot.innerHTML = sourceStateBadge(s)
+    const statusLine = card.querySelector('.src-status')
+    if (statusLine) statusLine.textContent = sourceStatusLine(s)
+    fillDetails(card, name)
+  }
+}
+
 async function pollStatus() {
   try {
     const r = await fetch(`${API}/status`)
@@ -504,7 +526,7 @@ async function pollStatus() {
     const data = await r.json()
     statusBySource = {}
     for (const s of data.sources) statusBySource[s.name] = s
-    if (!dirty) renderSources()  // don't clobber unsaved edits' focus
+    updateStatusUI()
   } catch { /* server unreachable — keep last state */ }
 }
 

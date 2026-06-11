@@ -1,7 +1,7 @@
 import * as fs from 'fs'
 import * as path from 'path'
 import { Bbox, SourceSetting, SourceStatus } from './types'
-import { downloaderSourceConfig, expectedRunStamp, sourceDirName, MODEL_MAX_HOURS } from './scheduler'
+import { downloaderSourceConfig, expectedRunStamp, fetchFingerprint, fingerprintsEqual, sourceDirName, MODEL_MAX_HOURS } from './scheduler'
 
 const PLUGIN_ID = 'signalk-grib-downloader'
 const JOB_TIMEOUT_S = 3600
@@ -45,30 +45,26 @@ export class Orchestrator {
     return this.sources.filter(s => s.enabled !== false)
   }
 
-  // Bbox recorded in the marker of the latest completed run (GFS only).
-  private markerBbox(source: SourceSetting, stamp: string): number[] | null {
+  // Fetch-parameter fingerprint recorded in a run marker, or null
+  // (legacy/empty markers — treated as a parameter change).
+  private markerParams(source: SourceSetting, stamp: string): unknown {
     try {
       const p = path.join(this.gribsRoot, sourceDirName(source), `.run-${stamp}.complete`)
       const content = fs.readFileSync(p, 'utf-8').trim()
       if (!content) return null
-      const b = JSON.parse(content).bbox
-      return Array.isArray(b) && b.length === 4 ? b : null
+      return JSON.parse(content).params ?? null
     } catch {
       return null
     }
   }
 
-  // GFS data is bbox-subsetted: it only matches the settings if it was
-  // downloaded for the currently configured area.
-  private bboxOk(source: SourceSetting, stamp: string | null): boolean {
-    if (source.model !== 'gfs' || stamp === null) return true
-    const stored = this.markerBbox(source, stamp)
-    const cur = this.bbox
-      ? [this.bbox.latMin, this.bbox.lonMin, this.bbox.latMax, this.bbox.lonMax]
-      : null
-    if (stored === null && cur === null) return true
-    if (stored === null || cur === null) return false
-    return stored.every((v, i) => Math.abs(v - cur![i]) < 0.01)
+  // A run only matches the settings if it was downloaded with the same
+  // fetch parameters (area, duration, groups, variables, …).
+  private paramsOk(source: SourceSetting, stamp: string | null): boolean {
+    if (stamp === null) return true
+    const stored = this.markerParams(source, stamp)
+    if (stored === null) return false
+    return fingerprintsEqual(stored, fetchFingerprint(source, this.bbox))
   }
 
   // Latest completed run stamp, read from the downloader's marker files.
@@ -90,15 +86,15 @@ export class Orchestrator {
       const st = this.states.get(name)!
       const lastRun = this.lastRunStamp(s)
       const expected = expectedRunStamp(s.model)
-      const bboxOk = this.bboxOk(s, lastRun)
+      const paramsOk = this.paramsOk(s, lastRun)
       return {
         name,
         model: s.model,
         enabled: s.enabled !== false,
         lastRun,
         expectedRun: expected,
-        upToDate: lastRun !== null && lastRun >= expected && bboxOk,
-        bboxStale: lastRun !== null && !bboxOk,
+        upToDate: lastRun !== null && lastRun >= expected && paramsOk,
+        configStale: lastRun !== null && !paramsOk,
         running: st.running,
         lastError: st.lastError,
         lastOutcome: st.lastOutcome,
@@ -112,7 +108,7 @@ export class Orchestrator {
   staleSources(): SourceSetting[] {
     return this.enabledSources().filter(s => {
       const last = this.lastRunStamp(s)
-      return last === null || last < expectedRunStamp(s.model) || !this.bboxOk(s, last)
+      return last === null || last < expectedRunStamp(s.model) || !this.paramsOk(s, last)
     })
   }
 
