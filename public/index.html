@@ -93,8 +93,9 @@
       <table id="src-table">
         <thead>
           <tr>
-            <th></th><th data-i18n="thName">Nom</th><th data-i18n="thModel">Modèle</th>
+            <th></th><th data-i18n="thModel">Modèle</th>
             <th data-i18n="thRes">Résol.</th><th data-i18n="thHours">Durée (h)</th>
+            <th data-i18n="thDir">Répertoire</th>
             <th data-i18n="thState">État</th><th></th>
           </tr>
         </thead>
@@ -136,7 +137,7 @@ const I18N = {
     title: 'GRIB Downloader', auto: 'Auto', manual: 'Manuel',
     autoDesc: 'télécharge après chaque run', manualDesc: 'téléchargement à la demande',
     checkEvery: 'Vérifier toutes les', sources: 'Sources',
-    thName: 'Nom', thModel: 'Modèle', thRes: 'Résol.', thHours: 'Durée (h)', thState: 'État',
+    thModel: 'Modèle', thRes: 'Résol.', thHours: 'Durée (h)', thDir: 'Répertoire', thState: 'État',
     addSource: '+ Ajouter une source', zone: 'Zone de téléchargement (GFS)',
     zoneHint: 'Glissez les coins du rectangle sur la carte — appliqué aux modèles avec découpe serveur (GFS). AROME / Arpège / ICON distribuent leur domaine entier.',
     north: 'Nord', south: 'Sud', west: 'Ouest', east: 'Est',
@@ -151,7 +152,7 @@ const I18N = {
     title: 'GRIB Downloader', auto: 'Auto', manual: 'Manual',
     autoDesc: 'downloads after each model run', manualDesc: 'download on demand',
     checkEvery: 'Check every', sources: 'Sources',
-    thName: 'Name', thModel: 'Model', thRes: 'Res.', thHours: 'Hours', thState: 'State',
+    thModel: 'Model', thRes: 'Res.', thHours: 'Hours', thDir: 'Directory', thState: 'State',
     addSource: '+ Add source', zone: 'Download area (GFS)',
     zoneHint: 'Drag the rectangle corners on the map — applies to models with server-side subsetting (GFS). AROME / Arpège / ICON distribute their whole domain.',
     north: 'North', south: 'South', west: 'West', east: 'East',
@@ -254,8 +255,15 @@ function refreshRect(fit) {
 })
 
 // ── Sources table ────────────────────────────────────────────────────────────
+// Directory name derived from model+resolution — the contract with the provider.
+const DEFAULT_RES = { gfs: '0p25', arome: '0025', arpege: '01', 'icon-eu': null }
+function dirName(s) {
+  const res = s.resolution || DEFAULT_RES[s.model]
+  return res ? `${s.model}-${res}` : s.model
+}
+
 function sourceStateBadge(s) {
-  const st = statusBySource[s.name]
+  const st = statusBySource[dirName(s)]
   if (s.enabled === false) return `<span class="badge off">${t.stDisabled}</span>`
   if (!st) return ''
   if (st.running) return `<span class="badge run">${t.stRunning}</span>`
@@ -267,7 +275,7 @@ function sourceStateBadge(s) {
 }
 
 function sourceStatusLine(s) {
-  const st = statusBySource[s.name]
+  const st = statusBySource[dirName(s)]
   if (!st || !st.lastRun) return ''
   let line = `${t.lastRun}: ${st.lastRun}`
   if (!st.upToDate) line += ` — ${t.expected}: ${st.expectedRun}`
@@ -283,12 +291,12 @@ function renderSources() {
     const resOpts = MODELS[s.model]?.resolutions ?? []
     tr.innerHTML = `
       <td><input type="checkbox" ${s.enabled !== false ? 'checked' : ''} data-f="enabled"></td>
-      <td><input value="${s.name ?? ''}" data-f="name" style="width:95px"></td>
       <td><select data-f="model">${Object.keys(MODELS).map(m => `<option ${m === s.model ? 'selected' : ''}>${m}</option>`).join('')}</select></td>
       <td><select data-f="resolution" ${resOpts.length === 0 ? 'disabled' : ''}>
         ${resOpts.map(r => `<option ${r === s.resolution ? 'selected' : ''}>${r}</option>`).join('')}
       </select></td>
       <td><input type="number" value="${s.hours ?? MODELS[s.model]?.maxHours ?? ''}" min="3" max="${MODELS[s.model]?.maxHours ?? 384}" data-f="hours" style="width:65px"></td>
+      <td><code style="font-size:12px;color:#9fb0c5">${dirName(s)}</code></td>
       <td>${sourceStateBadge(s)}<div class="src-status">${sourceStatusLine(s)}</div></td>
       <td class="row-actions">
         <button class="small" data-act="dl" title="${t.download}">⬇</button>
@@ -309,13 +317,13 @@ function renderSources() {
         markDirty()
       })
     })
-    tr.querySelector('[data-act="dl"]').addEventListener('click', () => triggerDownload(s.name))
+    tr.querySelector('[data-act="dl"]').addEventListener('click', () => triggerDownload(dirName(s)))
     tr.querySelector('[data-act="del"]').addEventListener('click', () => {
       if (confirm(t.confirmDelete)) { config.sources.splice(idx, 1); renderSources(); markDirty() }
     })
     body.appendChild(tr)
 
-    const st = statusBySource[s.name]
+    const st = statusBySource[dirName(s)]
     if (st && st.running && st.lastLog?.length) {
       const logTr = document.createElement('tr')
       logTr.innerHTML = `<td colspan="7"><div class="log">${st.lastLog.join('\n')}</div></td>`
@@ -325,7 +333,7 @@ function renderSources() {
 }
 
 document.getElementById('btn-add').addEventListener('click', () => {
-  config.sources.push({ name: '', model: 'gfs', resolution: '0p25', hours: 384, enabled: true })
+  config.sources.push({ model: 'gfs', resolution: '0p25', hours: 384, enabled: true })
   renderSources()
   markDirty()
 })

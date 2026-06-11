@@ -1,5 +1,6 @@
 import { Plugin, ServerAPI } from '@signalk/server-api'
 import { Orchestrator } from './orchestrator'
+import { sourceDirName } from './scheduler'
 import { PluginSettings } from './types'
 
 const PLUGIN_ID = 'signalk-grib-downloader'
@@ -55,13 +56,8 @@ const CONFIG_SCHEMA = {
       title: 'Sources',
       items: {
         type: 'object',
-        required: ['name', 'model'],
+        required: ['model'],
         properties: {
-          name: {
-            type: 'string',
-            title: 'Source ID',
-            description: 'Also the subdirectory name under the GRIB root (e.g. "gfs-025")',
-          },
           model: {
             type: 'string',
             title: 'Model',
@@ -170,12 +166,13 @@ module.exports = (server: ServerAPI): Plugin => {
         if (!options || typeof options !== 'object') {
           return res.status(400).json({ error: 'invalid configuration' })
         }
-        const names = (options.sources ?? []).map(s => s.name)
-        if (names.some(n => !n || !/^[A-Za-z0-9._-]+$/.test(n))) {
-          return res.status(400).json({ error: 'source names must be non-empty and URL-safe' })
+        const valid = ['gfs', 'arome', 'arpege', 'icon-eu']
+        if ((options.sources ?? []).some(s => !valid.includes(s.model))) {
+          return res.status(400).json({ error: `model must be one of: ${valid.join(', ')}` })
         }
+        const names = (options.sources ?? []).map(s => sourceDirName(s))
         if (new Set(names).size !== names.length) {
-          return res.status(400).json({ error: 'source names must be unique' })
+          return res.status(400).json({ error: 'duplicate source: each (model, resolution) pair must be unique' })
         }
         ;(server as any).savePluginOptions(options, (err: unknown) => {
           if (err) return res.status(500).json({ error: String(err) })
@@ -190,8 +187,8 @@ module.exports = (server: ServerAPI): Plugin => {
         const stale = orchestrator.staleSources()
         orchestrator.downloadAll().catch(err => server.debug(`download error: ${err}`))
         res.status(202).json({
-          started: orchestrator.enabledSources().map(s => s.name),
-          behind: stale.map(s => s.name),
+          started: orchestrator.enabledSources().map(sourceDirName),
+          behind: stale.map(sourceDirName),
         })
       })
 
@@ -200,7 +197,7 @@ module.exports = (server: ServerAPI): Plugin => {
         const source = orchestrator.findSource(req.params.name)
         if (!source) return res.status(404).json({ error: `no source named ${req.params.name}` })
         orchestrator.downloadSource(source).catch(err => server.debug(`download error: ${err}`))
-        res.status(202).json({ started: [source.name] })
+        res.status(202).json({ started: [sourceDirName(source)] })
       })
     },
   }

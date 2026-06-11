@@ -41,6 +41,14 @@ export function defaultResolution(model: ModelId): string | undefined {
   return undefined
 }
 
+// Directory name (and source ID): <model>[-<resolution>].
+// This is the contract with signalk-grib-weather-provider, which discovers
+// subdirectories of the shared root and serves each as a weather provider.
+export function sourceDirName(s: SourceSetting): string {
+  const res = s.resolution || defaultResolution(s.model)
+  return res ? `${s.model}-${res}` : s.model
+}
+
 // Stamp ("YYYYMMDDTHH") of the most recent run expected to be fully
 // published at `now`, per the model's cadence and publication delay.
 export function expectedRunStamp(model: ModelId, now: Date = new Date()): string {
@@ -59,10 +67,11 @@ export function downloaderSourceConfig(s: SourceSetting, dataRoot: string, bbox?
   const model = s.model
   const res = s.resolution || defaultResolution(model)
   const hours = Math.min(s.hours ?? MODEL_MAX_HOURS[model], MODEL_MAX_HOURS[model])
+  const dirName = sourceDirName(s)
   const entry: Record<string, unknown> = {
-    name: s.name,
+    name: dirName,
     model,
-    directory: `${dataRoot}/${s.name}`,
+    directory: `${dataRoot}/${dirName}`,
     keep_runs: 1,
   }
   if (model === 'gfs') {

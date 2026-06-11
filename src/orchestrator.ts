@@ -1,7 +1,7 @@
 import * as fs from 'fs'
 import * as path from 'path'
 import { Bbox, SourceSetting, SourceStatus } from './types'
-import { downloaderSourceConfig, expectedRunStamp, MODEL_MAX_HOURS } from './scheduler'
+import { downloaderSourceConfig, expectedRunStamp, sourceDirName, MODEL_MAX_HOURS } from './scheduler'
 
 const PLUGIN_ID = 'signalk-grib-downloader'
 const JOB_TIMEOUT_S = 3600
@@ -28,7 +28,7 @@ export class Orchestrator {
     private bbox?: Bbox
   ) {
     for (const s of sources) {
-      this.states.set(s.name, {
+      this.states.set(sourceDirName(s), {
         running: false, lastError: null, lastFinishedAt: null, lastLog: [],
       })
     }
@@ -44,7 +44,7 @@ export class Orchestrator {
 
   // Latest completed run stamp, read from the downloader's marker files.
   lastRunStamp(source: SourceSetting): string | null {
-    const dir = path.join(this.gribsRoot, source.name)
+    const dir = path.join(this.gribsRoot, sourceDirName(source))
     try {
       const stamps = fs.readdirSync(dir)
         .map(f => /^\.run-(\d{8}T\d{2})\.complete$/.exec(f)?.[1])
@@ -57,11 +57,12 @@ export class Orchestrator {
 
   status(): SourceStatus[] {
     return this.sources.map(s => {
-      const st = this.states.get(s.name)!
+      const name = sourceDirName(s)
+      const st = this.states.get(name)!
       const lastRun = this.lastRunStamp(s)
       const expected = expectedRunStamp(s.model)
       return {
-        name: s.name,
+        name,
         model: s.model,
         enabled: s.enabled !== false,
         lastRun,
@@ -100,7 +101,8 @@ export class Orchestrator {
   // Download one source (no-op if its job is already running).
   // Returns true if a job was executed.
   async downloadSource(source: SourceSetting): Promise<boolean> {
-    const st = this.states.get(source.name)!
+    const name = sourceDirName(source)
+    const st = this.states.get(name)!
     if (st.running) return false
 
     const containers = this.containers()
@@ -120,14 +122,14 @@ export class Orchestrator {
     const dataRootInJob = rData.subPath ? `/data/${rData.subPath}` : '/data'
     const cfgInJob = (rCfg.subPath ? `/cfg/${rCfg.subPath}` : '/cfg') + '/downloader-config.json'
 
-    fs.mkdirSync(path.join(this.gribsRoot, source.name), { recursive: true })
+    fs.mkdirSync(path.join(this.gribsRoot, name), { recursive: true })
     this.writeConfig(dataRootInJob)
 
     st.running = true
     st.lastError = null
     st.lastLog = []
     this.onChange()
-    this.log(`${source.name}: starting download job`)
+    this.log(`${name}: starting download job`)
 
     try {
       const result = await containers.runJob({
@@ -135,29 +137,29 @@ export class Orchestrator {
         command: [
           'python3', '/app/downloader.py',
           '--config', cfgInJob,
-          '--once', '--source', source.name,
+          '--once', '--source', name,
         ],
         inputs:  { '/cfg': rCfg.source },
         outputs: { '/data': rData.source },
         timeout: JOB_TIMEOUT_S,
         ownerPluginId: PLUGIN_ID,
-        label: `grib-download ${source.name}`,
+        label: `grib-download ${name}`,
         onProgress: (line: string) => {
           st.lastLog.push(line)
           if (st.lastLog.length > LOG_TAIL) st.lastLog.shift()
-          this.log(`  ${source.name}: ${line}`)
+          this.log(`  ${name}: ${line}`)
         },
       })
       if (result.status !== 'completed' || result.exitCode !== 0) {
         st.lastError = `job ${result.status} (exit ${result.exitCode}): ${result.log?.slice(-3).join(' | ')}`
-        this.log(`${source.name}: ${st.lastError}`)
+        this.log(`${name}: ${st.lastError}`)
       } else {
-        this.log(`${source.name}: download job finished`)
+        this.log(`${name}: download job finished`)
       }
       return true
     } catch (err) {
       st.lastError = String(err)
-      this.log(`${source.name}: job error: ${err}`)
+      this.log(`${name}: job error: ${err}`)
       return false
     } finally {
       st.running = false
@@ -175,15 +177,15 @@ export class Orchestrator {
 
   // Auto-mode tick: download every source whose expected run is missing.
   async tick(): Promise<void> {
-    const stale = this.staleSources().filter(s => !this.states.get(s.name)!.running)
+    const stale = this.staleSources().filter(s => !this.states.get(sourceDirName(s))!.running)
     if (stale.length > 0) {
-      this.log(`auto: ${stale.length} source(s) behind: ${stale.map(s => s.name).join(', ')}`)
+      this.log(`auto: ${stale.length} source(s) behind: ${stale.map(s => sourceDirName(s)).join(', ')}`)
       await this.downloadAll(stale)
     }
   }
 
   findSource(name: string): SourceSetting | undefined {
-    return this.sources.find(s => s.name === name)
+    return this.sources.find(s => sourceDirName(s) === name)
   }
 
   maxHours(model: SourceSetting['model']): number {
