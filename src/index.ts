@@ -1,4 +1,5 @@
 import * as fs from 'fs'
+import * as os from 'os'
 import * as path from 'path'
 import { Plugin, ServerAPI } from '@signalk/server-api'
 import { Orchestrator } from './orchestrator'
@@ -7,13 +8,19 @@ import { AppSettings, PluginSettings } from './types'
 
 const PLUGIN_ID = 'signalk-grib-downloader'
 const DEFAULT_IMAGE = 'ghcr.io/macjl/grib-downloader:latest'
-const DEFAULT_ROOT = '/tmp/gribs'
+
+// "~/gribs" is not expanded by Node — resolve it ourselves.
+function expandHome(p: string): string {
+  if (p === '~') return os.homedir()
+  if (p.startsWith('~/')) return path.join(os.homedir(), p.slice(2))
+  return p
+}
 
 // The plugin config panel only holds infrastructure settings. Everything
 // operational (mode, area, sources, interval) is managed in the webapp at
 // /signalk-grib-downloader/ and stored in <dataDir>/settings.json — the
 // admin form cannot clobber it.
-const CONFIG_SCHEMA = {
+const buildSchema = (defaultRoot: string) => ({
   type: 'object',
   description:
     'Sources, download area, auto/manual mode and scheduling are managed in ' +
@@ -25,8 +32,10 @@ const CONFIG_SCHEMA = {
       description:
         'Each source downloads into <root>/<model>-<resolution>. Point the ' +
         'signalk-grib-weather-provider root at the same directory. ' +
-        'Must be reachable from the container runtime.',
-      default: DEFAULT_ROOT,
+        'When SignalK runs in a container, the path must live inside a ' +
+        'mounted volume — the default (inside the SignalK data directory) ' +
+        'always works. "~" is expanded.',
+      default: defaultRoot,
     },
     downloaderImage: {
       type: 'string',
@@ -34,7 +43,7 @@ const CONFIG_SCHEMA = {
       default: DEFAULT_IMAGE,
     },
   },
-}
+})
 
 const DEFAULT_APP_SETTINGS: AppSettings = {
   mode: 'auto',
@@ -48,6 +57,10 @@ module.exports = (server: ServerAPI): Plugin => {
   let timer: ReturnType<typeof setInterval> | null = null
   let infra: PluginSettings = {}
   let settings: AppSettings = { ...DEFAULT_APP_SETTINGS }
+
+  // SignalK config dir = parent of plugin-config-data/<id>
+  const defaultRoot = () => path.resolve(server.getDataDirPath(), '..', '..', 'gribs')
+  const gribsRoot = () => expandHome(infra.gribsRoot || defaultRoot())
 
   const settingsPath = () => path.join(server.getDataDirPath(), 'settings.json')
 
@@ -96,7 +109,7 @@ module.exports = (server: ServerAPI): Plugin => {
     const sources = settings.sources ?? []
     orchestrator = new Orchestrator(
       sources,
-      infra.gribsRoot ?? DEFAULT_ROOT,
+      gribsRoot(),
       infra.downloaderImage ?? DEFAULT_IMAGE,
       server.getDataDirPath(),
       (msg: string) => server.debug(msg),
@@ -125,7 +138,7 @@ module.exports = (server: ServerAPI): Plugin => {
   const plugin: Plugin = {
     id: PLUGIN_ID,
     name: 'GRIB Downloader',
-    schema: () => CONFIG_SCHEMA,
+    schema: () => buildSchema(defaultRoot()),
 
     start: (options: PluginSettings & AppSettings) => {
       infra = { gribsRoot: options?.gribsRoot, downloaderImage: options?.downloaderImage }
@@ -196,7 +209,7 @@ module.exports = (server: ServerAPI): Plugin => {
         if (!/^[A-Za-z0-9._-]+$/.test(name)) {
           return res.status(400).json({ error: 'invalid source name' })
         }
-        const dir = path.join(infra.gribsRoot ?? DEFAULT_ROOT, name)
+        const dir = path.join(gribsRoot(), name)
         if (!fs.existsSync(dir)) return res.json({ ok: true, existed: false })
         fs.rm(dir, { recursive: true, force: true }, (err) => {
           if (err) return res.status(500).json({ error: String(err) })

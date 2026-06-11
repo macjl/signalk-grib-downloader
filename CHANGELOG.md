@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.1] — 2026-06-11
+
+### Fixed
+- `~` is now expanded in the GRIB root directory setting
+- The GRIB root defaults to `<signalk-config>/gribs` instead of `/tmp/gribs` — reachable from the container runtime on every deployment
+- The "path not reachable" error now explains the mounted-volume requirement
+
 ## [0.1.0] — 2026-06-11
 
 ### Added

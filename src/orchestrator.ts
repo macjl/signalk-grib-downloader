@@ -143,7 +143,11 @@ export class Orchestrator {
     const rData = await containers.resolveHostPath(this.gribsRoot)
     const rCfg = await containers.resolveHostPath(this.dataDir)
     if (!rData || !rCfg) {
-      st.lastError = `path not reachable from container runtime (${!rData ? this.gribsRoot : this.dataDir})`
+      const bad = !rData ? this.gribsRoot : this.dataDir
+      st.lastError =
+        `${bad} is not reachable from the container runtime. When SignalK ` +
+        `runs in a container, the GRIB root must live inside a mounted ` +
+        `volume — e.g. inside the SignalK data directory (the default).`
       this.onChange()
       return false
     }
