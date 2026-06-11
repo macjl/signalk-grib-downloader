@@ -7,9 +7,12 @@ const PLUGIN_ID = 'signalk-grib-downloader'
 const JOB_TIMEOUT_S = 3600
 const LOG_TAIL = 30
 
+type Outcome = 'downloaded' | 'up-to-date' | 'unavailable' | 'failed'
+
 interface SourceState {
   running: boolean
   lastError: string | null
+  lastOutcome: Outcome | null
   lastFinishedAt: string | null
   lastLog: string[]
 }
@@ -29,7 +32,7 @@ export class Orchestrator {
   ) {
     for (const s of sources) {
       this.states.set(sourceDirName(s), {
-        running: false, lastError: null, lastFinishedAt: null, lastLog: [],
+        running: false, lastError: null, lastOutcome: null, lastFinishedAt: null, lastLog: [],
       })
     }
   }
@@ -70,6 +73,7 @@ export class Orchestrator {
         upToDate: lastRun !== null && lastRun >= expected,
         running: st.running,
         lastError: st.lastError,
+        lastOutcome: st.lastOutcome,
         lastFinishedAt: st.lastFinishedAt,
         lastLog: st.lastLog,
       }
@@ -150,14 +154,23 @@ export class Orchestrator {
           this.log(`  ${name}: ${line}`)
         },
       })
+      // The downloader logs a final outcome line per source:
+      //   "HH:MM:SS INFO <name>: downloaded|up-to-date|unavailable|failed"
+      const outcomeRe = new RegExp(`INFO ${name}: (downloaded|up-to-date|unavailable|failed)\\s*$`)
+      for (let i = st.lastLog.length - 1; i >= 0; i--) {
+        const m = outcomeRe.exec(st.lastLog[i])
+        if (m) { st.lastOutcome = m[1] as Outcome; break }
+      }
       if (result.status !== 'completed' || result.exitCode !== 0) {
+        st.lastOutcome = 'failed'
         st.lastError = `job ${result.status} (exit ${result.exitCode}): ${result.log?.slice(-3).join(' | ')}`
         this.log(`${name}: ${st.lastError}`)
       } else {
-        this.log(`${name}: download job finished`)
+        this.log(`${name}: download job finished (${st.lastOutcome ?? 'outcome unknown'})`)
       }
       return true
     } catch (err) {
+      st.lastOutcome = 'failed'
       st.lastError = String(err)
       this.log(`${name}: job error: ${err}`)
       return false

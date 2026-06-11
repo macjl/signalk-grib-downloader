@@ -43,6 +43,7 @@ export interface SourceStatus {
   upToDate: boolean
   running: boolean
   lastError: string | null
+  lastOutcome: 'downloaded' | 'up-to-date' | 'unavailable' | 'failed' | null
   lastFinishedAt: string | null
   lastLog: string[]
 }

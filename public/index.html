@@ -54,6 +54,7 @@
     .badge.run   { background: #1d3a4d; color: #7fc4e3; }
     .badge.err   { background: #4d1d22; color: #e37f8a; }
     .badge.off   { background: #31425c; color: #9fb0c5; }
+    .badge.wait  { background: #243a52; color: #8fb8d8; }
 
     .src-status { font-size: 11px; color: #9fb0c5; margin-top: 2px; }
     .log { font-family: ui-monospace, monospace; font-size: 11px; background: #131c29; border-radius: 6px;
@@ -149,6 +150,7 @@ const I18N = {
     save: 'Enregistrer', saved: 'Enregistré ✓', dirty: 'Modifications non enregistrées',
     saveError: 'Erreur : ', downloadAll: 'Tout télécharger', download: '⬇',
     stUpToDate: 'à jour', stStale: 'en retard', stRunning: 'téléchargement…', stError: 'erreur',
+    stWaiting: 'attente publication',
     stDisabled: 'désactivé', stNoData: 'aucune donnée',
     lastRun: 'dernier run', expected: 'attendu', confirmDelete: 'Supprimer cette source ?',
     lastAttempt: 'dernière tentative', noAttempt: 'aucune tentative depuis le démarrage', logTitle: 'Journal du dernier téléchargement',
@@ -168,6 +170,7 @@ const I18N = {
     save: 'Save', saved: 'Saved ✓', dirty: 'Unsaved changes',
     saveError: 'Error: ', downloadAll: 'Download all', download: '⬇',
     stUpToDate: 'up to date', stStale: 'behind', stRunning: 'downloading…', stError: 'error',
+    stWaiting: 'awaiting publication',
     stDisabled: 'disabled', stNoData: 'no data',
     lastRun: 'last run', expected: 'expected', confirmDelete: 'Delete this source?',
     lastAttempt: 'last attempt', noAttempt: 'no attempt since startup', logTitle: 'Last download log',
@@ -307,10 +310,14 @@ function sourceStateBadge(s) {
   if (!st) return ''
   if (st.running) return `<span class="badge run">${t.stRunning}</span>`
   if (st.lastError) return `<span class="badge err" title="${st.lastError.replace(/"/g, '&quot;')}">${t.stError}</span>`
+  if (st.upToDate) return `<span class="badge ok">${t.stUpToDate}</span>`
+  // Not up to date: if the last attempt found nothing newer published
+  // upstream, we are merely waiting — not behind.
+  if (st.lastOutcome === 'unavailable' || st.lastOutcome === 'up-to-date') {
+    return `<span class="badge wait">${t.stWaiting}</span>`
+  }
   if (!st.lastRun) return `<span class="badge stale">${t.stNoData}</span>`
-  return st.upToDate
-    ? `<span class="badge ok">${t.stUpToDate}</span>`
-    : `<span class="badge stale">${t.stStale}</span>`
+  return `<span class="badge stale">${t.stStale}</span>`
 }
 
 function sourceStatusLine(s) {
