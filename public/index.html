@@ -8,7 +8,7 @@
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     html, body { height: 100%; font-family: system-ui, -apple-system, sans-serif; background: #1a2535; color: #e8edf4; }
-    #layout { display: grid; grid-template-columns: minmax(420px, 540px) 1fr; height: 100%; }
+    #layout { display: grid; grid-template-columns: minmax(470px, 620px) 1fr; height: 100%; }
     @media (max-width: 900px) { #layout { grid-template-columns: 1fr; grid-template-rows: auto 50vh; } }
 
     #side { overflow-y: auto; padding: 16px; }
@@ -64,6 +64,18 @@
     #save-note { font-size: 12px; color: #9fb0c5; }
     #save-note.dirty { color: #e3c47f; font-weight: 600; }
     .row-actions { display: flex; gap: 4px; }
+
+    .src-card { border-top: 1px solid rgba(255,255,255,0.07); padding: 8px 0 6px; }
+    .src-main { display: flex; align-items: center; gap: 8px; }
+    .src-main select { width: auto; }
+    .src-sub { display: flex; align-items: center; gap: 10px; margin-top: 7px; padding-left: 24px; }
+    .src-sub input[type="range"] { flex: 1; accent-color: #4d9fff; padding: 0; }
+    .hours-label { font-size: 12px; color: #e8edf4; white-space: nowrap; min-width: 110px; }
+    .hours-label .max { color: #9fb0c5; }
+    .hours-label.at-max { color: #7fe39a; font-weight: 600; }
+    .vol { font-size: 12px; color: #e3c47f; white-space: nowrap; min-width: 70px; text-align: right; }
+    #total-vol { font-size: 12px; color: #9fb0c5; margin-top: 8px; text-align: right; }
+    #total-vol b { color: #e3c47f; }
   </style>
 </head>
 <body>
@@ -90,18 +102,11 @@
 
     <h2 data-i18n="sources">Sources</h2>
     <div class="card">
-      <table id="src-table">
-        <thead>
-          <tr>
-            <th></th><th data-i18n="thModel">Modèle</th>
-            <th data-i18n="thRes">Résol.</th><th data-i18n="thHours">Durée (h)</th>
-            <th data-i18n="thDir">Répertoire</th>
-            <th data-i18n="thState">État</th><th></th>
-          </tr>
-        </thead>
-        <tbody id="src-body"></tbody>
-      </table>
-      <div style="margin-top:8px"><button class="secondary small" id="btn-add" data-i18n="addSource">+ Ajouter une source</button></div>
+      <div id="src-list"></div>
+      <div style="margin-top:8px; display:flex; align-items:center;">
+        <button class="secondary small" id="btn-add" data-i18n="addSource">+ Ajouter une source</button>
+        <div id="total-vol" style="flex:1; margin-top:0"></div>
+      </div>
     </div>
 
     <h2 data-i18n="zone">Zone de téléchargement (GFS)</h2>
@@ -147,6 +152,7 @@ const I18N = {
     stDisabled: 'désactivé', stNoData: 'aucune donnée',
     lastRun: 'dernier run', expected: 'attendu', confirmDelete: 'Supprimer cette source ?',
     lastAttempt: 'dernière tentative', noAttempt: 'aucune tentative depuis le démarrage', logTitle: 'Journal du dernier téléchargement',
+    maxLbl: 'max', totalVol: 'Volume estimé par run :', perRun: '/ run',
     loginRequired: 'Connexion requise — <a href="/admin/#/login" style="color:#7fc4e3">connectez-vous à SignalK</a> puis rechargez cette page.',
   },
   en: {
@@ -163,6 +169,7 @@ const I18N = {
     stDisabled: 'disabled', stNoData: 'no data',
     lastRun: 'last run', expected: 'expected', confirmDelete: 'Delete this source?',
     lastAttempt: 'last attempt', noAttempt: 'no attempt since startup', logTitle: 'Last download log',
+    maxLbl: 'max', totalVol: 'Estimated volume per run:', perRun: '/ run',
     loginRequired: 'Login required — <a href="/admin/#/login" style="color:#7fc4e3">log in to SignalK</a> and reload this page.',
   },
 }
@@ -172,10 +179,32 @@ document.querySelectorAll('[data-i18n]').forEach(el => { el.textContent = t[el.d
 // ── Constants ────────────────────────────────────────────────────────────────
 const API = '/plugins/signalk-grib-downloader'
 const MODELS = {
-  gfs:       { resolutions: ['0p25', '0p50', '1p00'], maxHours: 384 },
-  arome:     { resolutions: ['0025', '001'],          maxHours: 51 },
-  arpege:    { resolutions: ['01', '025'],            maxHours: 102 },
-  'icon-eu': { resolutions: [],                       maxHours: 120 },
+  gfs:       { resolutions: ['0p25', '0p50', '1p00'], maxHours: 384, sliderStep: 3 },
+  arome:     { resolutions: ['0025', '001'],          maxHours: 51,  sliderStep: 1 },
+  arpege:    { resolutions: ['01', '025'],            maxHours: 102, sliderStep: 1 },
+  'icon-eu': { resolutions: [],                       maxHours: 120, sliderStep: 3 },
+}
+
+// Volume estimation (MB) — constants measured on real downloads.
+// GFS is bbox-subsetted server-side: size ∝ grid points × steps.
+function estimateMB(s) {
+  const hours = s.hours ?? MODELS[s.model].maxHours
+  if (s.model === 'gfs') {
+    const deg = { '0p25': 0.25, '0p50': 0.5, '1p00': 1 }[s.resolution || '0p25'] || 0.25
+    const b = config.bbox || { latMin: 35, lonMin: -6, latMax: 45, lonMax: 17 }
+    const pts = (Math.abs(b.latMax - b.latMin) / deg + 1) * (Math.abs(b.lonMax - b.lonMin) / deg + 1)
+    return pts * 15 * (Math.floor(hours / 3) + 1) / 1048576
+  }
+  if (s.model === 'icon-eu') return (Math.floor(hours / 3) + 1) * 13.8
+  if (s.model === 'arome')   return hours * (s.resolution === '001' ? 53 : 8.6)
+  if (s.model === 'arpege')  return hours * (s.resolution === '025' ? 10.6 : 6.2)
+  return 0
+}
+
+function fmtVol(mb) {
+  if (mb >= 1024) return (mb / 1024).toFixed(1) + ' GB'
+  if (mb >= 1)    return Math.round(mb) + ' MB'
+  return Math.max(1, Math.round(mb * 1024)) + ' kB'
 }
 
 // ── State ────────────────────────────────────────────────────────────────────
@@ -235,6 +264,7 @@ function refreshRect(fit) {
       }
       rect.setBounds([[config.bbox.latMin, config.bbox.lonMin], [config.bbox.latMax, config.bbox.lonMax]])
       bboxToInputs(config.bbox)
+      renderSources()  // GFS volume estimation depends on the bbox
       markDirty()
     }
     swMarker.on('drag', onDrag); neMarker.on('drag', onDrag)
@@ -253,6 +283,7 @@ function refreshRect(fit) {
     if ([b.latMin, b.lonMin, b.latMax, b.lonMax].some(isNaN)) return
     config.bbox = b
     refreshRect(false)
+    renderSources()
     markDirty()
   })
 })
@@ -286,55 +317,87 @@ function sourceStatusLine(s) {
 }
 
 function renderSources() {
-  const body = document.getElementById('src-body')
-  body.innerHTML = ''
+  const list = document.getElementById('src-list')
+  list.innerHTML = ''
+  let totalMB = 0
   config.sources.forEach((s, idx) => {
-    const tr = document.createElement('tr')
-    tr.className = 'src-row'
-    const resOpts = MODELS[s.model]?.resolutions ?? []
-    tr.innerHTML = `
-      <td><input type="checkbox" ${s.enabled !== false ? 'checked' : ''} data-f="enabled"></td>
-      <td><select data-f="model">${Object.keys(MODELS).map(m => `<option ${m === s.model ? 'selected' : ''}>${m}</option>`).join('')}</select></td>
-      <td><select data-f="resolution" ${resOpts.length === 0 ? 'disabled' : ''}>
-        ${resOpts.map(r => `<option ${r === s.resolution ? 'selected' : ''}>${r}</option>`).join('')}
-      </select></td>
-      <td><input type="number" value="${s.hours ?? MODELS[s.model]?.maxHours ?? ''}" min="3" max="${MODELS[s.model]?.maxHours ?? 384}" data-f="hours" style="width:65px"></td>
-      <td><code style="font-size:12px;color:#9fb0c5">${dirName(s)}</code></td>
-      <td>${sourceStateBadge(s)}<div class="src-status">${sourceStatusLine(s)}</div></td>
-      <td class="row-actions">
-        <button class="small" data-act="dl" title="${t.download}">⬇</button>
-        <button class="small secondary" data-act="more">${expanded.has(dirName(s)) ? '▾' : '▸'}</button>
-        <button class="small danger" data-act="del">✕</button>
-      </td>`
+    const name = dirName(s)
+    const model = MODELS[s.model] || MODELS.gfs
+    const resOpts = model.resolutions
+    const hours = s.hours ?? model.maxHours
+    const mb = (s.enabled !== false) ? estimateMB(s) : 0
+    totalMB += mb
 
-    tr.querySelectorAll('[data-f]').forEach(el => {
+    const card = document.createElement('div')
+    card.className = 'src-card'
+    card.innerHTML = `
+      <div class="src-main">
+        <input type="checkbox" ${s.enabled !== false ? 'checked' : ''} data-f="enabled">
+        <select data-f="model">${Object.keys(MODELS).map(m => `<option ${m === s.model ? 'selected' : ''}>${m}</option>`).join('')}</select>
+        <select data-f="resolution" ${resOpts.length === 0 ? 'disabled' : ''}>
+          ${resOpts.map(r => `<option ${r === s.resolution ? 'selected' : ''}>${r}</option>`).join('')}
+        </select>
+        <code style="font-size:12px;color:#9fb0c5">${name}</code>
+        <span style="flex:1"></span>
+        ${sourceStateBadge(s)}
+        <span class="row-actions">
+          <button class="small" data-act="dl" title="${t.download}">⬇</button>
+          <button class="small secondary" data-act="more">${expanded.has(name) ? '▾' : '▸'}</button>
+          <button class="small danger" data-act="del">✕</button>
+        </span>
+      </div>
+      <div class="src-sub">
+        <input type="range" data-f="hours" min="${model.sliderStep}" max="${model.maxHours}"
+               step="${model.sliderStep}" value="${hours}">
+        <span class="hours-label ${hours >= model.maxHours ? 'at-max' : ''}">
+          <b data-r="hval">${hours}</b> h <span class="max">/ ${t.maxLbl} ${model.maxHours} h</span>
+        </span>
+        <span class="vol" data-r="vol">≈ ${fmtVol(mb)}</span>
+      </div>
+      <div class="src-status" style="padding-left:24px">${sourceStatusLine(s)}</div>`
+
+    card.querySelectorAll('[data-f]').forEach(el => {
+      const f = el.dataset.f
+      if (f === 'hours') {
+        // live label/volume update while sliding; commit on release
+        el.addEventListener('input', () => {
+          const h = parseInt(el.value, 10)
+          const lbl = card.querySelector('[data-r="hval"]')
+          lbl.textContent = h
+          lbl.parentElement.classList.toggle('at-max', h >= model.maxHours)
+          card.querySelector('[data-r="vol"]').textContent = '≈ ' + fmtVol(estimateMB({ ...s, hours: h }))
+        })
+        el.addEventListener('change', () => {
+          s.hours = parseInt(el.value, 10)
+          renderSources()
+          markDirty()
+        })
+        return
+      }
       el.addEventListener('change', () => {
-        const f = el.dataset.f
         if (f === 'enabled') s.enabled = el.checked
-        else if (f === 'hours') s.hours = parseInt(el.value, 10) || undefined
         else s[f] = el.value
         if (f === 'model') {
           s.resolution = (MODELS[s.model]?.resolutions ?? [])[0]
           s.hours = MODELS[s.model]?.maxHours
-          renderSources()
         }
+        renderSources()
         markDirty()
       })
     })
-    tr.querySelector('[data-act="dl"]').addEventListener('click', () => triggerDownload(dirName(s)))
-    tr.querySelector('[data-act="more"]').addEventListener('click', () => {
-      const k = dirName(s)
-      expanded.has(k) ? expanded.delete(k) : expanded.add(k)
+    card.querySelector('[data-act="dl"]').addEventListener('click', () => triggerDownload(name))
+    card.querySelector('[data-act="more"]').addEventListener('click', () => {
+      expanded.has(name) ? expanded.delete(name) : expanded.add(name)
       renderSources()
     })
-    tr.querySelector('[data-act="del"]').addEventListener('click', () => {
+    card.querySelector('[data-act="del"]').addEventListener('click', () => {
       if (confirm(t.confirmDelete)) { config.sources.splice(idx, 1); renderSources(); markDirty() }
     })
-    body.appendChild(tr)
+    list.appendChild(card)
 
-    const st = statusBySource[dirName(s)]
-    if (st && (st.running || expanded.has(dirName(s)))) {
-      const logTr = document.createElement('tr')
+    const st = statusBySource[name]
+    if (st && (st.running || expanded.has(name))) {
+      const det = document.createElement('div')
       const when = st.lastFinishedAt
         ? `${t.lastAttempt} : ${new Date(st.lastFinishedAt).toLocaleString()}`
         : (st.running ? '' : t.noAttempt)
@@ -343,11 +406,12 @@ function renderSources() {
       const logHtml = st.lastLog?.length
         ? `<div class="log">${st.lastLog.map(l => l.replace(/</g, '&lt;')).join('\n')}</div>`
         : ''
-      logTr.innerHTML = `<td colspan="8" style="padding:2px 6px 8px">
-        <div style="font-size:11px;color:#9fb0c5">${t.logTitle} — ${when}</div>${err}${logHtml}</td>`
-      body.appendChild(logTr)
+      det.innerHTML = `<div style="font-size:11px;color:#9fb0c5;padding-left:24px">${t.logTitle} — ${when}</div>${err}${logHtml}`
+      list.appendChild(det)
     }
   })
+  document.getElementById('total-vol').innerHTML =
+    `${t.totalVol} <b>≈ ${fmtVol(totalMB)}</b> ${t.perRun}`
 }
 
 document.getElementById('btn-add').addEventListener('click', () => {
