@@ -17,11 +17,18 @@ export interface Bbox {
   lonMax: number
 }
 
+// Infrastructure settings — managed in the SignalK plugin config panel.
 export interface PluginSettings {
-  mode?: 'auto' | 'manual'
-  checkIntervalMinutes?: number
   gribsRoot?: string          // SignalK-visible path where source subdirs live
   downloaderImage?: string
+}
+
+// Operational settings — managed in the webapp, persisted by the plugin
+// in its own data file (<dataDir>/settings.json), out of reach of the
+// admin config form.
+export interface AppSettings {
+  mode?: 'auto' | 'manual'
+  checkIntervalMinutes?: number
   bbox?: Bbox                 // applied to models with server-side subsetting (GFS)
   sources?: SourceSetting[]
 }
