@@ -53,8 +53,8 @@
     "@signalk/server-api": ">=2.0.0"
   },
   "devDependencies": {
-    "@types/node": "^22.0.0",
+    "@types/node": "^26.1.0",
     "@signalk/server-api": "^2.25.0",
-    "typescript": "^5.0.0"
+    "typescript": "^6.0.3"
   }
 }
