@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.1] — 2026-07-03
+
+### Fixed
+- Include both icons expected by Signal K: a root `icon.svg` for the App Store
+  and `public/icon.svg` for the webapp.
+
 ## [0.2.0] — 2026-07-03
 
 ### Added
