@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.3] — 2026-07-03
+
+### Changed
+- Updated development dependencies for TypeScript 6, Node 26 type definitions and SignalK server API 2.29.
+- Explicitly include Node types in the TypeScript configuration.
+
 ## [0.1.2] — 2026-06-11
 
 ### Changed
