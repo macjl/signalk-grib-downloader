@@ -41,8 +41,8 @@ export class Orchestrator {
     return (globalThis as any).__signalk_containerManager ?? null
   }
 
-  enabledSources(): SourceSetting[] {
-    return this.sources.filter(s => s.enabled !== false)
+  autoSources(): SourceSetting[] {
+    return this.sources.filter(s => s.autoDownload !== false)
   }
 
   // Fetch-parameter fingerprint recorded in a run marker, or null
@@ -90,7 +90,7 @@ export class Orchestrator {
       return {
         name,
         model: s.model,
-        enabled: s.enabled !== false,
+        autoDownload: s.autoDownload !== false,
         lastRun,
         expectedRun: expected,
         upToDate: lastRun !== null && lastRun >= expected && paramsOk,
@@ -105,8 +105,8 @@ export class Orchestrator {
   }
 
   // Sources whose expected run is newer than the last completed one.
-  staleSources(): SourceSetting[] {
-    return this.enabledSources().filter(s => {
+  staleSources(sources: SourceSetting[] = this.autoSources()): SourceSetting[] {
+    return sources.filter(s => {
       const last = this.lastRunStamp(s)
       return last === null || last < expectedRunStamp(s.model) || !this.paramsOk(s, last)
     })
@@ -114,9 +114,9 @@ export class Orchestrator {
 
   // Write the downloader config (JSON is valid YAML) into the plugin data
   // dir so the job container can mount and read it.
-  private writeConfig(dataRootInJob: string): string {
+  private writeConfig(dataRootInJob: string, sources: SourceSetting[] = this.sources): string {
     const config = {
-      sources: this.enabledSources().map(s =>
+      sources: sources.map(s =>
         downloaderSourceConfig(s, dataRootInJob, this.bbox)
       ),
     }
@@ -211,12 +211,12 @@ export class Orchestrator {
 
   // Download the given sources sequentially (bandwidth-friendly).
   async downloadAll(sources?: SourceSetting[]): Promise<void> {
-    for (const s of sources ?? this.enabledSources()) {
+    for (const s of sources ?? this.sources) {
       await this.downloadSource(s)
     }
   }
 
-  // Auto-mode tick: download every source whose expected run is missing.
+  // Automatic tick: download every auto-enabled source whose expected run is missing.
   async tick(): Promise<void> {
     const stale = this.staleSources().filter(s => !this.states.get(sourceDirName(s))!.running)
     if (stale.length > 0) {

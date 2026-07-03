@@ -8,7 +8,8 @@ export interface SourceSetting {
   resolution?: string   // gfs: 0p25|0p50|1p00 ; arome: 0025|001 ; arpege: 01|025
   hours?: number        // forecast duration to download (capped per model)
   archiveRuns?: number  // past runs kept in <source>/archive/ (0 = none, no upper limit)
-  enabled?: boolean     // default true
+  autoDownload?: boolean // default true: include this source in automatic checks
+  enabled?: boolean      // legacy: false migrates to autoDownload false
 }
 
 export interface Bbox {
@@ -22,14 +23,15 @@ export interface Bbox {
 export interface PluginSettings {
   gribsRoot?: string          // SignalK-visible path where source subdirs live
   downloaderImage?: string
+  checkIntervalMinutes?: number // automatic scheduler interval
 }
 
 // Operational settings — managed in the webapp, persisted by the plugin
 // in its own data file (<dataDir>/settings.json), out of reach of the
 // admin config form.
 export interface AppSettings {
-  mode?: 'auto' | 'manual'
-  checkIntervalMinutes?: number
+  mode?: 'auto' | 'manual'       // legacy global mode
+  checkIntervalMinutes?: number  // legacy: now managed in PluginSettings
   bbox?: Bbox                 // applied to models with server-side subsetting (GFS)
   sources?: SourceSetting[]
 }
@@ -37,7 +39,7 @@ export interface AppSettings {
 export interface SourceStatus {
   name: string
   model: ModelId
-  enabled: boolean
+  autoDownload: boolean
   lastRun: string | null      // stamp of last completed run (from marker files)
   expectedRun: string         // stamp of the run that should be available now
   upToDate: boolean

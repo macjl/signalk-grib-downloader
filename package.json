@@ -1,6 +1,6 @@
 {
   "name": "signalk-grib-downloader",
-  "version": "0.1.3",
+  "version": "0.2.0",
   "description": "Orchestrates automatic or manual GRIB downloads (GFS, AROME, ARPEGE, ICON-EU) through containerised jobs — feeds signalk-grib-weather-provider",
   "main": "dist/index.js",
   "scripts": {
@@ -45,6 +45,9 @@
   "signalk": {
     "displayName": "GRIB Downloader",
     "appIcon": "./icon.svg",
+    "screenshots": [
+      "./public/screenshot.png"
+    ],
     "requires": [
       "signalk-container"
     ]

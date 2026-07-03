@@ -2,6 +2,30 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.0] — 2026-07-03
+
+### Added
+- Add an App Store screenshot for the GRIB Downloader webapp.
+- Show a clear webapp warning when `signalk-container` cannot start download
+  jobs because the container runtime is unavailable.
+
+### Changed
+- Replace the global Auto/Manual mode with per-source automatic download
+  toggles: checked sources are included in scheduled downloads, unchecked
+  sources remain available for manual downloads.
+- Move the automatic check interval to the Signal K plugin settings while
+  keeping the effective interval visible in the webapp.
+- Manual "download all" now downloads every configured source, regardless of
+  whether that source is enabled for automatic scheduling.
+
+### Fixed
+- Keep manual-only sources in the generated downloader config so individual
+  manual downloads work consistently.
+- Migrate older `enabled` and global `mode` settings to the new per-source
+  `autoDownload` behavior.
+- Preserve the legacy webapp interval as a fallback when migrating to the new
+  plugin-level scheduler interval setting.
+
 ## [0.1.3] — 2026-07-03
 
 ### Changed

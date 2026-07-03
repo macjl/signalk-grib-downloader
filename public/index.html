@@ -18,6 +18,8 @@
     h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .5px; color: #9fb0c5; margin: 18px 0 8px; }
 
     .card { background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.09); border-radius: 10px; padding: 12px; margin-bottom: 10px; }
+    .alert { display: none; border-color: #8a3038; background: rgba(138,48,56,0.18); color: #ffc2c8; font-size: 12px; line-height: 1.35; }
+    .alert b { color: #fff; }
 
     label { font-size: 12px; color: #9fb0c5; }
     input, select {
@@ -39,9 +41,7 @@
     button.small { padding: 4px 9px; font-size: 12px; }
 
     .mode-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-    .mode-row .seg { display: flex; border-radius: 7px; overflow: hidden; border: 1px solid #3a4d68; }
-    .mode-row .seg button { border-radius: 0; background: #25344a; font-weight: 500; }
-    .mode-row .seg button.active { background: #2563b0; font-weight: 700; }
+    .schedule-note { margin-top: 6px; font-size: 11px; color: #9fb0c5; }
 
     table { width: 100%; border-collapse: collapse; font-size: 13px; }
     th { text-align: left; font-size: 11px; color: #9fb0c5; padding: 4px 6px; font-weight: 600; }
@@ -69,6 +69,7 @@
     .src-card { border-top: 1px solid rgba(255,255,255,0.07); padding: 8px 0 6px; }
     .src-main { display: flex; align-items: center; gap: 8px; }
     .src-main select { width: auto; }
+    .auto-toggle { display: inline-flex; align-items: center; gap: 4px; color: #e8edf4; font-weight: 700; white-space: nowrap; }
     .src-sub { display: flex; align-items: center; gap: 10px; margin-top: 7px; padding-left: 24px; }
     .src-sub input[type="range"] { flex: 1; accent-color: #4d9fff; padding: 0; }
     .hours-label { font-size: 12px; color: #e8edf4; white-space: nowrap; min-width: 110px; }
@@ -84,21 +85,15 @@
   <div id="side">
     <h1>⚓ <span data-i18n="title">GRIB Downloader</span></h1>
     <div id="login-banner" class="card" style="display:none; border-color:#e3c47f; color:#e3c47f;"></div>
+    <div id="runtime-banner" class="card alert"></div>
 
     <div class="card">
       <div class="mode-row">
-        <div class="seg">
-          <button id="mode-auto" data-i18n="auto">Auto</button>
-          <button id="mode-manual" data-i18n="manual">Manuel</button>
-        </div>
-        <span id="mode-desc" style="font-size:12px;color:#9fb0c5"></span>
+        <span style="font-size:12px;color:#9fb0c5" data-i18n="autoHint"></span>
         <span style="flex:1"></span>
         <button id="btn-download-all"></button>
       </div>
-      <div id="auto-interval" style="margin-top:8px; display:flex; align-items:center; gap:8px;">
-        <label data-i18n="checkEvery">Vérifier toutes les</label>
-        <input id="interval" type="number" min="1" style="width:70px"> <span style="font-size:12px">min</span>
-      </div>
+      <div id="auto-interval" class="schedule-note"></div>
     </div>
 
     <h2 data-i18n="sources">Sources</h2>
@@ -141,7 +136,8 @@ const LANG = (navigator.language || 'en').toLowerCase().startsWith('fr') ? 'fr' 
 const I18N = {
   fr: {
     title: 'GRIB Downloader', auto: 'Auto', manual: 'Manuel',
-    autoDesc: 'télécharge après chaque run', manualDesc: 'téléchargement à la demande',
+    autoHint: 'Les sources cochées se téléchargent automatiquement. Les autres restent téléchargeables manuellement.',
+    autoInterval: n => `Intervalle auto : ${n} min (réglages du plugin)`,
     checkEvery: 'Vérifier toutes les', sources: 'Sources',
     thModel: 'Modèle', thRes: 'Résol.', thHours: 'Durée (h)', thDir: 'Répertoire', thState: 'État',
     addSource: '+ Ajouter une source', zone: 'Zone de téléchargement (GFS)',
@@ -151,7 +147,8 @@ const I18N = {
     saveError: 'Erreur : ', downloadAll: 'Tout télécharger', download: '⬇',
     stUpToDate: 'à jour', stStale: 'en retard', stRunning: 'téléchargement…', stError: 'erreur',
     stWaiting: 'attente publication', stConfigChanged: 'config modifiée',
-    stDisabled: 'désactivé', stNoData: 'aucune donnée',
+    stManual: 'manuel', stNoData: 'aucune donnée',
+    runtimeErrorTitle: 'Téléchargement automatique indisponible',
     lastRun: 'dernier run', expected: 'attendu', confirmDelete: 'Supprimer cette source ?',
     lastAttempt: 'dernière tentative', noAttempt: 'aucune tentative depuis le démarrage', logTitle: 'Journal du dernier téléchargement',
     maxLbl: 'max', totalVol: 'Volume estimé par run :', perRun: '/ run',
@@ -161,7 +158,8 @@ const I18N = {
   },
   en: {
     title: 'GRIB Downloader', auto: 'Auto', manual: 'Manual',
-    autoDesc: 'downloads after each model run', manualDesc: 'download on demand',
+    autoHint: 'Checked sources download automatically. Others remain available for manual downloads.',
+    autoInterval: n => `Auto interval: ${n} min (plugin settings)`,
     checkEvery: 'Check every', sources: 'Sources',
     thModel: 'Model', thRes: 'Res.', thHours: 'Hours', thDir: 'Directory', thState: 'State',
     addSource: '+ Add source', zone: 'Download area (GFS)',
@@ -171,7 +169,8 @@ const I18N = {
     saveError: 'Error: ', downloadAll: 'Download all', download: '⬇',
     stUpToDate: 'up to date', stStale: 'behind', stRunning: 'downloading…', stError: 'error',
     stWaiting: 'awaiting publication', stConfigChanged: 'settings changed',
-    stDisabled: 'disabled', stNoData: 'no data',
+    stManual: 'manual', stNoData: 'no data',
+    runtimeErrorTitle: 'Automatic downloads unavailable',
     lastRun: 'last run', expected: 'expected', confirmDelete: 'Delete this source?',
     lastAttempt: 'last attempt', noAttempt: 'no attempt since startup', logTitle: 'Last download log',
     maxLbl: 'max', totalVol: 'Estimated volume per run:', perRun: '/ run',
@@ -215,8 +214,9 @@ function fmtVol(mb) {
 }
 
 // ── State ────────────────────────────────────────────────────────────────────
-let config = { mode: 'auto', checkIntervalMinutes: 10, bbox: { latMin: 35, lonMin: -6, latMax: 45, lonMax: 17 }, sources: [] }
+let config = { bbox: { latMin: 35, lonMin: -6, latMax: 45, lonMax: 17 }, sources: [] }
 let statusBySource = {}
+let schedulerError = null
 let expanded = new Set()
 let pendingDataDeletions = new Set()
 let dirty = false
@@ -226,6 +226,26 @@ function renderSaveBar() {
   const note = document.getElementById('save-note')
   note.textContent = dirty ? t.dirty : ''
   note.className = dirty ? 'dirty' : ''
+}
+
+function escapeHtml(value) {
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+}
+
+function renderRuntimeBanner() {
+  const banner = document.getElementById('runtime-banner')
+  if (!schedulerError) {
+    banner.style.display = 'none'
+    banner.innerHTML = ''
+    return
+  }
+  banner.innerHTML = `<b>${t.runtimeErrorTitle}</b><br>${escapeHtml(schedulerError)}`
+  banner.style.display = 'block'
 }
 
 // ── Map with editable bbox ───────────────────────────────────────────────────
@@ -306,10 +326,10 @@ function dirName(s) {
 
 function sourceStateBadge(s) {
   const st = statusBySource[dirName(s)]
-  if (s.enabled === false) return `<span class="badge off">${t.stDisabled}</span>`
   if (!st) return ''
   if (st.running) return `<span class="badge run">${t.stRunning}</span>`
   if (st.lastError) return `<span class="badge err" title="${st.lastError.replace(/"/g, '&quot;')}">${t.stError}</span>`
+  if (s.autoDownload === false) return `<span class="badge off">${t.stManual}</span>`
   if (st.upToDate) return `<span class="badge ok">${t.stUpToDate}</span>`
   if (st.configStale) return `<span class="badge stale">${t.stConfigChanged}</span>`
   // Not up to date: if the last attempt found nothing newer published
@@ -323,6 +343,7 @@ function sourceStateBadge(s) {
 
 function sourceStatusLine(s) {
   const st = statusBySource[dirName(s)]
+  if (schedulerError && s.autoDownload !== false) return schedulerError
   if (!st || !st.lastRun) return ''
   let line = `${t.lastRun}: ${st.lastRun}`
   if (!st.upToDate) line += ` — ${t.expected}: ${st.expectedRun}`
@@ -338,7 +359,7 @@ function renderSources() {
     const model = MODELS[s.model] || MODELS.gfs
     const resOpts = model.resolutions
     const hours = s.hours ?? model.maxHours
-    const mb = (s.enabled !== false) ? estimateMB(s) : 0
+    const mb = estimateMB(s)
     totalMB += mb
 
     const card = document.createElement('div')
@@ -346,7 +367,10 @@ function renderSources() {
     card.dataset.name = name
     card.innerHTML = `
       <div class="src-main">
-        <input type="checkbox" ${s.enabled !== false ? 'checked' : ''} data-f="enabled">
+        <label class="auto-toggle" title="${t.autoHint}">
+          <input type="checkbox" ${s.autoDownload !== false ? 'checked' : ''} data-f="autoDownload">
+          <span>${t.auto}</span>
+        </label>
         <select data-f="model">${Object.keys(MODELS).map(m => `<option ${m === s.model ? 'selected' : ''}>${m}</option>`).join('')}</select>
         <select data-f="resolution" ${resOpts.length === 0 ? 'disabled' : ''}>
           ${resOpts.map(r => `<option ${r === s.resolution ? 'selected' : ''}>${r}</option>`).join('')}
@@ -395,7 +419,7 @@ function renderSources() {
         return
       }
       el.addEventListener('change', () => {
-        if (f === 'enabled') s.enabled = el.checked
+        if (f === 'autoDownload') s.autoDownload = el.checked
         else if (f === 'archiveRuns') s.archiveRuns = Math.max(0, parseInt(el.value, 10) || 0)
         else s[f] = el.value
         if (f === 'model') {
@@ -427,25 +451,16 @@ function renderSources() {
 }
 
 document.getElementById('btn-add').addEventListener('click', () => {
-  config.sources.push({ model: 'gfs', resolution: '0p25', hours: 384, enabled: true })
+  config.sources.push({ model: 'gfs', resolution: '0p25', hours: 384, autoDownload: true })
   renderSources()
   markDirty()
 })
 
-// ── Mode ─────────────────────────────────────────────────────────────────────
-function renderMode() {
-  document.getElementById('mode-auto').classList.toggle('active', config.mode !== 'manual')
-  document.getElementById('mode-manual').classList.toggle('active', config.mode === 'manual')
-  document.getElementById('mode-desc').textContent = config.mode === 'manual' ? t.manualDesc : t.autoDesc
-  document.getElementById('auto-interval').style.display = config.mode === 'manual' ? 'none' : 'flex'
-  document.getElementById('interval').value = config.checkIntervalMinutes ?? 10
+// ── Schedule ─────────────────────────────────────────────────────────────────
+function renderSchedule() {
+  const interval = config.checkIntervalMinutes ?? 10
+  document.getElementById('auto-interval').textContent = t.autoInterval(interval)
 }
-document.getElementById('mode-auto').addEventListener('click', () => { config.mode = 'auto'; renderMode(); markDirty() })
-document.getElementById('mode-manual').addEventListener('click', () => { config.mode = 'manual'; renderMode(); markDirty() })
-document.getElementById('interval').addEventListener('change', e => {
-  config.checkIntervalMinutes = parseInt(e.target.value, 10) || 10
-  markDirty()
-})
 
 // ── Actions ──────────────────────────────────────────────────────────────────
 document.getElementById('btn-download-all').textContent = t.downloadAll
@@ -506,6 +521,7 @@ function fillDetails(card, name) {
 // details. Never rebuilds inputs, so a slider drag or focused field
 // survives the polling cycle.
 function updateStatusUI() {
+  renderRuntimeBanner()
   const list = document.getElementById('src-list')
   for (const s of config.sources) {
     const name = dirName(s)
@@ -521,9 +537,19 @@ function updateStatusUI() {
 
 async function pollStatus() {
   try {
-    const r = await fetch(`${API}/status`)
-    if (!r.ok) return
+    const r = await fetch(`${API}/status`, { cache: 'no-store' })
+    if (!r.ok) {
+      const body = await r.json().catch(() => ({}))
+      schedulerError = body.error || `HTTP ${r.status}`
+      renderRuntimeBanner()
+      return
+    }
     const data = await r.json()
+    schedulerError = data.schedulerError || null
+    if (data.checkIntervalMinutes) {
+      config.checkIntervalMinutes = data.checkIntervalMinutes
+      renderSchedule()
+    }
     statusBySource = {}
     for (const s of data.sources) statusBySource[s.name] = s
     updateStatusUI()
@@ -538,10 +564,14 @@ async function loadConfig() {
     banner.style.display = 'block'
   } else if (r.ok) {
     const c = await r.json()
-    config = Object.assign({ mode: 'auto', checkIntervalMinutes: 10, sources: [] }, c)
+    config = Object.assign({ checkIntervalMinutes: 10, sources: [] }, c)
+    config.sources = (config.sources ?? []).map(s => ({
+      ...s,
+      autoDownload: s.autoDownload ?? (s.enabled !== false),
+    }))
     config.bbox = c.bbox ?? { latMin: 35, lonMin: -6, latMax: 45, lonMax: 17 }
   }
-  renderMode()
+  renderSchedule()
   renderSources()
   refreshRect(true)
 }

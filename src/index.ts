@@ -8,6 +8,7 @@ import { AppSettings, PluginSettings } from './types'
 
 const PLUGIN_ID = 'signalk-grib-downloader'
 const DEFAULT_IMAGE = 'ghcr.io/macjl/grib-downloader:latest'
+const DEFAULT_CHECK_INTERVAL_MINUTES = 10
 
 // "~/gribs" is not expanded by Node — resolve it ourselves.
 function expandHome(p: string): string {
@@ -16,16 +17,25 @@ function expandHome(p: string): string {
   return p
 }
 
-// The plugin config panel only holds infrastructure settings. Everything
-// operational (mode, area, sources, interval) is managed in the webapp at
+// The plugin config panel holds infrastructure and scheduler settings.
+// Operational download choices (area and sources) are managed in the webapp at
 // /signalk-grib-downloader/ and stored in <dataDir>/settings.json — the
 // admin form cannot clobber it.
-const buildSchema = (defaultRoot: string) => ({
+const buildSchema = (defaultRoot: string, defaultInterval: number) => ({
   type: 'object',
   description:
-    'Sources, download area, auto/manual mode and scheduling are managed in ' +
-    'the GRIB Downloader webapp (Webapps → GRIB Downloader).',
+    'Sources and download area are managed in the GRIB Downloader webapp ' +
+    '(Webapps → GRIB Downloader).',
   properties: {
+    checkIntervalMinutes: {
+      type: 'number',
+      title: 'Automatic check interval (minutes)',
+      description:
+        'How often auto-enabled sources are checked for a newly published run. ' +
+        'Manual downloads are always available from the webapp.',
+      default: defaultInterval,
+      minimum: 1,
+    },
     gribsRoot: {
       type: 'string',
       title: 'GRIB root directory',
@@ -46,8 +56,6 @@ const buildSchema = (defaultRoot: string) => ({
 })
 
 const DEFAULT_APP_SETTINGS: AppSettings = {
-  mode: 'auto',
-  checkIntervalMinutes: 10,
   bbox: { latMin: 35, lonMin: -6, latMax: 45, lonMax: 17 },
   sources: [],
 }
@@ -57,25 +65,61 @@ module.exports = (server: ServerAPI): Plugin => {
   let timer: ReturnType<typeof setInterval> | null = null
   let infra: PluginSettings = {}
   let settings: AppSettings = { ...DEFAULT_APP_SETTINGS }
+  let schedulerError: string | null = null
+  let legacyIntervalMinutes: number | undefined
 
   const DEFAULT_ROOT = '~/.signalk/gribs'
   const gribsRoot = () => expandHome(infra.gribsRoot || DEFAULT_ROOT)
 
   const settingsPath = () => path.join(server.getDataDirPath(), 'settings.json')
 
+  const validInterval = (value: unknown): number | undefined => {
+    const n = Number(value)
+    return Number.isFinite(n) && n >= 1 ? Math.floor(n) : undefined
+  }
+
+  const intervalMinutes = () =>
+    validInterval(infra.checkIntervalMinutes) ??
+    legacyIntervalMinutes ??
+    DEFAULT_CHECK_INTERVAL_MINUTES
+
+  const normalizeSettings = (raw: AppSettings): AppSettings => {
+    const legacyManual = raw.mode === 'manual'
+    const normalized = {
+      ...DEFAULT_APP_SETTINGS,
+      ...raw,
+      checkIntervalMinutes: validInterval(raw.checkIntervalMinutes),
+      mode: undefined,
+      sources: (raw.sources ?? []).map(source => {
+        const { enabled, ...rest } = source
+        return {
+          ...rest,
+          autoDownload: source.autoDownload ?? (!legacyManual && enabled !== false),
+        }
+      }),
+    }
+    if (!normalized.checkIntervalMinutes) delete normalized.checkIntervalMinutes
+    return normalized
+  }
+
   const loadSettings = (legacy: AppSettings): AppSettings => {
     try {
-      return { ...DEFAULT_APP_SETTINGS, ...JSON.parse(fs.readFileSync(settingsPath(), 'utf-8')) }
+      const raw = JSON.parse(fs.readFileSync(settingsPath(), 'utf-8')) as AppSettings
+      legacyIntervalMinutes = validInterval(raw.checkIntervalMinutes)
+      const loaded = normalizeSettings(raw)
+      saveSettings(loaded)
+      return loaded
     } catch {
       // First run — migrate any operational fields a previous version
       // stored in the plugin options, then persist them to settings.json.
-      const migrated: AppSettings = {
+      legacyIntervalMinutes = validInterval(legacy.checkIntervalMinutes)
+      const migrated = normalizeSettings({
         ...DEFAULT_APP_SETTINGS,
         ...(legacy.mode ? { mode: legacy.mode } : {}),
         ...(legacy.checkIntervalMinutes ? { checkIntervalMinutes: legacy.checkIntervalMinutes } : {}),
         ...(legacy.bbox ? { bbox: legacy.bbox } : {}),
         ...(legacy.sources ? { sources: legacy.sources } : {}),
-      }
+      })
       saveSettings(migrated)
       return migrated
     }
@@ -88,20 +132,27 @@ module.exports = (server: ServerAPI): Plugin => {
 
   const updateStatus = () => {
     if (!orchestrator) return
-    const mode = settings.mode ?? 'auto'
+    if (schedulerError) {
+      server.setPluginError(schedulerError)
+      return
+    }
     const parts = orchestrator.status().map(s => {
-      if (!s.enabled) return null
       if (s.running) return `${s.name}: downloading…`
       if (s.lastError) return `${s.name}: error`
-      return `${s.name}: ${s.upToDate ? '✓' : '…'} ${s.lastRun ?? 'no data'}`
+      const mode = s.autoDownload ? 'auto' : 'manual'
+      return `${s.name}: ${mode} ${s.upToDate ? '✓' : '…'} ${s.lastRun ?? 'no data'}`
     }).filter(Boolean)
-    server.setPluginStatus(`${mode} — ${parts.join(' · ') || 'no sources (configure in the webapp)'}`)
+    server.setPluginStatus(parts.join(' · ') || 'no sources (configure in the webapp)')
   }
 
   // (Re)build the orchestrator and timer from current infra + settings.
   const apply = (): string | null => {
     const containers = (globalThis as any).__signalk_containerManager
-    if (!containers) return 'signalk-container plugin is required but not running'
+    schedulerError = null
+    if (!containers) {
+      schedulerError = 'signalk-container plugin is required but not running'
+      return schedulerError
+    }
 
     if (timer) { clearInterval(timer); timer = null }
 
@@ -116,13 +167,17 @@ module.exports = (server: ServerAPI): Plugin => {
       settings.bbox
     )
 
-    if ((settings.mode ?? 'auto') === 'auto' && sources.length > 0) {
-      const interval = (settings.checkIntervalMinutes ?? 10) * 60_000
+    if (sources.some(s => s.autoDownload !== false)) {
+      const interval = intervalMinutes() * 60_000
       containers.whenReady().then(() => {
         if (!containers.getRuntime()) {
-          server.setPluginError('No container runtime detected')
+          schedulerError =
+            'No container runtime detected. Mount the Docker or Podman socket in the Signal K container so signalk-container can start download jobs.'
+          server.setPluginError(schedulerError)
+          updateStatus()
           return
         }
+        schedulerError = null
         orchestrator?.tick().catch((err: unknown) => server.debug(`tick error: ${err}`))
         timer = setInterval(
           () => orchestrator?.tick().catch((err: unknown) => server.debug(`tick error: ${err}`)),
@@ -137,10 +192,14 @@ module.exports = (server: ServerAPI): Plugin => {
   const plugin: Plugin = {
     id: PLUGIN_ID,
     name: 'GRIB Downloader',
-    schema: () => buildSchema(DEFAULT_ROOT),
+    schema: () => buildSchema(DEFAULT_ROOT, intervalMinutes()),
 
     start: (options: PluginSettings & AppSettings) => {
-      infra = { gribsRoot: options?.gribsRoot, downloaderImage: options?.downloaderImage }
+      infra = {
+        gribsRoot: options?.gribsRoot,
+        downloaderImage: options?.downloaderImage,
+        checkIntervalMinutes: validInterval(options?.checkIntervalMinutes),
+      }
       settings = loadSettings(options ?? {})
       const err = apply()
       if (err) server.setPluginError(err)
@@ -154,20 +213,21 @@ module.exports = (server: ServerAPI): Plugin => {
     registerWithRouter: (router: any) => {
       router.get('/status', (_req: any, res: any) => {
         if (!orchestrator) return res.status(503).json({ error: 'plugin not started' })
-        res.json({ mode: settings.mode ?? 'auto', sources: orchestrator.status() })
+        res.json({ schedulerError, checkIntervalMinutes: intervalMinutes(), sources: orchestrator.status() })
       })
 
       // Operational settings, webapp-managed. ('/config' would collide with
       // SignalK's built-in plugin config routes.)
       router.get('/settings', (_req: any, res: any) => {
-        res.json(settings)
+        res.json({ ...settings, checkIntervalMinutes: intervalMinutes() })
       })
 
       router.put('/settings', (req: any, res: any) => {
-        const next = req.body as AppSettings
-        if (!next || typeof next !== 'object') {
+        const nextRaw = req.body as AppSettings
+        if (!nextRaw || typeof nextRaw !== 'object') {
           return res.status(400).json({ error: 'invalid settings' })
         }
+        const next = normalizeSettings(nextRaw)
         const valid = ['gfs', 'arome', 'arpege', 'icon-eu']
         if ((next.sources ?? []).some(s => !valid.includes(s.model))) {
           return res.status(400).json({ error: `model must be one of: ${valid.join(', ')}` })
@@ -185,7 +245,7 @@ module.exports = (server: ServerAPI): Plugin => {
         } catch (err) {
           return res.status(500).json({ error: String(err) })
         }
-        settings = { ...DEFAULT_APP_SETTINGS, ...next }
+        settings = next
         const applyErr = apply()
         if (applyErr) return res.status(500).json({ error: applyErr })
         res.json({ ok: true })
@@ -193,10 +253,11 @@ module.exports = (server: ServerAPI): Plugin => {
 
       router.post('/download', (_req: any, res: any) => {
         if (!orchestrator) return res.status(503).json({ error: 'plugin not started' })
-        const stale = orchestrator.staleSources()
+        const sources = settings.sources ?? []
+        const stale = orchestrator.staleSources(sources)
         orchestrator.downloadAll().catch(err => server.debug(`download error: ${err}`))
         res.status(202).json({
-          started: orchestrator.enabledSources().map(sourceDirName),
+          started: sources.map(sourceDirName),
           behind: stale.map(sourceDirName),
         })
       })
