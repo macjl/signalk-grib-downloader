@@ -2,6 +2,47 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Changed
+- **Removed the container dependency.** Downloads now run in-process in
+  TypeScript — no `signalk-container` plugin, no container runtime, no image
+  pulls. The plugin runs on a plain Signal K server with Node ≥ 18.
+  - Removed `signalk.requires: ["signalk-container"]`.
+  - Removed the `downloaderImage` plugin config option and the container
+    runtime/`runJob` plumbing from the orchestrator and plugin host.
+  - `gribsRoot` is a plain local path (no host-path resolution).
+- Ported the per-model fetch logic (GFS/NOMADS, AROME/ARPEGE Météo-France,
+  ICON-EU/DWD) from the containerised `grib-downloader` Python script to a
+  native TypeScript module using Node's `fetch`/streams. The outcome protocol
+  (`downloaded | up-to-date | unavailable | failed`), the source directory
+  naming, and the run-marker fingerprint format are unchanged, so existing
+  on-disk data and `signalk-grib-weather-provider` keep working.
+- ICON-EU `.bz2` GRIB fragments are decompressed in-process via
+  `@digitaldefiance/bzip2-wasm` (no host `bzip2` binary needed).
+
+### Added
+- Smoketests for the native downloader: a local HTTP test server exercises
+  each model's fetch path (download, up-to-date, unavailable, failed), the
+  bzip2 decompress+concat path for ICON-EU, marker/fingerprint round-trips,
+  and cleanup/archive rotation.
+- Tests for run cancellation (aborting the signal tears down the in-flight
+  request, no retries, no `.part` leftovers) and for write-stream
+  backpressure (a slow disk write paces the network read instead of
+  buffering the whole body in memory).
+
+### Fixed
+- The per-source download timeout now actively aborts the run: an
+  `AbortSignal` is propagated from the orchestrator through every fetch, and
+  the timeout timer is cleared once the run settles. Previously the timeout
+  only stopped *waiting* — the abandoned download kept running in the
+  background (and retrying), so a later trigger could run a second download
+  concurrently against the same `.part` and output files.
+- GRIB bodies are streamed to disk with `stream/promises` `pipeline`
+  (`Readable.fromWeb(response.body)` → `createWriteStream`), honouring
+  backpressure. Previously `write()` return values were ignored, so a large
+  Météo-France GRIB could be buffered entirely in memory.
+
 ## [0.2.1] — 2026-07-03
 
 ### Fixed

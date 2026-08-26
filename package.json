@@ -48,17 +48,17 @@
     "appIcon": "./icon.svg",
     "screenshots": [
       "./public/screenshot.png"
-    ],
-    "requires": [
-      "signalk-container"
     ]
   },
   "peerDependencies": {
     "@signalk/server-api": ">=2.0.0"
   },
   "devDependencies": {
-    "@types/node": "^26.1.0",
     "@signalk/server-api": "^2.25.0",
+    "@types/node": "^26.1.0",
     "typescript": "^7.0.2"
+  },
+  "dependencies": {
+    "@digitaldefiance/bzip2-wasm": "^1.1.1"
   }
 }

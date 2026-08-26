@@ -7,7 +7,6 @@ import { sourceDirName } from './scheduler'
 import { AppSettings, PluginSettings } from './types'
 
 const PLUGIN_ID = 'signalk-grib-downloader'
-const DEFAULT_IMAGE = 'ghcr.io/macjl/grib-downloader:latest'
 const DEFAULT_CHECK_INTERVAL_MINUTES = 10
 
 // "~/gribs" is not expanded by Node — resolve it ourselves.
@@ -42,15 +41,8 @@ const buildSchema = (defaultRoot: string, defaultInterval: number) => ({
       description:
         'Each source downloads into <root>/<model>-<resolution>. Point the ' +
         'signalk-grib-weather-provider root at the same directory. ' +
-        '"~" is expanded. When SignalK runs in a container, the path must ' +
-        'live inside a mounted volume — the default (under ~/.signalk) ' +
-        'always works.',
+        '"~" is expanded.',
       default: defaultRoot,
-    },
-    downloaderImage: {
-      type: 'string',
-      title: 'Downloader container image',
-      default: DEFAULT_IMAGE,
     },
   },
 })
@@ -65,7 +57,6 @@ module.exports = (server: ServerAPI): Plugin => {
   let timer: ReturnType<typeof setInterval> | null = null
   let infra: PluginSettings = {}
   let settings: AppSettings = { ...DEFAULT_APP_SETTINGS }
-  let schedulerError: string | null = null
   let legacyIntervalMinutes: number | undefined
 
   const DEFAULT_ROOT = '~/.signalk/gribs'
@@ -132,10 +123,6 @@ module.exports = (server: ServerAPI): Plugin => {
 
   const updateStatus = () => {
     if (!orchestrator) return
-    if (schedulerError) {
-      server.setPluginError(schedulerError)
-      return
-    }
     const parts = orchestrator.status().map(s => {
       if (s.running) return `${s.name}: downloading…`
       if (s.lastError) return `${s.name}: error`
@@ -146,22 +133,13 @@ module.exports = (server: ServerAPI): Plugin => {
   }
 
   // (Re)build the orchestrator and timer from current infra + settings.
-  const apply = (): string | null => {
-    const containers = (globalThis as any).__signalk_containerManager
-    schedulerError = null
-    if (!containers) {
-      schedulerError = 'signalk-container plugin is required but not running'
-      return schedulerError
-    }
-
+  const apply = (): void => {
     if (timer) { clearInterval(timer); timer = null }
 
     const sources = settings.sources ?? []
     orchestrator = new Orchestrator(
       sources,
       gribsRoot(),
-      infra.downloaderImage ?? DEFAULT_IMAGE,
-      server.getDataDirPath(),
       (msg: string) => server.debug(msg),
       updateStatus,
       settings.bbox
@@ -169,24 +147,13 @@ module.exports = (server: ServerAPI): Plugin => {
 
     if (sources.some(s => s.autoDownload !== false)) {
       const interval = intervalMinutes() * 60_000
-      containers.whenReady().then(() => {
-        if (!containers.getRuntime()) {
-          schedulerError =
-            'No container runtime detected. Mount the Docker or Podman socket in the Signal K container so signalk-container can start download jobs.'
-          server.setPluginError(schedulerError)
-          updateStatus()
-          return
-        }
-        schedulerError = null
-        orchestrator?.tick().catch((err: unknown) => server.debug(`tick error: ${err}`))
-        timer = setInterval(
-          () => orchestrator?.tick().catch((err: unknown) => server.debug(`tick error: ${err}`)),
-          interval
-        )
-      })
+      orchestrator.tick().catch((err: unknown) => server.debug(`tick error: ${err}`))
+      timer = setInterval(
+        () => orchestrator?.tick().catch((err: unknown) => server.debug(`tick error: ${err}`)),
+        interval
+      )
     }
     updateStatus()
-    return null
   }
 
   const plugin: Plugin = {
@@ -197,12 +164,10 @@ module.exports = (server: ServerAPI): Plugin => {
     start: (options: PluginSettings & AppSettings) => {
       infra = {
         gribsRoot: options?.gribsRoot,
-        downloaderImage: options?.downloaderImage,
         checkIntervalMinutes: validInterval(options?.checkIntervalMinutes),
       }
       settings = loadSettings(options ?? {})
-      const err = apply()
-      if (err) server.setPluginError(err)
+      apply()
     },
 
     stop: () => {
@@ -213,7 +178,7 @@ module.exports = (server: ServerAPI): Plugin => {
     registerWithRouter: (router: any) => {
       router.get('/status', (_req: any, res: any) => {
         if (!orchestrator) return res.status(503).json({ error: 'plugin not started' })
-        res.json({ schedulerError, checkIntervalMinutes: intervalMinutes(), sources: orchestrator.status() })
+        res.json({ checkIntervalMinutes: intervalMinutes(), sources: orchestrator.status() })
       })
 
       // Operational settings, webapp-managed. ('/config' would collide with
@@ -246,8 +211,7 @@ module.exports = (server: ServerAPI): Plugin => {
           return res.status(500).json({ error: String(err) })
         }
         settings = next
-        const applyErr = apply()
-        if (applyErr) return res.status(500).json({ error: applyErr })
+        apply()
         res.json({ ok: true })
       })
 

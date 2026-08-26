@@ -21,8 +21,7 @@ export interface Bbox {
 
 // Infrastructure settings — managed in the SignalK plugin config panel.
 export interface PluginSettings {
-  gribsRoot?: string          // SignalK-visible path where source subdirs live
-  downloaderImage?: string
+  gribsRoot?: string          // local path where source subdirs live
   checkIntervalMinutes?: number // automatic scheduler interval
 }
 
