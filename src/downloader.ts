@@ -1,5 +1,7 @@
 import * as fs from 'fs'
 import * as path from 'path'
+import { Readable } from 'stream'
+import { pipeline } from 'stream/promises'
 import { Bbox, ModelId, SourceSetting } from './types'
 import { downloaderSourceConfig, fetchFingerprint, fingerprintsEqual, sourceDirName } from './scheduler'
 
@@ -47,9 +49,17 @@ const HTTP_BACKOFF_BASE_MS = 2_000
 
 // ── HTTP helpers ─────────────────────────────────────────────────────────────
 
-async function httpOk(url: string): Promise<boolean> {
+// Per-request timeout, combined with the caller's run-level abort signal
+// (if any) so aborting a run also cancels its in-flight requests.
+// AbortSignal.any: Node ≥ 18.17.
+function requestSignal(signal?: AbortSignal): AbortSignal {
+  const timeout = AbortSignal.timeout(HTTP_TIMEOUT_MS)
+  return signal ? AbortSignal.any([signal, timeout]) : timeout
+}
+
+async function httpOk(url: string, signal?: AbortSignal): Promise<boolean> {
   try {
-    const r = await fetch(url, { method: 'HEAD', headers: { 'User-Agent': UA }, redirect: 'follow', signal: AbortSignal.timeout(HTTP_TIMEOUT_MS) })
+    const r = await fetch(url, { method: 'HEAD', headers: { 'User-Agent': UA }, redirect: 'follow', signal: requestSignal(signal) })
     return r.status === 200
   } catch {
     return false
@@ -57,35 +67,26 @@ async function httpOk(url: string): Promise<boolean> {
 }
 
 // Stream a URL to `dest` atomically (.part → rename). True on success.
-// Retries with linear backoff; an empty body is a failure.
-async function download(url: string, dest: string): Promise<boolean> {
+// Retries with linear backoff; an empty body is a failure. The body is piped
+// to disk (network read paced by file-write backpressure) instead of being
+// buffered in memory. A caller-initiated abort is not retried.
+async function download(url: string, dest: string, signal?: AbortSignal): Promise<boolean> {
   const part = dest + '.part'
   for (let attempt = 1; attempt <= RETRIES; attempt++) {
     let out: fs.WriteStream | null = null
     try {
-      const r = await fetch(url, { headers: { 'User-Agent': UA }, redirect: 'follow', signal: AbortSignal.timeout(HTTP_TIMEOUT_MS) })
+      const r = await fetch(url, { headers: { 'User-Agent': UA }, redirect: 'follow', signal: requestSignal(signal) })
       if (r.status !== 200 || !r.body) throw new Error(`HTTP ${r.status}`)
       out = fs.createWriteStream(part)
-      const reader = r.body.getReader()
-      try {
-        for (;;) {
-          const { done, value } = await reader.read()
-          if (done) break
-          out.write(Buffer.from(value))
-        }
-      } finally {
-        reader.releaseLock()
-      }
-      await new Promise<void>((resolve, reject) => {
-        out!.on('error', reject)
-        out!.end(() => resolve())
-      })
+      await pipeline(Readable.fromWeb(r.body), out)
+      out = null                            // pipeline already ended the stream
       const stat = fs.statSync(part)
       if (stat.size === 0) throw new Error('empty download')
       fs.renameSync(part, dest)
       return true
-    } catch (e) {
+    } catch {
       if (out) { try { out.destroy() } catch { /* ignore */ } }
+      if (signal?.aborted) break            // run aborted — do not retry
       if (attempt < RETRIES) await sleep(HTTP_BACKOFF_BASE_MS * attempt)
     }
   }
@@ -94,8 +95,8 @@ async function download(url: string, dest: string): Promise<boolean> {
 }
 
 // Fetch a whole buffer (used for the bz2 GRIB fragments, which are small).
-async function fetchBuffer(url: string): Promise<Buffer> {
-  const r = await fetch(url, { headers: { 'User-Agent': UA }, redirect: 'follow', signal: AbortSignal.timeout(HTTP_TIMEOUT_MS) })
+async function fetchBuffer(url: string, signal?: AbortSignal): Promise<Buffer> {
+  const r = await fetch(url, { headers: { 'User-Agent': UA }, redirect: 'follow', signal: requestSignal(signal) })
   if (r.status !== 200) throw new Error(`HTTP ${r.status} for ${url}`)
   return Buffer.from(await r.arrayBuffer())
 }
@@ -237,7 +238,7 @@ const GFS_DEFAULT_VARS = ['UGRD', 'VGRD', 'GUST', 'TMP', 'PRMSL', 'RH', 'APCP', 
 const GFS_PRODUCTS: Record<string, string> = { '0p25': 'pgrb2.0p25', '0p50': 'pgrb2full.0p50', '1p00': 'pgrb2.1p00' }
 const GFS_DEFAULT_LEVELS = ['10_m_above_ground', '2_m_above_ground', 'surface', 'mean_sea_level', 'entire_atmosphere']
 
-async function gfsFetch(src: DownloadSource, log: (m: string) => void): Promise<Outcome> {
+async function gfsFetch(src: DownloadSource, log: (m: string) => void, signal?: AbortSignal): Promise<Outcome> {
   const res = src.resolution ?? '0p25'
   const directory = src.directory
   const steps = stepsList(src.steps ?? { from: 0, to: 24, by: 3 })
@@ -250,6 +251,7 @@ async function gfsFetch(src: DownloadSource, log: (m: string) => void): Promise<
 
   for (const run of candidateRuns(6, 3.5)) {
     const stamp = runStamp(run)
+    if (signal?.aborted) { log(`${name}: aborted — cancelling run search`); return 'failed' }
     let paramsChanged = false
     if (latestCompleteStamp(directory) === stamp) {
       if (fingerprintsEqual(readMarkerParams(directory, stamp), fingerprint)) return 'up-to-date'
@@ -259,7 +261,7 @@ async function gfsFetch(src: DownloadSource, log: (m: string) => void): Promise<
     const hh = stamp.slice(9, 11)
     const nomads = src.base ?? 'https://nomads.ncep.noaa.gov'
     const probe = `${nomads}/pub/data/nccf/com/gfs/prod/gfs.${date}/${hh}/atmos/gfs.t${hh}z.${prod}.f${String(steps[steps.length - 1]).padStart(3, '0')}.idx`
-    if (!(await httpOk(probe))) { log(`${name}: run ${stamp} not published yet (probe failed)`); continue }
+    if (!(await httpOk(probe, signal))) { log(`${name}: run ${stamp} not published yet (probe failed)`); continue }
 
     if (paramsChanged) { log(`${name}: fetch parameters changed — re-fetching run ${stamp}`); wipeRun(directory, stamp) }
 
@@ -273,7 +275,7 @@ async function gfsFetch(src: DownloadSource, log: (m: string) => void): Promise<
       const dest = path.join(directory, `${name}__${stamp}__f${String(step).padStart(3, '0')}.grb2`)
       if (fs.existsSync(dest)) continue
       const url = `${nomads}/cgi-bin/filter_gfs_${res}.pl?dir=%2Fgfs.${date}%2F${hh}%2Fatmos&file=gfs.t${hh}z.${prod}.f${String(step).padStart(3, '0')}&` + params.join('&')
-      if (!(await download(url, dest))) { log(`${name}: run ${stamp} failed at step f${String(step).padStart(3, '0')} — aborting`); return 'failed' }
+      if (!(await download(url, dest, signal))) { log(`${name}: run ${stamp} failed at step f${String(step).padStart(3, '0')} — aborting`); return 'failed' }
     }
     writeMarker(directory, stamp, fingerprint)
     cleanupOldRuns(directory, src.archiveRuns ?? 0, log, name)
@@ -298,7 +300,7 @@ function mfUrl(base: string, template: string, d: string, p: string, g: string):
   return `${base}/${template.replace('{d}', d).replace('{p}', p).replace('{g}', g).replace('{d}', d)}`
 }
 
-async function mfFetch(src: DownloadSource, log: (m: string) => void): Promise<Outcome> {
+async function mfFetch(src: DownloadSource, log: (m: string) => void, signal?: AbortSignal): Promise<Outcome> {
   const model = src.model
   const res = src.resolution ?? (model === 'arome' ? '0025' : '025')
   const key = `${model}/${res}`
@@ -313,6 +315,7 @@ async function mfFetch(src: DownloadSource, log: (m: string) => void): Promise<O
   const mfBase = src.base ?? MF_BASE
   for (const run of candidateRuns(spec.cadence, spec.delay)) {
     const stamp = runStamp(run)
+    if (signal?.aborted) { log(`${name}: aborted — cancelling run search`); return 'failed' }
     let paramsChanged = false
     if (latestCompleteStamp(directory) === stamp) {
       if (fingerprintsEqual(readMarkerParams(directory, stamp), fingerprint)) return 'up-to-date'
@@ -320,7 +323,7 @@ async function mfFetch(src: DownloadSource, log: (m: string) => void): Promise<O
     }
     const d = `${stamp.slice(0, 4)}-${stamp.slice(4, 6)}-${stamp.slice(6, 8)}T${stamp.slice(9, 11)}:00:00Z`
     const probe = mfUrl(mfBase, spec.template, d, packages[0], groups[groups.length - 1])
-    if (!(await httpOk(probe))) { log(`${name}: run ${stamp} not published yet (probe failed)`); continue }
+    if (!(await httpOk(probe, signal))) { log(`${name}: run ${stamp} not published yet (probe failed)`); continue }
 
     if (paramsChanged) { log(`${name}: fetch parameters changed — re-fetching run ${stamp}`); wipeRun(directory, stamp) }
 
@@ -330,7 +333,7 @@ async function mfFetch(src: DownloadSource, log: (m: string) => void): Promise<O
         const dest = path.join(directory, `${name}__${stamp}__${p}_${g}.grb2`)
         if (fs.existsSync(dest)) continue
         const url = mfUrl(mfBase, spec.template, d, p, g)
-        if (!(await download(url, dest))) { log(`${name}: run ${stamp} failed at ${p}/${g} — aborting`); return 'failed' }
+        if (!(await download(url, dest, signal))) { log(`${name}: run ${stamp} failed at ${p}/${g} — aborting`); return 'failed' }
       }
     }
     writeMarker(directory, stamp, fingerprint)
@@ -370,7 +373,7 @@ async function bz2Decompress(comp: Buffer): Promise<Buffer> {
   }
 }
 
-async function iconEuFetch(src: DownloadSource, log: (m: string) => void): Promise<Outcome> {
+async function iconEuFetch(src: DownloadSource, log: (m: string) => void, signal?: AbortSignal): Promise<Outcome> {
   const directory = src.directory
   const steps = stepsList(src.steps ?? { from: 0, to: 48, by: 3 })
   const variables = src.variables ?? ICON_EU_DEFAULT_VARS
@@ -380,6 +383,7 @@ async function iconEuFetch(src: DownloadSource, log: (m: string) => void): Promi
   const iconBase = src.base ?? ICON_EU_BASE
   for (const run of candidateRuns(6, 3.0)) {
     const stamp = runStamp(run)
+    if (signal?.aborted) { log(`${name}: aborted — cancelling run search`); return 'failed' }
     let paramsChanged = false
     if (latestCompleteStamp(directory) === stamp) {
       if (fingerprintsEqual(readMarkerParams(directory, stamp), fingerprint)) return 'up-to-date'
@@ -389,7 +393,7 @@ async function iconEuFetch(src: DownloadSource, log: (m: string) => void): Promi
     const ymdh = stamp.replace('T', '')
     const v0 = variables[0]
     const probe = `${iconBase}/${hh}/${v0}/icon-eu_europe_regular-lat-lon_single-level_${ymdh}_${String(steps[steps.length - 1]).padStart(3, '0')}_${v0.toUpperCase()}.grib2.bz2`
-    if (!(await httpOk(probe))) { log(`${name}: run ${stamp} not published yet (probe failed)`); continue }
+    if (!(await httpOk(probe, signal))) { log(`${name}: run ${stamp} not published yet (probe failed)`); continue }
 
     if (paramsChanged) { log(`${name}: fetch parameters changed — re-fetching run ${stamp}`); wipeRun(directory, stamp) }
 
@@ -405,7 +409,7 @@ async function iconEuFetch(src: DownloadSource, log: (m: string) => void): Promi
         const chunks: Buffer[] = []
         for (const v of variables) {
           const url = `${iconBase}/${hh}/${v}/icon-eu_europe_regular-lat-lon_single-level_${ymdh}_${String(step).padStart(3, '0')}_${v.toUpperCase()}.grib2.bz2`
-          const comp = await fetchBuffer(url)
+          const comp = await fetchBuffer(url, signal)
           chunks.push(await bz2Decompress(comp))
         }
         fs.writeFileSync(part, Buffer.concat(chunks))
@@ -427,7 +431,7 @@ async function iconEuFetch(src: DownloadSource, log: (m: string) => void): Promi
 
 // ── Public entry point ───────────────────────────────────────────────────────
 
-const FETCHERS: Record<ModelId, (s: DownloadSource, log: (m: string) => void) => Promise<Outcome>> = {
+const FETCHERS: Record<ModelId, (s: DownloadSource, log: (m: string) => void, signal?: AbortSignal) => Promise<Outcome>> = {
   gfs: gfsFetch,
   arome: mfFetch,
   arpege: mfFetch,
@@ -454,14 +458,17 @@ export function toDownloadSource(s: SourceSetting, gribsRoot: string, bbox?: Bbo
   }
 }
 
-export async function fetchSource(src: DownloadSource, onLog: (line: string) => void): Promise<Outcome> {
+// Fetch one source's latest run. `signal` aborts the work in flight: every
+// HTTP request of the run is bound to it, so aborting cancels the current
+// download instead of leaving it running in the background.
+export async function fetchSource(src: DownloadSource, onLog: (line: string) => void, signal?: AbortSignal): Promise<Outcome> {
   const log: string[] = []
   const sink = (m: string) => { log.push(m); onLog(m) }
   const fetcher = FETCHERS[src.model]
   if (!fetcher) { sink(`${src.name}: unknown model ${src.model}`); return 'failed' }
   fs.mkdirSync(src.directory, { recursive: true })
   try {
-    const outcome = await fetcher(src, sink)
+    const outcome = await fetcher(src, sink, signal)
     sink(`${src.name}: ${outcome}`)
     return outcome
   } catch (e) {

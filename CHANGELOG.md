@@ -26,6 +26,22 @@ All notable changes to this project will be documented in this file.
   each model's fetch path (download, up-to-date, unavailable, failed), the
   bzip2 decompress+concat path for ICON-EU, marker/fingerprint round-trips,
   and cleanup/archive rotation.
+- Tests for run cancellation (aborting the signal tears down the in-flight
+  request, no retries, no `.part` leftovers) and for write-stream
+  backpressure (a slow disk write paces the network read instead of
+  buffering the whole body in memory).
+
+### Fixed
+- The per-source download timeout now actively aborts the run: an
+  `AbortSignal` is propagated from the orchestrator through every fetch, and
+  the timeout timer is cleared once the run settles. Previously the timeout
+  only stopped *waiting* — the abandoned download kept running in the
+  background (and retrying), so a later trigger could run a second download
+  concurrently against the same `.part` and output files.
+- GRIB bodies are streamed to disk with `stream/promises` `pipeline`
+  (`Readable.fromWeb(response.body)` → `createWriteStream`), honouring
+  backpressure. Previously `write()` return values were ignored, so a large
+  Météo-France GRIB could be buffered entirely in memory.
 
 ## [0.2.1] — 2026-07-03
 

@@ -6,6 +6,7 @@ const fs = require('fs')
 const os = require('os')
 const path = require('path')
 const http = require('http')
+const { Writable } = require('stream')
 
 const {
   toDownloadSource,
@@ -34,7 +35,8 @@ function startServer(handler) {
   return new Promise((resolve, reject) => {
     server.listen(0, '127.0.0.1', () => {
       const base = `http://127.0.0.1:${server.address().port}`
-      const close = () => new Promise((r) => server.close(() => r()))
+      // closeAllConnections: a stalled/dangling request can never hang the suite.
+      const close = () => new Promise((r) => { server.closeAllConnections(); server.close(() => r()) })
       resolve({ base, log, close })
     })
     server.on('error', reject)
@@ -52,6 +54,17 @@ function payload(n, seed = 1) {
 function srcDir(gribsRoot, setting) {
   return path.join(gribsRoot, sourceDirName(setting))
 }
+
+// Poll `cond` until truthy or `timeoutMs` elapses; resolves to the last result.
+async function waitFor(cond, timeoutMs = 5000, stepMs = 10) {
+  const start = Date.now()
+  while (!cond() && Date.now() - start < timeoutMs) {
+    await new Promise((r) => setTimeout(r, stepMs))
+  }
+  return cond()
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
 let tmpdir
 
@@ -304,4 +317,121 @@ test('cleanup deletes older runs when archiveRuns is 0', async () => {
   const files = fs.readdirSync(dir)
   assert.ok(!files.includes('gfs-0p25__20260101T00__f000.grb2'), 'older run deleted (no archive)')
   assert.ok(!fs.existsSync(path.join(dir, 'archive')), 'no archive dir when archiveRuns=0')
+})
+
+// ── cancellation: aborting the run cancels the in-flight download ───────────
+
+test('gfs: aborting the signal cancels the in-flight download without retries', async () => {
+  const root = path.join(tmpdir, 'gfs-abort')
+  const setting = { model: 'gfs', resolution: '0p25', hours: 0 }   // single step f000
+  // The GET response emits one chunk, then stalls forever. A download that
+  // ignores the abort signal would never finish on its own.
+  let responseClosed = false
+  const srv = await startServer((req, res) => {
+    if (req.url.endsWith('.idx')) { res.end('idx\n'); return }       // probe
+    res.writeHead(200)
+    res.write(payload(4096))
+    res.on('close', () => { responseClosed = true })
+  })
+
+  const ds = toDownloadSource(setting, root, { latMin: 35, lonMin: -6, latMax: 45, lonMax: 17 })
+  ds.base = srv.base
+  const controller = new AbortController()
+  const log = []
+
+  // Guard: fail the test instead of hanging if the abort does not propagate.
+  let settled = false
+  const done = Promise.race([
+    sleep(10_000).then(() => ' hung — abort did not propagate'),
+    fetchSource(ds, (m) => log.push(m), controller.signal).then((o) => { settled = true; return ` ${o}` }),
+  ])
+  await waitFor(() => srv.log.some(e => e.method === 'GET'))        // download started
+  controller.abort(new Error('test cancel'))
+  const outcome = await done
+
+  assert.ok(settled, `fetchSource resolved promptly:${outcome}`)
+  assert.strictEqual(outcome.trim(), 'failed')
+  assert.ok(log.some(m => m.includes('failed')), 'failure is logged')
+  // No retry after the caller aborted — the aborted GET is the last request.
+  assert.strictEqual(srv.log.filter(e => e.method === 'GET').length, 1)
+  // The stalled connection was actively torn down by the client.
+  assert.ok(await waitFor(() => responseClosed), 'server saw the aborted connection close')
+  const dir = srcDir(root, setting)
+  assert.strictEqual(fs.readdirSync(dir).filter(f => f.endsWith('.part')).length, 0, 'no .part leftover')
+  assert.strictEqual(latestCompleteStamp(dir), null, 'no marker written')
+  await srv.close()
+})
+
+// ── backpressure: a slow disk write paces the network read ─────────────────
+
+test('gfs: honours write-stream backpressure instead of buffering the body', async () => {
+  const root = path.join(tmpdir, 'gfs-backpressure')
+  const setting = { model: 'gfs', resolution: '0p25', hours: 0 }     // single step f000
+  const chunk = payload(4096, 5)
+  const total = 256 * 1024                                           // 64 chunks
+  // Server-side pump with its own backpressure handling.
+  const srv = await startServer((req, res) => {
+    if (req.url.endsWith('.idx')) { res.end('idx\n'); return }
+    res.writeHead(200)
+    let sent = 0
+    const pump = () => {
+      while (sent < total) {
+        sent += chunk.length
+        if (!res.write(chunk)) { res.once('drain', pump); return }
+      }
+      res.end()
+    }
+    pump()
+  })
+
+  // Replace the .part WriteStream with a slow one (2 ms per write, tiny
+  // high-water mark) so write() returns false immediately. If the downloader
+  // ignores backpressure, writes pile up ahead of 'drain' events and the
+  // whole body would be buffered in the stream's internal queue.
+  const events = []
+  const realCreateWriteStream = fs.createWriteStream
+  fs.createWriteStream = (p) => {
+    fs.writeFileSync(p, Buffer.alloc(0))
+    const slow = new Writable({
+      highWaterMark: 16,
+      write(buf, _enc, cb) {
+        fs.appendFileSync(p, buf)                                    // real .part data
+        setTimeout(cb, 2)
+      },
+    })
+    const origWrite = slow.write.bind(slow)
+    slow.write = (buf, ...rest) => {
+      const ok = origWrite(buf, ...rest)
+      events.push(ok ? 'write' : 'write-false')
+      return ok
+    }
+    slow.on('drain', () => events.push('drain'))
+    return slow
+  }
+
+  try {
+    const ds = toDownloadSource(setting, root, { latMin: 35, lonMin: -6, latMax: 45, lonMax: 17 })
+    ds.base = srv.base
+    const outcome = await fetchSource(ds, () => {})
+    assert.strictEqual(outcome, 'downloaded')
+  } finally {
+    fs.createWriteStream = realCreateWriteStream
+    await srv.close()
+  }
+
+  assert.ok(events.includes('write-false'), 'backpressure actually occurred')
+  for (let i = 0; i < events.length; i++) {
+    if (events[i] !== 'write-false') continue
+    const next = events[i + 1]
+    assert.ok(next === 'drain' || next === undefined,
+      `write() returning false must be followed by drain, got ${next}`)
+  }
+  // Throttling must not corrupt the download: full payload, no leftovers.
+  const dir = srcDir(root, setting)
+  const files = fs.readdirSync(dir).filter(f => f.endsWith('.grb2'))
+  assert.strictEqual(files.length, 1)
+  const expected = Buffer.alloc(total)
+  for (let off = 0; off < total; off += chunk.length) chunk.copy(expected, off)
+  assert.ok(expected.equals(fs.readFileSync(path.join(dir, files[0]))), 'file matches the served payload')
+  assert.ok(latestCompleteStamp(dir) !== null, 'marker written')
 })

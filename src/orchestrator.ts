@@ -5,8 +5,9 @@ import { expectedRunStamp, fetchFingerprint, fingerprintsEqual, sourceDirName, M
 import { fetchSource, toDownloadSource, type Outcome } from './downloader'
 
 // Per-source download timeout — equivalent to the previous container job
-// timeout (JOB_TIMEOUT_S = 3600). Aborts a runaway download so the
-// scheduler and manual triggers don't hang indefinitely.
+// timeout (JOB_TIMEOUT_S = 3600). Firing it aborts the run's AbortController,
+// which cancels the in-flight fetches, so a timed-out download actually
+// stops instead of continuing against the same .part/output files.
 const SOURCE_TIMEOUT_MS = 3600_000
 const LOG_TAIL = 30
 
@@ -128,15 +129,22 @@ export class Orchestrator {
       this.log(`  ${name}: ${line}`)
     }
 
+    // The timeout actively cancels the download via the abort signal (the
+    // fetchers surface it as outcome 'failed'), and the timer is always
+    // cleared once the run settles.
+    const controller = new AbortController()
+    const timer = setTimeout(
+      () => controller.abort(new Error(`timeout after ${SOURCE_TIMEOUT_MS / 1000}s`)),
+      SOURCE_TIMEOUT_MS
+    )
+
     try {
-      const outcome = await Promise.race([
-        fetchSource(ds, onProgress),
-        new Promise<Outcome>((_, reject) =>
-          setTimeout(() => reject(new Error(`timeout after ${SOURCE_TIMEOUT_MS / 1000}s`)), SOURCE_TIMEOUT_MS)),
-      ])
+      const outcome = await fetchSource(ds, onProgress, controller.signal)
       st.lastOutcome = outcome
       if (outcome === 'failed') {
-        st.lastError = `download failed: ${st.lastLog.slice(-3).join(' | ') || 'see log'}`
+        st.lastError = controller.signal.aborted
+          ? `download aborted: ${controller.signal.reason ?? 'aborted'}`
+          : `download failed: ${st.lastLog.slice(-3).join(' | ') || 'see log'}`
         this.log(`${name}: ${st.lastError}`)
       } else {
         this.log(`${name}: download finished (${outcome})`)
@@ -148,6 +156,7 @@ export class Orchestrator {
       this.log(`${name}: download error: ${err}`)
       return false
     } finally {
+      clearTimeout(timer)
       st.running = false
       st.lastFinishedAt = new Date().toISOString()
       this.onChange()
