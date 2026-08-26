@@ -8,11 +8,9 @@ with a management webapp.
 ## What it does
 
 Each configured source (model + resolution) downloads into
-`<root>/<model>-<resolution>/` through a one-shot
-[grib-downloader](https://github.com/macjl/grib-downloader) container job run
-via the [signalk-container](https://github.com/dirkwa/signalk-container)
-plugin. Point signalk-grib-weather-provider's root at the same directory and
-every source is served as a weather provider automatically.
+`<root>/<model>-<resolution>/` through an in-process fetcher — no container
+runtime, no image pulls. Point signalk-grib-weather-provider's root at the
+same directory and every source is served as a weather provider automatically.
 
 Supported models: **GFS** (0.25°/0.5°/1°, NOMADS server-side area subsetting),
 **AROME** (0.025°/0.01°), **ARPEGE** (0.1°/0.25°), **ICON-EU**.
@@ -45,7 +43,7 @@ not in the plugin config panel:
 
 Settings are stored in the plugin's data directory (`settings.json`), written
 only through the webapp — the admin config panel only holds infrastructure
-(GRIB root directory, downloader image).
+(the GRIB root directory).
 
 ## Data lifecycle
 
@@ -60,13 +58,13 @@ only through the webapp — the admin config panel only holds infrastructure
 
 ## Requirements
 
-- Signal K server ≥ 2.x
-- [signalk-container](https://github.com/dirkwa/signalk-container) with a
-  working container runtime (declared via `signalk.requires` — the App Store
-  installs it automatically)
-- The `ghcr.io/macjl/grib-downloader` image (pulled automatically on first use)
+- Signal K server ≥ 2.x with Node ≥ 18
 - [signalk-grib-weather-provider](https://github.com/macjl/signalk-grib-weather-provider)
   ≥ 0.2.0 to serve the downloaded data
+
+No container runtime is required — downloads run in-process. (ICON-EU
+downloads decompress `.bz2` GRIB fragments in-process via a bundled wasm
+bzip2 library.)
 
 ## License
 

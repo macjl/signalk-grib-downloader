@@ -1,13 +1,14 @@
 import * as fs from 'fs'
 import * as path from 'path'
 import { Bbox, SourceSetting, SourceStatus } from './types'
-import { downloaderSourceConfig, expectedRunStamp, fetchFingerprint, fingerprintsEqual, sourceDirName, MODEL_MAX_HOURS } from './scheduler'
+import { expectedRunStamp, fetchFingerprint, fingerprintsEqual, sourceDirName, MODEL_MAX_HOURS } from './scheduler'
+import { fetchSource, toDownloadSource, type Outcome } from './downloader'
 
-const PLUGIN_ID = 'signalk-grib-downloader'
-const JOB_TIMEOUT_S = 3600
+// Per-source download timeout — equivalent to the previous container job
+// timeout (JOB_TIMEOUT_S = 3600). Aborts a runaway download so the
+// scheduler and manual triggers don't hang indefinitely.
+const SOURCE_TIMEOUT_MS = 3600_000
 const LOG_TAIL = 30
-
-type Outcome = 'downloaded' | 'up-to-date' | 'unavailable' | 'failed'
 
 interface SourceState {
   running: boolean
@@ -19,15 +20,12 @@ interface SourceState {
 
 export class Orchestrator {
   private states = new Map<string, SourceState>()
-  private configPath: string | null = null
 
   constructor(
     private sources: SourceSetting[],
-    private gribsRoot: string,
-    private image: string,
-    private dataDir: string,        // plugin data dir (SignalK-visible)
+    private gribsRoot: string,    // local path where source subdirs live
     private log: (msg: string) => void,
-    private onChange: () => void,   // notify status updates
+    private onChange: () => void, // notify status updates
     private bbox?: Bbox
   ) {
     for (const s of sources) {
@@ -35,10 +33,6 @@ export class Orchestrator {
         running: false, lastError: null, lastOutcome: null, lastFinishedAt: null, lastLog: [],
       })
     }
-  }
-
-  private containers(): any {
-    return (globalThis as any).__signalk_containerManager ?? null
   }
 
   autoSources(): SourceSetting[] {
@@ -112,95 +106,46 @@ export class Orchestrator {
     })
   }
 
-  // Write the downloader config (JSON is valid YAML) into the plugin data
-  // dir so the job container can mount and read it.
-  private writeConfig(dataRootInJob: string, sources: SourceSetting[] = this.sources): string {
-    const config = {
-      sources: sources.map(s =>
-        downloaderSourceConfig(s, dataRootInJob, this.bbox)
-      ),
-    }
-    const p = path.join(this.dataDir, 'downloader-config.json')
-    fs.mkdirSync(this.dataDir, { recursive: true })
-    fs.writeFileSync(p, JSON.stringify(config, null, 2))
-    return p
-  }
-
-  // Download one source (no-op if its job is already running).
-  // Returns true if a job was executed.
+  // Download one source (no-op if it is already running).
+  // Returns true if a fetch was executed.
   async downloadSource(source: SourceSetting): Promise<boolean> {
     const name = sourceDirName(source)
     const st = this.states.get(name)!
     if (st.running) return false
 
-    const containers = this.containers()
-    if (!containers?.getRuntime?.()) {
-      st.lastError = 'signalk-container not available'
-      this.onChange()
-      return false
-    }
-
-    const rData = await containers.resolveHostPath(this.gribsRoot)
-    const rCfg = await containers.resolveHostPath(this.dataDir)
-    if (!rData || !rCfg) {
-      const bad = !rData ? this.gribsRoot : this.dataDir
-      st.lastError =
-        `${bad} is not reachable from the container runtime. When SignalK ` +
-        `runs in a container, the GRIB root must live inside a mounted ` +
-        `volume — e.g. inside the SignalK data directory (the default).`
-      this.onChange()
-      return false
-    }
-    const dataRootInJob = rData.subPath ? `/data/${rData.subPath}` : '/data'
-    const cfgInJob = (rCfg.subPath ? `/cfg/${rCfg.subPath}` : '/cfg') + '/downloader-config.json'
-
     fs.mkdirSync(path.join(this.gribsRoot, name), { recursive: true })
-    this.writeConfig(dataRootInJob)
 
     st.running = true
     st.lastError = null
     st.lastLog = []
     this.onChange()
-    this.log(`${name}: starting download job`)
+    this.log(`${name}: starting download`)
+
+    const ds = toDownloadSource(source, this.gribsRoot, this.bbox)
+    const onProgress = (line: string) => {
+      st.lastLog.push(line)
+      if (st.lastLog.length > LOG_TAIL) st.lastLog.shift()
+      this.log(`  ${name}: ${line}`)
+    }
 
     try {
-      const result = await containers.runJob({
-        image: this.image,
-        command: [
-          'python3', '/app/downloader.py',
-          '--config', cfgInJob,
-          '--once', '--source', name,
-        ],
-        inputs:  { '/cfg': rCfg.source },
-        outputs: { '/data': rData.source },
-        timeout: JOB_TIMEOUT_S,
-        ownerPluginId: PLUGIN_ID,
-        label: `grib-download ${name}`,
-        onProgress: (line: string) => {
-          st.lastLog.push(line)
-          if (st.lastLog.length > LOG_TAIL) st.lastLog.shift()
-          this.log(`  ${name}: ${line}`)
-        },
-      })
-      // The downloader logs a final outcome line per source:
-      //   "HH:MM:SS INFO <name>: downloaded|up-to-date|unavailable|failed"
-      const outcomeRe = new RegExp(`INFO ${name}: (downloaded|up-to-date|unavailable|failed)\\s*$`)
-      for (let i = st.lastLog.length - 1; i >= 0; i--) {
-        const m = outcomeRe.exec(st.lastLog[i])
-        if (m) { st.lastOutcome = m[1] as Outcome; break }
-      }
-      if (result.status !== 'completed' || result.exitCode !== 0) {
-        st.lastOutcome = 'failed'
-        st.lastError = `job ${result.status} (exit ${result.exitCode}): ${result.log?.slice(-3).join(' | ')}`
+      const outcome = await Promise.race([
+        fetchSource(ds, onProgress),
+        new Promise<Outcome>((_, reject) =>
+          setTimeout(() => reject(new Error(`timeout after ${SOURCE_TIMEOUT_MS / 1000}s`)), SOURCE_TIMEOUT_MS)),
+      ])
+      st.lastOutcome = outcome
+      if (outcome === 'failed') {
+        st.lastError = `download failed: ${st.lastLog.slice(-3).join(' | ') || 'see log'}`
         this.log(`${name}: ${st.lastError}`)
       } else {
-        this.log(`${name}: download job finished (${st.lastOutcome ?? 'outcome unknown'})`)
+        this.log(`${name}: download finished (${outcome})`)
       }
       return true
     } catch (err) {
       st.lastOutcome = 'failed'
       st.lastError = String(err)
-      this.log(`${name}: job error: ${err}`)
+      this.log(`${name}: download error: ${err}`)
       return false
     } finally {
       st.running = false

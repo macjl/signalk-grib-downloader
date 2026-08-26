@@ -61,8 +61,8 @@ export function expectedRunStamp(model: ModelId, now: Date = new Date()): string
   return `${y}${m}${d}T${String(cycleHour).padStart(2, '0')}`
 }
 
-// Build the per-source entry of the downloader config from a SourceSetting.
-// `dataRoot` is the path of the gribs root *inside the job container*.
+// Build the per-source fetch descriptor from a SourceSetting.
+// `dataRoot` is the local gribs root; the source directory is <root>/<name>.
 export function downloaderSourceConfig(s: SourceSetting, dataRoot: string, bbox?: Bbox) {
   const model = s.model
   const res = s.resolution || defaultResolution(model)
