@@ -1,7 +1,7 @@
 {
   "name": "signalk-grib-downloader",
-  "version": "0.2.1",
-  "description": "Orchestrates automatic or manual GRIB downloads (GFS, AROME, ARPEGE, ICON-EU) through containerised jobs — feeds signalk-grib-weather-provider",
+  "version": "0.2.2",
+  "description": "Orchestrates automatic or manual GRIB downloads (GFS, AROME, ARPEGE, ICON-EU) in-process — feeds signalk-grib-weather-provider",
   "main": "dist/index.js",
   "scripts": {
     "build": "tsc",
@@ -40,7 +40,7 @@
     "CHANGELOG.md"
   ],
   "engines": {
-    "node": ">=18"
+    "node": ">=18.17"
   },
   "signalk-plugin-enabled-by-default": false,
   "signalk": {

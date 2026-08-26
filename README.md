@@ -58,7 +58,7 @@ only through the webapp — the admin config panel only holds infrastructure
 
 ## Requirements
 
-- Signal K server ≥ 2.x with Node ≥ 18
+- Signal K server ≥ 2.x with Node ≥ 18.17
 - [signalk-grib-weather-provider](https://github.com/macjl/signalk-grib-weather-provider)
   ≥ 0.2.0 to serve the downloaded data
 

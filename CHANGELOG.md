@@ -2,12 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [0.2.2] — 2026-08-27
 
 ### Changed
 - **Removed the container dependency.** Downloads now run in-process in
   TypeScript — no `signalk-container` plugin, no container runtime, no image
-  pulls. The plugin runs on a plain Signal K server with Node ≥ 18.
+  pulls. The plugin runs on a plain Signal K server with Node ≥ 18.17.
   - Removed `signalk.requires: ["signalk-container"]`.
   - Removed the `downloaderImage` plugin config option and the container
     runtime/`runJob` plumbing from the orchestrator and plugin host.
@@ -42,6 +42,9 @@ All notable changes to this project will be documented in this file.
   (`Readable.fromWeb(response.body)` → `createWriteStream`), honouring
   backpressure. Previously `write()` return values were ignored, so a large
   Météo-France GRIB could be buffered entirely in memory.
+- Météo-France AROME and ARPEGE URLs now replace every template placeholder;
+  downloads previously probed a filename containing a literal `{p}` and were
+  incorrectly reported unavailable.
 
 ## [0.2.1] — 2026-07-03
 

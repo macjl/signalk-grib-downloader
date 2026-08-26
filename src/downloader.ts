@@ -7,7 +7,8 @@ import { downloaderSourceConfig, fetchFingerprint, fingerprintsEqual, sourceDirN
 
 // Native in-process GRIB downloader — a TypeScript port of the previous
 // containerised Python job (grib-downloader/downloader.py). No container
-// runtime, no image pulls, no Python. Runs on Node ≥ 18 (uses global fetch).
+// runtime, no image pulls, no Python. Runs on Node ≥ 18.17 (uses global fetch
+// and AbortSignal.any).
 //
 // Outcome protocol per source (mirrors the Python logs):
 //   'downloaded' | 'up-to-date' | 'unavailable' | 'failed'
