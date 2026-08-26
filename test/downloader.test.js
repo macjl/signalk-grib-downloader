@@ -147,6 +147,12 @@ test('arome: downloads each package×group, writes a marker', async () => {
   const root = path.join(tmpdir, 'arome-run')
   const setting = { model: 'arome', resolution: '0025', hours: 18 }  // 3 groups
   const srv = await startServer((req, res) => {
+    // Assert the requested path has no unreplaced placeholders
+    assert.ok(!req.url.includes('{d}') && !req.url.includes('{p}') && !req.url.includes('{g}'),
+      `URL contains unreplaced placeholders: ${req.url}`)
+    // SP1 should appear in both the directory and filename
+    const sp1Count = (req.url.match(/SP1/g) || []).length
+    assert.strictEqual(sp1Count, 2, `SP1 should appear twice in URL, found ${sp1Count}: ${req.url}`)
     if (req.method === 'HEAD') { res.end(); return }                 // probe
     res.end(payload(32, 3))
   })

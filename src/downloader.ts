@@ -297,7 +297,7 @@ const MF_MODELS: Record<string, { template: string; cadence: number; delay: numb
 }
 
 function mfUrl(base: string, template: string, d: string, p: string, g: string): string {
-  return `${base}/${template.replace('{d}', d).replace('{p}', p).replace('{g}', g).replace('{d}', d)}`
+  return `${base}/${template.replaceAll('{d}', d).replaceAll('{p}', p).replaceAll('{g}', g)}`
 }
 
 async function mfFetch(src: DownloadSource, log: (m: string) => void, signal?: AbortSignal): Promise<Outcome> {
