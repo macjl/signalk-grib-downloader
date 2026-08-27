@@ -48,6 +48,9 @@
     "appIcon": "./icon.svg",
     "screenshots": [
       "./public/screenshot.png"
+    ],
+    "recommends": [
+      "@meri-imperiumi/signalk-internet"
     ]
   },
   "peerDependencies": {

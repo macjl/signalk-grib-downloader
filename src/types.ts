@@ -19,10 +19,16 @@ export interface Bbox {
   lonMax: number
 }
 
+// Connectivity, as published on `network.internet.state` by whatever
+// plugin tracks the uplink. 'unknown' (path absent / no publisher
+// installed) behaves exactly as 'online'.
+export type InternetState = 'online' | 'offline' | 'metered' | 'unknown'
+
 // Infrastructure settings — managed in the SignalK plugin config panel.
 export interface PluginSettings {
-  gribsRoot?: string          // local path where source subdirs live
-  checkIntervalMinutes?: number // automatic scheduler interval
+  gribsRoot?: string                 // local path where source subdirs live
+  checkIntervalMinutes?: number      // fallback/retry gap for the auto scheduler
+  meteredIntervalMultiplier?: number // auto waits stretch by this factor when metered
 }
 
 // Operational settings — managed in the webapp, persisted by the plugin

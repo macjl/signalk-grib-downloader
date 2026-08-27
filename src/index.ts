@@ -1,13 +1,24 @@
 import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
-import { Plugin, ServerAPI } from '@signalk/server-api'
+import { Path, Plugin, ServerAPI } from '@signalk/server-api'
 import { Orchestrator } from './orchestrator'
 import { sourceDirName } from './scheduler'
-import { AppSettings, PluginSettings } from './types'
+import { AppSettings, InternetState, PluginSettings } from './types'
 
 const PLUGIN_ID = 'signalk-grib-downloader'
 const DEFAULT_CHECK_INTERVAL_MINUTES = 10
+
+// Slack added to each model's expected publication time so the upstream
+// has actually listed the files, and the default metered-link stretch.
+const PUBLISH_SLACK_MS = 5 * 60_000
+const DEFAULT_METERED_MULTIPLIER = 3
+// setTimeout delays are 32-bit — never schedule further out than this.
+const TIMER_MAX_MS = 2_147_483_000
+
+// SignalK path publishing the uplink state (online | offline | metered),
+// maintained by whichever connectivity-tracking plugin is installed.
+const INTERNET_STATE_PATH = 'network.internet.state' as Path
 
 // "~/gribs" is not expanded by Node — resolve it ourselves.
 function expandHome(p: string): string {
@@ -20,7 +31,7 @@ function expandHome(p: string): string {
 // Operational download choices (area and sources) are managed in the webapp at
 // /signalk-grib-downloader/ and stored in <dataDir>/settings.json — the
 // admin form cannot clobber it.
-const buildSchema = (defaultRoot: string, defaultInterval: number) => ({
+const buildSchema = (defaultRoot: string, defaultInterval: number, defaultMultiplier: number) => ({
   type: 'object',
   description:
     'Sources and download area are managed in the GRIB Downloader webapp ' +
@@ -30,9 +41,21 @@ const buildSchema = (defaultRoot: string, defaultInterval: number) => ({
       type: 'number',
       title: 'Automatic check interval (minutes)',
       description:
-        'How often auto-enabled sources are checked for a newly published run. ' +
+        'Fallback cadence for automatic downloads. The primary schedule follows ' +
+        'each model\'s publication times; when a run is late or a download ' +
+        'fails, sources are retried at most this often. ' +
         'Manual downloads are always available from the webapp.',
       default: defaultInterval,
+      minimum: 1,
+    },
+    meteredIntervalMultiplier: {
+      type: 'number',
+      title: 'Metered connection slowdown (×)',
+      description:
+        'On a metered connection (pay-per-MB satellite), automatic checks wait ' +
+        'this many times longer after each expected publication. ' +
+        'Manual downloads are never blocked.',
+      default: defaultMultiplier,
       minimum: 1,
     },
     gribsRoot: {
@@ -54,7 +77,11 @@ const DEFAULT_APP_SETTINGS: AppSettings = {
 
 module.exports = (server: ServerAPI): Plugin => {
   let orchestrator: Orchestrator | null = null
-  let timer: ReturnType<typeof setInterval> | null = null
+  let timer: ReturnType<typeof setTimeout> | null = null
+  let nextTickAtMs: number | null = null
+  let ticking = false
+  let internetState: InternetState = 'unknown'
+  let stopInternetStream: (() => void) | null = null
   let infra: PluginSettings = {}
   let settings: AppSettings = { ...DEFAULT_APP_SETTINGS }
   let legacyIntervalMinutes: number | undefined
@@ -73,6 +100,14 @@ module.exports = (server: ServerAPI): Plugin => {
     validInterval(infra.checkIntervalMinutes) ??
     legacyIntervalMinutes ??
     DEFAULT_CHECK_INTERVAL_MINUTES
+
+  const validMultiplier = (value: unknown): number | undefined => {
+    const n = Number(value)
+    return Number.isFinite(n) && n >= 1 ? n : undefined
+  }
+
+  const meteredMultiplier = () =>
+    validMultiplier(infra.meteredIntervalMultiplier) ?? DEFAULT_METERED_MULTIPLIER
 
   const normalizeSettings = (raw: AppSettings): AppSettings => {
     const legacyManual = raw.mode === 'manual'
@@ -129,12 +164,99 @@ module.exports = (server: ServerAPI): Plugin => {
       const mode = s.autoDownload ? 'auto' : 'manual'
       return `${s.name}: ${mode} ${s.upToDate ? '✓' : '…'} ${s.lastRun ?? 'no data'}`
     }).filter(Boolean)
+    const gate = internetState === 'offline'
+      ? 'offline — auto paused'
+      : internetState === 'metered'
+        ? 'metered — auto slowed'
+        : null
+    if (gate) parts.unshift(gate)
     server.setPluginStatus(parts.join(' · ') || 'no sources (configure in the webapp)')
   }
 
-  // (Re)build the orchestrator and timer from current infra + settings.
+  // ── Internet-aware, publication-aware auto scheduling ──────────────
+  // Auto checks fire shortly after each model's next run is expected to
+  // publish — not on a blind wall-clock timer. checkIntervalMinutes is the
+  // fallback: the longest we wait before retrying a late or failed run.
+  // `network.internet.state` (when some plugin publishes it) gates the
+  // schedule: offline pauses auto downloads, metered stretches every wait
+  // by meteredIntervalMultiplier. Without the path the state stays
+  // 'unknown', which behaves exactly as 'online' — no delta publisher
+  // required.
+
+  const isInternetState = (v: unknown): v is InternetState =>
+    v === 'online' || v === 'offline' || v === 'metered' || v === 'unknown'
+
+  // Everything the scheduler waits for stretches on a metered link: the
+  // post-publication slack and the fallback retry gap alike.
+  const timingScale = () => internetState === 'metered' ? meteredMultiplier() : 1
+
+  // Delay until some auto source next needs attention.
+  const nextAutoTickDelayMs = (): number | null => {
+    const orch = orchestrator
+    if (!orch) return null
+    const auto = orch.autoSources()
+    if (auto.length === 0) return null
+    const scale = timingScale()
+    const timing = {
+      retryMs: intervalMinutes() * 60_000 * scale,
+      slackMs: PUBLISH_SLACK_MS * scale,
+    }
+    const earliest = Math.min(...auto.map(s => orch.nextTickAt(s, timing).getTime()))
+    return Math.min(TIMER_MAX_MS, Math.max(0, earliest - Date.now()))
+  }
+
+  const scheduleNextTick = (): void => {
+    if (timer) { clearTimeout(timer); timer = null }
+    nextTickAtMs = null
+    if (!orchestrator || internetState === 'offline') return
+    const delay = nextAutoTickDelayMs()
+    if (delay === null) return
+    nextTickAtMs = Date.now() + delay
+    timer = setTimeout(runTick, delay)
+    server.debug(`auto: next check in ${Math.round(delay / 60_000)} min`)
+  }
+
+  // One auto tick, rescheduling once it settles. A tick awaits its
+  // downloads; a trigger arriving mid-flight is skipped and the settling
+  // tick reschedules, so downloads stay sequential.
+  const runTick = (): void => {
+    if (timer) { clearTimeout(timer); timer = null }
+    nextTickAtMs = null
+    if (!orchestrator || ticking) return
+    ticking = true
+    orchestrator.tick(internetState)
+      .catch((err: unknown) => server.debug(`tick error: ${err}`))
+      .finally(() => {
+        ticking = false
+        scheduleNextTick()
+        updateStatus()
+      })
+  }
+
+  const onInternetState = (value: unknown): void => {
+    const next = isInternetState(value) ? value : 'unknown'
+    if (next === internetState) return
+    const prev = internetState
+    internetState = next
+    server.debug(`internet: ${prev} → ${next}`)
+    if (next === 'offline') {
+      if (timer) { clearTimeout(timer); timer = null }
+      nextTickAtMs = null
+      updateStatus()
+      return
+    }
+    // Connectivity (re)established or throttling changed: when we were
+    // paused or slowed, catch up right away instead of waiting for the
+    // (possibly far-away) next scheduled tick.
+    if (prev === 'offline' || prev === 'metered') runTick()
+    else scheduleNextTick()
+    updateStatus()
+  }
+
+  // (Re)build the orchestrator and auto scheduler from current settings.
   const apply = (): void => {
-    if (timer) { clearInterval(timer); timer = null }
+    if (timer) { clearTimeout(timer); timer = null }
+    nextTickAtMs = null
 
     const sources = settings.sources ?? []
     orchestrator = new Orchestrator(
@@ -146,39 +268,55 @@ module.exports = (server: ServerAPI): Plugin => {
     )
 
     if (sources.some(s => s.autoDownload !== false)) {
-      const interval = intervalMinutes() * 60_000
-      orchestrator.tick().catch((err: unknown) => server.debug(`tick error: ${err}`))
-      timer = setInterval(
-        () => orchestrator?.tick().catch((err: unknown) => server.debug(`tick error: ${err}`)),
-        interval
-      )
+      runTick() // immediate catch-up; reschedules when it settles
+    } else {
+      updateStatus()
     }
-    updateStatus()
   }
 
   const plugin: Plugin = {
     id: PLUGIN_ID,
     name: 'GRIB Downloader',
-    schema: () => buildSchema(DEFAULT_ROOT, intervalMinutes()),
+    schema: () => buildSchema(DEFAULT_ROOT, intervalMinutes(), meteredMultiplier()),
 
     start: (options: PluginSettings & AppSettings) => {
       infra = {
         gribsRoot: options?.gribsRoot,
         checkIntervalMinutes: validInterval(options?.checkIntervalMinutes),
+        meteredIntervalMultiplier: validMultiplier(options?.meteredIntervalMultiplier),
       }
       settings = loadSettings(options ?? {})
+
+      // Follow network.internet.state if some plugin publishes it: seed
+      // from the server's tree, then follow its deltas. Without a
+      // publisher neither ever fires and the state stays 'unknown',
+      // which behaves exactly as 'online' (today's behavior).
+      const seed = server.getSelfPath(INTERNET_STATE_PATH)
+      internetState = isInternetState(seed) ? seed : 'unknown'
+      stopInternetStream = server.streambundle
+        .getSelfStream(INTERNET_STATE_PATH)
+        .onValue(onInternetState)
+
       apply()
     },
 
     stop: () => {
-      if (timer) { clearInterval(timer); timer = null }
+      stopInternetStream?.()
+      stopInternetStream = null
+      if (timer) { clearTimeout(timer); timer = null }
+      nextTickAtMs = null
       orchestrator = null
     },
 
     registerWithRouter: (router: any) => {
       router.get('/status', (_req: any, res: any) => {
         if (!orchestrator) return res.status(503).json({ error: 'plugin not started' })
-        res.json({ checkIntervalMinutes: intervalMinutes(), sources: orchestrator.status() })
+        res.json({
+          checkIntervalMinutes: intervalMinutes(),
+          internetState,
+          nextAutoTickAt: nextTickAtMs === null ? null : new Date(nextTickAtMs).toISOString(),
+          sources: orchestrator.status(),
+        })
       })
 
       // Operational settings, webapp-managed. ('/config' would collide with

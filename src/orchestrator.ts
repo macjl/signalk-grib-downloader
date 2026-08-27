@@ -1,7 +1,7 @@
 import * as fs from 'fs'
 import * as path from 'path'
-import { Bbox, SourceSetting, SourceStatus } from './types'
-import { expectedRunStamp, fetchFingerprint, fingerprintsEqual, sourceDirName, MODEL_MAX_HOURS } from './scheduler'
+import { Bbox, InternetState, SourceSetting, SourceStatus } from './types'
+import { expectedRunStamp, fetchFingerprint, fingerprintsEqual, nextPublishAt, sourceDirName, MODEL_MAX_HOURS } from './scheduler'
 import { fetchSource, toDownloadSource, type Outcome } from './downloader'
 
 // Per-source download timeout — equivalent to the previous container job
@@ -99,12 +99,25 @@ export class Orchestrator {
     })
   }
 
-  // Sources whose expected run is newer than the last completed one.
+  // Sources whose expected run is newer than the last completed one, or
+  // whose on-disk data was fetched with different parameters.
+  private isBehind(source: SourceSetting): boolean {
+    const last = this.lastRunStamp(source)
+    return last === null || last < expectedRunStamp(source.model) || !this.paramsOk(source, last)
+  }
+
   staleSources(sources: SourceSetting[] = this.autoSources()): SourceSetting[] {
-    return sources.filter(s => {
-      const last = this.lastRunStamp(s)
-      return last === null || last < expectedRunStamp(s.model) || !this.paramsOk(s, last)
-    })
+    return sources.filter(s => this.isBehind(s))
+  }
+
+  // When the auto scheduler should next look at `source`: after
+  // `retryMs` if it is behind (late run, failed download, changed
+  // parameters), otherwise just after the model's next run is expected to
+  // publish (plus `slackMs`). The caller decides the timings; this only
+  // knows the model's publication schedule and what is on disk.
+  nextTickAt(source: SourceSetting, timing: { retryMs: number; slackMs: number }): Date {
+    if (this.isBehind(source)) return new Date(Date.now() + timing.retryMs)
+    return new Date(nextPublishAt(source.model).getTime() + timing.slackMs)
   }
 
   // Download one source (no-op if it is already running).
@@ -170,8 +183,14 @@ export class Orchestrator {
     }
   }
 
-  // Automatic tick: download every auto-enabled source whose expected run is missing.
-  async tick(): Promise<void> {
+  // Automatic tick: download every auto-enabled source whose expected run
+  // is missing. Suppressed entirely while offline — normally the scheduler
+  // does not even fire while offline, but the gate also covers catch-up
+  // triggers and state-change races. 'metered' only stretches the schedule
+  // (caller-side): when a stretched tick fires, downloads proceed.
+  // 'unknown' (no publisher of network.internet.state) behaves as 'online'.
+  async tick(internet: InternetState = 'online'): Promise<void> {
+    if (internet === 'offline') return
     const stale = this.staleSources().filter(s => !this.states.get(sourceDirName(s))!.running)
     if (stale.length > 0) {
       this.log(`auto: ${stale.length} source(s) behind: ${stale.map(s => sourceDirName(s)).join(', ')}`)

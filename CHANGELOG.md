@@ -2,6 +2,29 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Changed
+- **Internet-aware, publication-aware scheduling.** The flat check timer
+  (`setInterval` every `checkIntervalMinutes`) is replaced by an adaptive
+  scheduler: each auto source is checked shortly after its model's next
+  run is expected to publish (per-model cadence and publication delay plus
+  a 5-minute slack). `checkIntervalMinutes` becomes the fallback/retry
+  cadence — the longest we wait before retrying a late or failed run.
+- The plugin follows `network.internet.state` (`online` | `offline` |
+  `metered`) when some plugin publishes it: `offline` pauses auto
+  downloads until connectivity returns, then a single catch-up check
+  runs; `metered` stretches every automatic wait by the new
+  `meteredIntervalMultiplier` plugin setting (default ×3) to save
+  bandwidth on pay-per-MB links. Without the path (no publisher
+  installed) the state stays `unknown`, which behaves exactly as
+  `online` — no regression for existing setups.
+- Manual downloads are never gated server-side; the webapp asks for
+  confirmation before triggering one while `metered` or `offline`.
+- `GET /status` now reports `internetState` and `nextAutoTickAt`; the
+  webapp shows a connectivity badge ("metered — auto slowed",
+  "offline — auto paused") and the next scheduled check time.
+
 ## [0.2.2] — 2026-08-27
 
 ### Changed

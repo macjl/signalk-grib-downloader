@@ -3,7 +3,7 @@
 const { test } = require('node:test')
 const assert = require('node:assert')
 
-const { expectedRunStamp, downloaderSourceConfig, sourceDirName, MODEL_MAX_HOURS } = require('../dist/scheduler.js')
+const { expectedRunStamp, nextPublishAt, downloaderSourceConfig, sourceDirName, MODEL_MAX_HOURS } = require('../dist/scheduler.js')
 
 test('expectedRunStamp respects cadence and publication delay', () => {
   // GFS: cadence 6h, delay 5.5h. At 11:00 UTC → 11:00-5:30 = 05:30 → cycle 00
@@ -14,6 +14,41 @@ test('expectedRunStamp respects cadence and publication delay', () => {
   assert.strictEqual(expectedRunStamp('gfs', new Date('2026-06-11T03:00:00Z')), '20260610T18')
   // AROME: cadence 3h, delay 2.75h. At 12:00 → 09:15 → cycle 09
   assert.strictEqual(expectedRunStamp('arome', new Date('2026-06-11T12:00:00Z')), '20260611T09')
+})
+
+test('nextPublishAt gives the moment the expected run advances', () => {
+  // GFS: cadence 6h, delay 5.5h. At 11:00 UTC the expected cycle is 00,
+  // so the next run (06) is fully published at 00 + 6 + 5.5 = 11:30
+  assert.strictEqual(
+    nextPublishAt('gfs', new Date('2026-06-11T11:00:00Z')).toISOString(),
+    '2026-06-11T11:30:00.000Z'
+  )
+  // One second before the rollover the next publication is still 11:30
+  assert.strictEqual(
+    nextPublishAt('gfs', new Date('2026-06-11T11:29:59Z')).toISOString(),
+    '2026-06-11T11:30:00.000Z'
+  )
+  // Just after: expected cycle is 06 → next at 17:30
+  assert.strictEqual(
+    nextPublishAt('gfs', new Date('2026-06-11T11:31:00Z')).toISOString(),
+    '2026-06-11T17:30:00.000Z'
+  )
+  // Day rollover: at 03:00 UTC the expected cycle is 18 the previous
+  // day → next run publishes at 18:00 + 11.5h = 05:30 next day
+  assert.strictEqual(
+    nextPublishAt('gfs', new Date('2026-06-11T03:00:00Z')).toISOString(),
+    '2026-06-11T05:30:00.000Z'
+  )
+  // AROME: cadence 3h, delay 2.75h → 09:00 + 5.75h = 14:45
+  assert.strictEqual(
+    nextPublishAt('arome', new Date('2026-06-11T12:00:00Z')).toISOString(),
+    '2026-06-11T14:45:00.000Z'
+  )
+  // Always strictly in the future
+  const now = new Date('2026-06-11T12:00:00Z')
+  for (const model of ['gfs', 'arome', 'arpege', 'icon-eu']) {
+    assert.ok(nextPublishAt(model, now).getTime() > now.getTime())
+  }
 })
 
 test('source directory name is derived from model and resolution', () => {
