@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.4] — 2026-08-28
+
+### Changed
+- Declare `signalk-grib-weather-provider` as a required Signal K plugin: it
+  serves the GRIB files downloaded by this plugin. The optional
+  `@meri-imperiumi/signalk-internet` integration remains a recommendation.
+
 ## [0.2.3] — 2026-08-28
 
 ### Changed

@@ -1,6 +1,6 @@
 {
   "name": "signalk-grib-downloader",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "Orchestrates automatic or manual GRIB downloads (GFS, AROME, ARPEGE, ICON-EU) in-process — feeds signalk-grib-weather-provider",
   "main": "dist/index.js",
   "scripts": {
@@ -51,6 +51,9 @@
     ],
     "recommends": [
       "@meri-imperiumi/signalk-internet"
+    ],
+    "requires": [
+      "signalk-grib-weather-provider"
     ]
   },
   "peerDependencies": {
