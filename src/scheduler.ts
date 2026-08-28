@@ -61,6 +61,22 @@ export function expectedRunStamp(model: ModelId, now: Date = new Date()): string
   return `${y}${m}${d}T${String(cycleHour).padStart(2, '0')}`
 }
 
+// Date at which the run *after* the currently expected one becomes fully
+// published — the moment `expectedRunStamp(model)` next advances. The auto
+// scheduler ticks just after this (plus a slack for the upstream to
+// actually list the files) instead of polling on a blind timer.
+export function nextPublishAt(model: ModelId, now: Date = new Date()): Date {
+  const { cadenceH, delayH } = MODEL_TIMING[model]
+  const stamp = expectedRunStamp(model, now)
+  const cycle = Date.UTC(
+    Number(stamp.slice(0, 4)),
+    Number(stamp.slice(4, 6)) - 1,
+    Number(stamp.slice(6, 8)),
+    Number(stamp.slice(9, 11))
+  )
+  return new Date(cycle + (cadenceH + delayH) * 3_600_000)
+}
+
 // Build the per-source fetch descriptor from a SourceSetting.
 // `dataRoot` is the local gribs root; the source directory is <root>/<name>.
 export function downloaderSourceConfig(s: SourceSetting, dataRoot: string, bbox?: Bbox) {

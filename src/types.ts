@@ -19,10 +19,19 @@ export interface Bbox {
   lonMax: number
 }
 
+// Connectivity, as published on `network.internet.state` by whatever
+// plugin tracks the uplink (e.g. @meri-imperiumi/signalk-internet).
+// 'captive' (behind a captive portal: nominal connectivity, but nothing
+// but the portal's login page is reachable) pauses the auto scheduler
+// exactly like 'offline'. 'unknown' (path absent / no publisher
+// installed) behaves exactly as 'online'.
+export type InternetState = 'online' | 'offline' | 'metered' | 'captive' | 'unknown'
+
 // Infrastructure settings — managed in the SignalK plugin config panel.
 export interface PluginSettings {
-  gribsRoot?: string          // local path where source subdirs live
-  checkIntervalMinutes?: number // automatic scheduler interval
+  gribsRoot?: string                 // local path where source subdirs live
+  checkIntervalMinutes?: number      // fallback/retry gap for the auto scheduler
+  meteredIntervalMultiplier?: number // auto waits stretch by this factor when metered
 }
 
 // Operational settings — managed in the webapp, persisted by the plugin

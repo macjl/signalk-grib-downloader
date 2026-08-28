@@ -55,6 +55,9 @@
     .badge.err   { background: #4d1d22; color: #e37f8a; }
     .badge.off   { background: #31425c; color: #9fb0c5; }
     .badge.wait  { background: #243a52; color: #8fb8d8; }
+    .badge.metered { background: #4d3a1d; color: #e3c47f; }
+    .badge.offline { background: #4d1d22; color: #e37f8a; }
+    .badge.captive { background: #4d2d1d; color: #e3a07f; }
 
     .src-status { font-size: 11px; color: #9fb0c5; margin-top: 2px; }
     .log { font-family: ui-monospace, monospace; font-size: 11px; background: #131c29; border-radius: 6px;
@@ -91,6 +94,7 @@
       <div class="mode-row">
         <span style="font-size:12px;color:#9fb0c5" data-i18n="autoHint"></span>
         <span style="flex:1"></span>
+        <span id="net-badge"></span>
         <button id="btn-download-all"></button>
       </div>
       <div id="auto-interval" class="schedule-note"></div>
@@ -137,7 +141,13 @@ const I18N = {
   fr: {
     title: 'GRIB Downloader', auto: 'Auto', manual: 'Manuel',
     autoHint: 'Les sources cochées se téléchargent automatiquement. Les autres restent téléchargeables manuellement.',
-    autoInterval: n => `Intervalle auto : ${n} min (réglages du plugin)`,
+    autoInterval: n => `Téléchargements auto au calendrier de publication des modèles — nouvelle tentative au plus toutes les ${n} min (réglages du plugin)`,
+    nextCheck: d => ` · prochaine vérification : ${d}`,
+    netMetered: 'mesuré — auto ralenti', netOffline: 'hors ligne — auto en pause',
+    netCaptive: 'portail captif — auto en pause',
+    confirmMetered: 'Connexion facturée au volume (mesurée). Télécharger quand même maintenant ?',
+    confirmOffline: 'Actuellement hors ligne — le téléchargement va très probablement échouer. Essayer quand même ?',
+    confirmCaptive: 'Derrière un portail captif (page de connexion réseau) — le téléchargement va très probablement échouer. Essayer quand même ?',
     checkEvery: 'Vérifier toutes les', sources: 'Sources',
     thModel: 'Modèle', thRes: 'Résol.', thHours: 'Durée (h)', thDir: 'Répertoire', thState: 'État',
     addSource: '+ Ajouter une source', zone: 'Zone de téléchargement (GFS)',
@@ -159,7 +169,13 @@ const I18N = {
   en: {
     title: 'GRIB Downloader', auto: 'Auto', manual: 'Manual',
     autoHint: 'Checked sources download automatically. Others remain available for manual downloads.',
-    autoInterval: n => `Auto interval: ${n} min (plugin settings)`,
+    autoInterval: n => `Auto downloads follow each model's publication schedule — late or failed runs retried at most every ${n} min (plugin settings)`,
+    nextCheck: d => ` · next check: ${d}`,
+    netMetered: 'metered — auto slowed', netOffline: 'offline — auto paused',
+    netCaptive: 'captive — auto paused',
+    confirmMetered: 'Metered connection (billed per MB). Download now anyway?',
+    confirmOffline: 'Currently offline — the download will most likely fail. Try anyway?',
+    confirmCaptive: 'Behind a captive portal (network login page) — the download will most likely fail. Try anyway?',
     checkEvery: 'Check every', sources: 'Sources',
     thModel: 'Model', thRes: 'Res.', thHours: 'Hours', thDir: 'Directory', thState: 'State',
     addSource: '+ Add source', zone: 'Download area (GFS)',
@@ -217,6 +233,8 @@ function fmtVol(mb) {
 let config = { bbox: { latMin: 35, lonMin: -6, latMax: 45, lonMax: 17 }, sources: [] }
 let statusBySource = {}
 let schedulerError = null
+let internetState = 'unknown'
+let nextAutoTickAt = null
 let expanded = new Set()
 let pendingDataDeletions = new Set()
 let dirty = false
@@ -459,7 +477,17 @@ document.getElementById('btn-add').addEventListener('click', () => {
 // ── Schedule ─────────────────────────────────────────────────────────────────
 function renderSchedule() {
   const interval = config.checkIntervalMinutes ?? 10
-  document.getElementById('auto-interval').textContent = t.autoInterval(interval)
+  let text = t.autoInterval(interval)
+  if (nextAutoTickAt) text += t.nextCheck(new Date(nextAutoTickAt).toLocaleTimeString())
+  document.getElementById('auto-interval').textContent = text
+}
+
+function renderNetBadge() {
+  const el = document.getElementById('net-badge')
+  if (internetState === 'metered') el.innerHTML = `<span class="badge metered">${t.netMetered}</span>`
+  else if (internetState === 'captive') el.innerHTML = `<span class="badge captive">${t.netCaptive}</span>`
+  else if (internetState === 'offline') el.innerHTML = `<span class="badge offline">${t.netOffline}</span>`
+  else el.innerHTML = ''
 }
 
 // ── Actions ──────────────────────────────────────────────────────────────────
@@ -467,6 +495,12 @@ document.getElementById('btn-download-all').textContent = t.downloadAll
 document.getElementById('btn-download-all').addEventListener('click', () => triggerDownload())
 
 async function triggerDownload(name) {
+  // Manual downloads are never blocked server-side — but warn before
+  // spending metered bandwidth or attempting doomed offline/captive
+  // downloads.
+  if (internetState === 'metered' && !confirm(t.confirmMetered)) return
+  if ((internetState === 'offline' || internetState === 'captive') &&
+      !confirm(internetState === 'offline' ? t.confirmOffline : t.confirmCaptive)) return
   try {
     await fetch(`${API}/download${name ? '/' + encodeURIComponent(name) : ''}`, { method: 'POST' })
     setTimeout(pollStatus, 800)
@@ -546,10 +580,11 @@ async function pollStatus() {
     }
     const data = await r.json()
     schedulerError = data.schedulerError || null
-    if (data.checkIntervalMinutes) {
-      config.checkIntervalMinutes = data.checkIntervalMinutes
-      renderSchedule()
-    }
+    if (data.checkIntervalMinutes) config.checkIntervalMinutes = data.checkIntervalMinutes
+    internetState = data.internetState || 'unknown'
+    nextAutoTickAt = data.nextAutoTickAt || null
+    renderNetBadge()
+    renderSchedule()
     statusBySource = {}
     for (const s of data.sources) statusBySource[s.name] = s
     updateStatusUI()
