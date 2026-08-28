@@ -20,9 +20,12 @@ export interface Bbox {
 }
 
 // Connectivity, as published on `network.internet.state` by whatever
-// plugin tracks the uplink. 'unknown' (path absent / no publisher
+// plugin tracks the uplink (e.g. @meri-imperiumi/signalk-internet).
+// 'captive' (behind a captive portal: nominal connectivity, but nothing
+// but the portal's login page is reachable) pauses the auto scheduler
+// exactly like 'offline'. 'unknown' (path absent / no publisher
 // installed) behaves exactly as 'online'.
-export type InternetState = 'online' | 'offline' | 'metered' | 'unknown'
+export type InternetState = 'online' | 'offline' | 'metered' | 'captive' | 'unknown'
 
 // Infrastructure settings — managed in the SignalK plugin config panel.
 export interface PluginSettings {

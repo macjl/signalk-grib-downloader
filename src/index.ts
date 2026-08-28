@@ -16,8 +16,9 @@ const DEFAULT_METERED_MULTIPLIER = 3
 // setTimeout delays are 32-bit — never schedule further out than this.
 const TIMER_MAX_MS = 2_147_483_000
 
-// SignalK path publishing the uplink state (online | offline | metered),
-// maintained by whichever connectivity-tracking plugin is installed.
+// SignalK path publishing the uplink state (online | offline | metered |
+// captive), maintained by whichever connectivity-tracking plugin is
+// installed.
 const INTERNET_STATE_PATH = 'network.internet.state' as Path
 
 // "~/gribs" is not expanded by Node — resolve it ourselves.
@@ -166,9 +167,11 @@ module.exports = (server: ServerAPI): Plugin => {
     }).filter(Boolean)
     const gate = internetState === 'offline'
       ? 'offline — auto paused'
-      : internetState === 'metered'
-        ? 'metered — auto slowed'
-        : null
+      : internetState === 'captive'
+        ? 'captive portal — auto paused'
+        : internetState === 'metered'
+          ? 'metered — auto slowed'
+          : null
     if (gate) parts.unshift(gate)
     server.setPluginStatus(parts.join(' · ') || 'no sources (configure in the webapp)')
   }
@@ -178,13 +181,18 @@ module.exports = (server: ServerAPI): Plugin => {
   // publish — not on a blind wall-clock timer. checkIntervalMinutes is the
   // fallback: the longest we wait before retrying a late or failed run.
   // `network.internet.state` (when some plugin publishes it) gates the
-  // schedule: offline pauses auto downloads, metered stretches every wait
-  // by meteredIntervalMultiplier. Without the path the state stays
-  // 'unknown', which behaves exactly as 'online' — no delta publisher
-  // required.
+  // schedule: offline and captive portals pause auto downloads, metered
+  // stretches every wait by meteredIntervalMultiplier. Without the path
+  // the state stays 'unknown', which behaves exactly as 'online' — no
+  // delta publisher required.
 
   const isInternetState = (v: unknown): v is InternetState =>
-    v === 'online' || v === 'offline' || v === 'metered' || v === 'unknown'
+    v === 'online' || v === 'offline' || v === 'metered' || v === 'captive' || v === 'unknown'
+
+  // No auto scheduling or ticking while there is no usable internet:
+  // offline means no link, captive means every request lands on the
+  // portal's login page. Both pause the scheduler identically.
+  const autoPaused = () => internetState === 'offline' || internetState === 'captive'
 
   // Everything the scheduler waits for stretches on a metered link: the
   // post-publication slack and the fallback retry gap alike.
@@ -208,7 +216,7 @@ module.exports = (server: ServerAPI): Plugin => {
   const scheduleNextTick = (): void => {
     if (timer) { clearTimeout(timer); timer = null }
     nextTickAtMs = null
-    if (!orchestrator || internetState === 'offline') return
+    if (!orchestrator || autoPaused()) return
     const delay = nextAutoTickDelayMs()
     if (delay === null) return
     nextTickAtMs = Date.now() + delay
@@ -239,16 +247,16 @@ module.exports = (server: ServerAPI): Plugin => {
     const prev = internetState
     internetState = next
     server.debug(`internet: ${prev} → ${next}`)
-    if (next === 'offline') {
+    if (next === 'offline' || next === 'captive') {
       if (timer) { clearTimeout(timer); timer = null }
       nextTickAtMs = null
       updateStatus()
       return
     }
     // Connectivity (re)established or throttling changed: when we were
-    // paused or slowed, catch up right away instead of waiting for the
-    // (possibly far-away) next scheduled tick.
-    if (prev === 'offline' || prev === 'metered') runTick()
+    // paused (offline or captive) or slowed, catch up right away instead
+    // of waiting for the (possibly far-away) next scheduled tick.
+    if (prev === 'offline' || prev === 'captive' || prev === 'metered') runTick()
     else scheduleNextTick()
     updateStatus()
   }

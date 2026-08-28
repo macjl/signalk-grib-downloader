@@ -12,18 +12,25 @@ All notable changes to this project will be documented in this file.
   a 5-minute slack). `checkIntervalMinutes` becomes the fallback/retry
   cadence — the longest we wait before retrying a late or failed run.
 - The plugin follows `network.internet.state` (`online` | `offline` |
-  `metered`) when some plugin publishes it: `offline` pauses auto
-  downloads until connectivity returns, then a single catch-up check
+  `metered` | `captive`) when some plugin publishes it: `offline` pauses
+  auto downloads until connectivity returns, then a single catch-up check
   runs; `metered` stretches every automatic wait by the new
   `meteredIntervalMultiplier` plugin setting (default ×3) to save
   bandwidth on pay-per-MB links. Without the path (no publisher
   installed) the state stays `unknown`, which behaves exactly as
   `online` — no regression for existing setups.
+- `captive` (behind a captive portal, as published by
+  *@meri-imperiumi/signalk-internet*) pauses the auto scheduler and the
+  plugin status exactly like `offline` — previously it was rejected and
+  fell back to `unknown` ≈ `online`, so automatic downloads could start
+  against the portal's login page.
 - Manual downloads are never gated server-side; the webapp asks for
-  confirmation before triggering one while `metered` or `offline`.
+  confirmation before triggering one while `metered`, `offline` or
+  `captive`.
 - `GET /status` now reports `internetState` and `nextAutoTickAt`; the
   webapp shows a connectivity badge ("metered — auto slowed",
-  "offline — auto paused") and the next scheduled check time.
+  "offline — auto paused", "captive — auto paused") and the next
+  scheduled check time.
 
 ## [0.2.2] — 2026-08-27
 

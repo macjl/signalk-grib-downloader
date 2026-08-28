@@ -184,13 +184,15 @@ export class Orchestrator {
   }
 
   // Automatic tick: download every auto-enabled source whose expected run
-  // is missing. Suppressed entirely while offline — normally the scheduler
-  // does not even fire while offline, but the gate also covers catch-up
-  // triggers and state-change races. 'metered' only stretches the schedule
-  // (caller-side): when a stretched tick fires, downloads proceed.
-  // 'unknown' (no publisher of network.internet.state) behaves as 'online'.
+  // is missing. Suppressed entirely while offline or behind a captive
+  // portal — neither reaches the open internet, so downloads would only
+  // fetch the portal's login page. Normally the scheduler does not even
+  // fire then, but the gate also covers catch-up triggers and state-change
+  // races. 'metered' only stretches the schedule (caller-side): when a
+  // stretched tick fires, downloads proceed. 'unknown' (no publisher of
+  // network.internet.state) behaves as 'online'.
   async tick(internet: InternetState = 'online'): Promise<void> {
-    if (internet === 'offline') return
+    if (internet === 'offline' || internet === 'captive') return
     const stale = this.staleSources().filter(s => !this.states.get(sourceDirName(s))!.running)
     if (stale.length > 0) {
       this.log(`auto: ${stale.length} source(s) behind: ${stale.map(s => sourceDirName(s)).join(', ')}`)

@@ -28,6 +28,21 @@ test('auto tick is suppressed while offline', async () => {
   assert.strictEqual(orch.status()[0].lastOutcome, null)
 })
 
+// Regression: signalk-internet publishes 'captive' behind a captive
+// portal. It used to fall back to 'unknown', which behaves as 'online' —
+// so automatic downloads started, fetching the portal's login page.
+test('auto tick is suppressed behind a captive portal', async () => {
+  const logs = []
+  const orch = new Orchestrator(
+    [{ model: 'icon-eu', autoDownload: true }],
+    tmpRoot(),
+    (msg) => logs.push(msg)
+  )
+  await orch.tick('captive')
+  assert.deepStrictEqual(logs, [])
+  assert.strictEqual(orch.status()[0].lastOutcome, null)
+})
+
 test('nextTickAt retries behind sources, follows publication when up to date', () => {
   const root = tmpRoot()
   const setting = { model: 'icon-eu', autoDownload: true }
