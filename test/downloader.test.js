@@ -14,6 +14,7 @@ const {
   latestCompleteStamp,
   fetchFingerprint,
   fingerprintsEqual,
+  loadBz2,
 } = require('../dist/downloader.js')
 const { sourceDirName } = require('../dist/scheduler.js')
 
@@ -190,9 +191,9 @@ test('icon-eu: decompresses bz2 fragments and concatenates per step', async () =
   const root = path.join(tmpdir, 'icon-run')
   const setting = { model: 'icon-eu', hours: 0 }                     // step f000 only
   // Real bzip2 streams so the wasm decompressor path is exercised end-to-end.
-  const BZip2 = (await import('@digitaldefiance/bzip2-wasm')).default
-  const bz2 = new BZip2()
-  await bz2.init()
+  // loadBz2() pre-feeds the wasm binary, dodging the package's Windows path
+  // resolution bug — the very path under test.
+  const bz2 = await loadBz2()
   const gribA = payload(64, 11)
   const gribB = payload(64, 23)
   const compA = Buffer.from(bz2.compress(gribA, 5, gribA.length + 1024))

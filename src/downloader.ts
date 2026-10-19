@@ -1,5 +1,6 @@
 import * as fs from 'fs'
 import * as path from 'path'
+import { createRequire } from 'module'
 import { Readable } from 'stream'
 import { pipeline } from 'stream/promises'
 import { Bbox, ModelId, SourceSetting } from './types'
@@ -349,17 +350,62 @@ async function mfFetch(src: DownloadSource, log: (m: string) => void, signal?: A
 const ICON_EU_DEFAULT_VARS = ['t_2m', 'u_10m', 'v_10m', 'vmax_10m', 'pmsl', 'relhum_2m', 'tot_prec', 'clct']
 const ICON_EU_BASE = 'https://opendata.dwd.de/weather/nwp/icon-eu/grib'
 
-// Lazy wasm init — non-ICON-EU sources never load it.
-let bz2Promise: Promise<unknown> | null = null
-async function bz2Decompress(comp: Buffer): Promise<Buffer> {
-  if (!bz2Promise) {
-    bz2Promise = import('@digitaldefiance/bzip2-wasm').then(mod => {
-      const BZip2 = (mod as { default: new () => { init(): Promise<void>; decompress(c: Uint8Array, n: number): Uint8Array } }).default
-      const inst = new BZip2()
-      return inst.init().then(() => inst)
-    })
+// Minimal surface of @digitaldefiance/bzip2-wasm we drive, plus the raw
+// emscripten module the wrapper class expects on `wasmModule`.
+interface Bz2RawModule {
+  _malloc(n: number): number
+  _free(p: number): void
+  HEAPU8: Uint8Array
+  setValue(p: number, v: number, t: string): void
+  getValue(p: number, t: string): number
+  _BZ2_bzBuffToBuffDecompress(...args: number[]): number
+}
+interface Bz2 {
+  wasmModule: Bz2RawModule
+  init(): Promise<void>
+  compress(d: Uint8Array, blockSize: number, len: number): Uint8Array
+  decompress(c: Uint8Array, n: number): Uint8Array
+}
+
+// @digitaldefiance/bzip2-wasm@1.1.1 locates its bzip2.wasm by slicing the
+// literal 7 characters 'file://' off its module URL. POSIX survives
+// ('file:///a/b' → '/a/b'); on Windows 'file:///D:/a/b' → '/D:/a/b', which
+// the fs layer resolves against the working directory's drive and fails as
+// 'D:\D:\a\b'. The package exposes no hook to correct the path, so hand the
+// raw emscripten factory the wasm bytes ourselves and attach the module to
+// the package's BZip2 wrapper — init()'s file lookup never runs. The glue
+// still evaluates its Node environment prologue, which expects the CJS
+// globals the package's own init() would have staged (they are unread there
+// when a wasmBinary is supplied, so the values only need to exist).
+export async function loadBz2(): Promise<Bz2> {
+  const req = createRequire(__filename)
+  const pkgDir = path.dirname(req.resolve('@digitaldefiance/bzip2-wasm/package.json'))
+  const wasmBinary = new Uint8Array(fs.readFileSync(path.join(pkgDir, 'bzip2-1.0.8', 'bzip2.wasm')))
+  const BZip2 = req('@digitaldefiance/bzip2-wasm').default as { new (): Bz2 }
+  const loadRaw = req('@digitaldefiance/bzip2-wasm/bzip2-1.0.8/bzip2.mjs').default as
+    (moduleArg?: { wasmBinary?: Uint8Array }) => Promise<Bz2RawModule>
+  const inst = new BZip2()
+  const globals = globalThis as unknown as { __dirname?: string; require?: unknown }
+  const savedDirname = globals.__dirname
+  const savedRequire = globals.require
+  globals.__dirname = pkgDir
+  globals.require = req
+  try {
+    inst.wasmModule = await loadRaw({ wasmBinary })
+  } finally {
+    if (savedDirname === undefined) delete globals.__dirname
+    else globals.__dirname = savedDirname
+    if (savedRequire === undefined) delete globals.require
+    else globals.require = savedRequire
   }
-  const inst = (await bz2Promise) as { decompress(c: Uint8Array, n: number): Uint8Array }
+  return inst
+}
+
+// Lazy wasm init — non-ICON-EU sources never load it.
+let bz2Promise: Promise<Bz2> | null = null
+async function bz2Decompress(comp: Buffer): Promise<Buffer> {
+  if (!bz2Promise) bz2Promise = loadBz2()
+  const inst = await bz2Promise
   // Output size is unknown for GRIB2; grow until it fits (BZ_OUTBUFF_FULL).
   let outCap = Math.max(comp.length * 4, 128)
   for (;;) {

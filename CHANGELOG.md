@@ -17,6 +17,13 @@ All notable changes to this project will be documented in this file.
 - GFS download volume estimate raised from ~15 to ~21 bytes per grid point per
   step to reflect the four added 850 mb messages.
 
+### Fixed
+- **ICON-EU on Windows.** `@digitaldefiance/bzip2-wasm` 1.1.1 resolves its
+  `bzip2.wasm` by stripping `'file://'` from its module URL, which mangles
+  Windows paths (`file:///D:/…` → `/D:/…` → `D:\D:\…`) and aborts the wasm
+  load. The loader now reads the wasm file itself and hands the bytes to the
+  emscripten factory, bypassing the package's path search entirely.
+
 ## [0.2.4] — 2026-08-28
 
 ### Changed
