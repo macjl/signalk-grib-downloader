@@ -79,6 +79,12 @@ export function nextPublishAt(model: ModelId, now: Date = new Date()): Date {
 
 // Build the per-source fetch descriptor from a SourceSetting.
 // `dataRoot` is the local gribs root; the source directory is <root>/<name>.
+// GFS fetch parameters served by the NOMADS grib_filter: the variables and
+// levels cross-product. Part of the fetch fingerprint, so a change here
+// re-fetches affected runs instead of leaving them silently stale.
+export const GFS_FETCH_VARS = ['UGRD', 'VGRD', 'GUST', 'TMP', 'PRMSL', 'RH', 'APCP', 'TCDC']
+export const GFS_FETCH_LEVELS = ['10_m_above_ground', '2_m_above_ground', '850_mb', 'surface', 'mean_sea_level', 'entire_atmosphere']
+
 export function downloaderSourceConfig(s: SourceSetting, dataRoot: string, bbox?: Bbox) {
   const model = s.model
   const res = s.resolution || defaultResolution(model)
@@ -93,6 +99,8 @@ export function downloaderSourceConfig(s: SourceSetting, dataRoot: string, bbox?
   if (model === 'gfs') {
     entry.resolution = res
     entry.steps = { from: 0, to: hours, by: 3 }
+    entry.variables = GFS_FETCH_VARS
+    entry.levels = GFS_FETCH_LEVELS
     if (bbox) entry.bbox = [bbox.latMin, bbox.lonMin, bbox.latMax, bbox.lonMax]
   } else if (model === 'icon-eu') {
     entry.steps = { from: 0, to: hours, by: 3 }

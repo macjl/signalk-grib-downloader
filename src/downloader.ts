@@ -3,7 +3,7 @@ import * as path from 'path'
 import { Readable } from 'stream'
 import { pipeline } from 'stream/promises'
 import { Bbox, ModelId, SourceSetting } from './types'
-import { downloaderSourceConfig, fetchFingerprint, fingerprintsEqual, sourceDirName } from './scheduler'
+import { downloaderSourceConfig, fetchFingerprint, fingerprintsEqual, sourceDirName, GFS_FETCH_VARS, GFS_FETCH_LEVELS } from './scheduler'
 
 // Native in-process GRIB downloader — a TypeScript port of the previous
 // containerised Python job (grib-downloader/downloader.py). No container
@@ -235,17 +235,15 @@ function cleanupOldRuns(directory: string, archiveRuns: number, log: (m: string)
 
 // ── GFS (NOMADS grib_filter) ─────────────────────────────────────────────────
 
-const GFS_DEFAULT_VARS = ['UGRD', 'VGRD', 'GUST', 'TMP', 'PRMSL', 'RH', 'APCP', 'TCDC']
 const GFS_PRODUCTS: Record<string, string> = { '0p25': 'pgrb2.0p25', '0p50': 'pgrb2full.0p50', '1p00': 'pgrb2.1p00' }
-const GFS_DEFAULT_LEVELS = ['10_m_above_ground', '2_m_above_ground', 'surface', 'mean_sea_level', 'entire_atmosphere']
 
 async function gfsFetch(src: DownloadSource, log: (m: string) => void, signal?: AbortSignal): Promise<Outcome> {
   const res = src.resolution ?? '0p25'
   const directory = src.directory
   const steps = stepsList(src.steps ?? { from: 0, to: 24, by: 3 })
   const bbox = src.bbox
-  const variables = src.variables ?? GFS_DEFAULT_VARS
-  const levels = src.levels ?? GFS_DEFAULT_LEVELS
+  const variables = src.variables ?? GFS_FETCH_VARS
+  const levels = src.levels ?? GFS_FETCH_LEVELS
   const name = src.name
   const prod = GFS_PRODUCTS[res] ?? `pgrb2.${res}`
   const fingerprint = src.fingerprint
@@ -449,6 +447,8 @@ export function toDownloadSource(s: SourceSetting, gribsRoot: string, bbox?: Bbo
     directory: cfg.directory as string,
     resolution: cfg.resolution as string | undefined,
     steps: cfg.steps as DownloadSource['steps'],
+    variables: cfg.variables as string[] | undefined,
+    levels: cfg.levels as string[] | undefined,
     bbox: cfg.bbox as number[] | undefined,
     packages: cfg.packages as string[] | undefined,
     groups: cfg.groups as string[] | undefined,

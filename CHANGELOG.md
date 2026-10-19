@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Added
+- **850 mb level in the default GFS fetch.** The NOMADS filter now requests
+  `lev_850_mb=on` alongside the existing levels, adding 850 hPa temperature,
+  wind U/V and relative humidity to every downloaded step. Downstream consumers
+  need these to derive automatic surface fronts (thermal front parameter),
+  e.g. for front-passage timing in a passage briefing. Variables and levels are
+  now part of the fetch fingerprint, so the latest run of every existing GFS
+  source re-fetches once to pick the new level up.
+
+### Changed
+- GFS download volume estimate raised from ~15 to ~21 bytes per grid point per
+  step to reflect the four added 850 mb messages.
+
 ## [0.2.4] — 2026-08-28
 
 ### Changed
