@@ -4,7 +4,7 @@ import { createRequire } from 'module'
 import { Readable } from 'stream'
 import { pipeline } from 'stream/promises'
 import { Bbox, ModelId, SourceSetting } from './types'
-import { downloaderSourceConfig, fetchFingerprint, fingerprintsEqual, sourceDirName, GFS_FETCH_VARS, GFS_FETCH_LEVELS } from './scheduler'
+import { candidateRuns, downloaderSourceConfig, fetchFingerprint, fingerprintsEqual, runStamp, sourceDirName, GFS_FETCH_VARS, GFS_FETCH_LEVELS } from './scheduler'
 
 // Native in-process GRIB downloader — a TypeScript port of the previous
 // containerised Python job (grib-downloader/downloader.py). No container
@@ -106,20 +106,6 @@ async function fetchBuffer(url: string, signal?: AbortSignal): Promise<Buffer> {
 function sleep(ms: number): Promise<void> { return new Promise(r => setTimeout(r, ms)) }
 
 // ── Run / cycle / marker helpers ─────────────────────────────────────────────
-
-function candidateRuns(cadenceH: number, delayH: number, count = 4): Date[] {
-  const now = new Date(Date.now() - delayH * 3_600_000)
-  const base = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), Math.floor(now.getUTCHours() / cadenceH) * cadenceH, 0, 0))
-  return Array.from({ length: count }, (_, i) => new Date(base.getTime() - cadenceH * i * 3_600_000))
-}
-
-function runStamp(run: Date): string {
-  const y = run.getUTCFullYear()
-  const m = String(run.getUTCMonth() + 1).padStart(2, '0')
-  const d = String(run.getUTCDate()).padStart(2, '0')
-  const hh = String(run.getUTCHours()).padStart(2, '0')
-  return `${y}${m}${d}T${hh}`
-}
 
 type StepsSpec = { from: number; to: number; by: number } | number[] | undefined
 function stepsList(spec: StepsSpec): number[] {
@@ -249,12 +235,14 @@ async function gfsFetch(src: DownloadSource, log: (m: string) => void, signal?: 
   const prod = GFS_PRODUCTS[res] ?? `pgrb2.${res}`
   const fingerprint = src.fingerprint
 
-  for (const run of candidateRuns(6, 3.5)) {
+  for (const run of candidateRuns(src.model)) {
     const stamp = runStamp(run)
     if (signal?.aborted) { log(`${name}: aborted — cancelling run search`); return 'failed' }
     let paramsChanged = false
-    if (latestCompleteStamp(directory) === stamp) {
-      if (fingerprintsEqual(readMarkerParams(directory, stamp), fingerprint)) return 'up-to-date'
+    const latest = latestCompleteStamp(directory)
+    if (latest !== null && latest >= stamp) {
+      if (fingerprintsEqual(readMarkerParams(directory, latest), fingerprint)) return 'up-to-date'
+      if (latest > stamp) continue
       paramsChanged = true
     }
     const date = stamp.slice(0, 8)
@@ -289,11 +277,11 @@ async function gfsFetch(src: DownloadSource, log: (m: string) => void, signal?: 
 // ── Météo-France (AROME / ARPEGE, OVH public bucket) ─────────────────────────
 
 const MF_BASE = 'https://meteofrance-pnt.s3.rbx.io.cloud.ovh.net/pnt'
-const MF_MODELS: Record<string, { template: string; cadence: number; delay: number }> = {
-  'arome/0025': { template: '{d}/arome/0025/{p}/arome__0025__{p}__{g}__{d}.grib2', cadence: 3, delay: 1.75 },
-  'arome/001': { template: '{d}/arome/001/{p}/arome__001__{p}__{g}__{d}.grib2', cadence: 3, delay: 1.75 },
-  'arpege/025': { template: '{d}/arpege/025/{p}/arpege__025__{p}__{g}__{d}.grib2', cadence: 6, delay: 3.5 },
-  'arpege/01': { template: '{d}/arpege/01/{p}/arpege__01__{p}__{g}__{d}.grib2', cadence: 6, delay: 3.5 },
+const MF_MODELS: Record<string, { template: string }> = {
+  'arome/0025': { template: '{d}/arome/0025/{p}/arome__0025__{p}__{g}__{d}.grib2' },
+  'arome/001': { template: '{d}/arome/001/{p}/arome__001__{p}__{g}__{d}.grib2' },
+  'arpege/025': { template: '{d}/arpege/025/{p}/arpege__025__{p}__{g}__{d}.grib2' },
+  'arpege/01': { template: '{d}/arpege/01/{p}/arpege__01__{p}__{g}__{d}.grib2' },
 }
 
 function mfUrl(base: string, template: string, d: string, p: string, g: string): string {
@@ -313,12 +301,14 @@ async function mfFetch(src: DownloadSource, log: (m: string) => void, signal?: A
   const fingerprint = src.fingerprint
 
   const mfBase = src.base ?? MF_BASE
-  for (const run of candidateRuns(spec.cadence, spec.delay)) {
+  for (const run of candidateRuns(src.model)) {
     const stamp = runStamp(run)
     if (signal?.aborted) { log(`${name}: aborted — cancelling run search`); return 'failed' }
     let paramsChanged = false
-    if (latestCompleteStamp(directory) === stamp) {
-      if (fingerprintsEqual(readMarkerParams(directory, stamp), fingerprint)) return 'up-to-date'
+    const latest = latestCompleteStamp(directory)
+    if (latest !== null && latest >= stamp) {
+      if (fingerprintsEqual(readMarkerParams(directory, latest), fingerprint)) return 'up-to-date'
+      if (latest > stamp) continue
       paramsChanged = true
     }
     const d = `${stamp.slice(0, 4)}-${stamp.slice(4, 6)}-${stamp.slice(6, 8)}T${stamp.slice(9, 11)}:00:00Z`
@@ -426,12 +416,14 @@ async function iconEuFetch(src: DownloadSource, log: (m: string) => void, signal
   const fingerprint = src.fingerprint
 
   const iconBase = src.base ?? ICON_EU_BASE
-  for (const run of candidateRuns(6, 3.0)) {
+  for (const run of candidateRuns(src.model)) {
     const stamp = runStamp(run)
     if (signal?.aborted) { log(`${name}: aborted — cancelling run search`); return 'failed' }
     let paramsChanged = false
-    if (latestCompleteStamp(directory) === stamp) {
-      if (fingerprintsEqual(readMarkerParams(directory, stamp), fingerprint)) return 'up-to-date'
+    const latest = latestCompleteStamp(directory)
+    if (latest !== null && latest >= stamp) {
+      if (fingerprintsEqual(readMarkerParams(directory, latest), fingerprint)) return 'up-to-date'
+      if (latest > stamp) continue
       paramsChanged = true
     }
     const hh = stamp.slice(9, 11)

@@ -1,7 +1,7 @@
 import * as fs from 'fs'
 import * as path from 'path'
 import { Bbox, InternetState, SourceSetting, SourceStatus } from './types'
-import { expectedRunStamp, fetchFingerprint, fingerprintsEqual, nextPublishAt, sourceDirName, MODEL_MAX_HOURS } from './scheduler'
+import { expectedRunStamp, fetchFingerprint, fingerprintsEqual, nextPublishAt, probeRunStamp, sourceDirName, MODEL_MAX_HOURS, MODEL_SCHEDULES } from './scheduler'
 import { fetchSource, toDownloadSource, type Outcome } from './downloader'
 
 // Per-source download timeout — equivalent to the previous container job
@@ -17,6 +17,13 @@ interface SourceState {
   lastOutcome: Outcome | null
   lastFinishedAt: string | null
   lastLog: string[]
+  lastProbeAt: number | null
+  lastProbeRun: string | null
+}
+
+export interface ProbeTiming {
+  intervalMinutes?: number
+  scale?: number
 }
 
 export class Orchestrator {
@@ -32,6 +39,7 @@ export class Orchestrator {
     for (const s of sources) {
       this.states.set(sourceDirName(s), {
         running: false, lastError: null, lastOutcome: null, lastFinishedAt: null, lastLog: [],
+        lastProbeAt: null, lastProbeRun: null,
       })
     }
   }
@@ -81,6 +89,7 @@ export class Orchestrator {
       const st = this.states.get(name)!
       const lastRun = this.lastRunStamp(s)
       const expected = expectedRunStamp(s.model)
+      const target = probeRunStamp(s.model)
       const paramsOk = this.paramsOk(s, lastRun)
       return {
         name,
@@ -88,6 +97,8 @@ export class Orchestrator {
         autoDownload: s.autoDownload !== false,
         lastRun,
         expectedRun: expected,
+        pendingRun: lastRun !== null && lastRun >= target ? null : target,
+        publicationLate: lastRun === null || lastRun < expected,
         upToDate: lastRun !== null && lastRun >= expected && paramsOk,
         configStale: lastRun !== null && !paramsOk,
         running: st.running,
@@ -110,14 +121,27 @@ export class Orchestrator {
     return sources.filter(s => this.isBehind(s))
   }
 
-  // When the auto scheduler should next look at `source`: after
-  // `retryMs` if it is behind (late run, failed download, changed
-  // parameters), otherwise just after the model's next run is expected to
-  // publish (plus `slackMs`). The caller decides the timings; this only
-  // knows the model's publication schedule and what is on disk.
-  nextTickAt(source: SourceSetting, timing: { retryMs: number; slackMs: number }): Date {
-    if (this.isBehind(source)) return new Date(Date.now() + timing.retryMs)
-    return new Date(nextPublishAt(source.model).getTime() + timing.slackMs)
+  private needsProbe(source: SourceSetting): boolean {
+    const last = this.lastRunStamp(source)
+    return last === null || last < probeRunStamp(source.model) || !this.paramsOk(source, last)
+  }
+
+  // Per-source probe cadence is anchored to the last attempt, so another
+  // model's timer cannot cause extra probes or postpone this source's turn.
+  // Opening a newer cycle's window takes precedence over an older retry.
+  nextTickAt(source: SourceSetting, timing: ProbeTiming = {}): Date {
+    const now = new Date(Date.now())
+    const st = this.states.get(sourceDirName(source))!
+    const interval = (timing.intervalMinutes ?? MODEL_SCHEDULES[source.model].probeEveryMinutes)
+      * 60_000 * (timing.scale ?? 1)
+    if (st.running) return new Date(now.getTime() + interval)
+    const nextWindow = nextPublishAt(source.model, now, this.lastRunStamp(source))
+    if (!this.needsProbe(source)) return nextWindow
+    const target = probeRunStamp(source.model, now)
+    const due = st.lastProbeAt === null || st.lastProbeRun !== target
+      ? now.getTime()
+      : Math.max(now.getTime(), st.lastProbeAt + interval)
+    return new Date(Math.min(due, nextWindow.getTime()))
   }
 
   // Download one source (no-op if it is already running).
@@ -132,6 +156,8 @@ export class Orchestrator {
     st.running = true
     st.lastError = null
     st.lastLog = []
+    st.lastProbeAt = Date.now()
+    st.lastProbeRun = probeRunStamp(source.model)
     this.onChange()
     this.log(`${name}: starting download`)
 
@@ -171,7 +197,7 @@ export class Orchestrator {
     } finally {
       clearTimeout(timer)
       st.running = false
-      st.lastFinishedAt = new Date().toISOString()
+      st.lastFinishedAt = new Date(Date.now()).toISOString()
       this.onChange()
     }
   }
@@ -183,20 +209,25 @@ export class Orchestrator {
     }
   }
 
-  // Automatic tick: download every auto-enabled source whose expected run
-  // is missing. Suppressed entirely while offline or behind a captive
+  // Automatic tick: probe eligible sources even before their upper bound.
+  // Suppressed entirely while offline or behind a captive
   // portal — neither reaches the open internet, so downloads would only
   // fetch the portal's login page. Normally the scheduler does not even
   // fire then, but the gate also covers catch-up triggers and state-change
   // races. 'metered' only stretches the schedule (caller-side): when a
   // stretched tick fires, downloads proceed. 'unknown' (no publisher of
   // network.internet.state) behaves as 'online'.
-  async tick(internet: InternetState = 'online'): Promise<void> {
+  async tick(internet: InternetState = 'online', timing: ProbeTiming = {}): Promise<void> {
     if (internet === 'offline' || internet === 'captive') return
-    const stale = this.staleSources().filter(s => !this.states.get(sourceDirName(s))!.running)
-    if (stale.length > 0) {
-      this.log(`auto: ${stale.length} source(s) behind: ${stale.map(s => sourceDirName(s)).join(', ')}`)
-      await this.downloadAll(stale)
+    const due = this.autoSources().filter(s => this.needsProbe(s)
+      && !this.states.get(sourceDirName(s))!.running
+      && this.nextTickAt(s, timing).getTime() <= Date.now())
+    if (due.length > 0) {
+      this.log(`auto: ${due.length} source(s) to check: ${due.map(s => sourceDirName(s)).join(', ')}`)
+      // Re-evaluate after each download: sources share a sequential queue.
+      for (const source of due) {
+        if (this.nextTickAt(source, timing).getTime() <= Date.now()) await this.downloadSource(source)
+      }
     }
   }
 

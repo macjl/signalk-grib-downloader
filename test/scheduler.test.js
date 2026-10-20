@@ -3,52 +3,54 @@
 const { test } = require('node:test')
 const assert = require('node:assert')
 
-const { expectedRunStamp, nextPublishAt, downloaderSourceConfig, sourceDirName, MODEL_MAX_HOURS } = require('../dist/scheduler.js')
+const {
+  expectedRunStamp, probeRunStamp, nextPublishAt, candidateRuns, publicationWindow,
+  runStamp, downloaderSourceConfig, sourceDirName, MODEL_MAX_HOURS, MODEL_SCHEDULES,
+} = require('../dist/scheduler.js')
 
-test('expectedRunStamp respects cadence and publication delay', () => {
-  // GFS: cadence 6h, delay 5.5h. At 11:00 UTC → 11:00-5:30 = 05:30 → cycle 00
+test('expectedRunStamp uses upper bounds, including per-cycle AROME delays', () => {
   assert.strictEqual(expectedRunStamp('gfs', new Date('2026-06-11T11:00:00Z')), '20260611T00')
   // At 12:00 UTC → 06:30 → cycle 06
   assert.strictEqual(expectedRunStamp('gfs', new Date('2026-06-11T12:00:00Z')), '20260611T06')
   // Day rollover: at 03:00 UTC → 21:30 previous day → cycle 18
   assert.strictEqual(expectedRunStamp('gfs', new Date('2026-06-11T03:00:00Z')), '20260610T18')
-  // AROME: cadence 3h, delay 2.75h. At 12:00 → 09:15 → cycle 09
-  assert.strictEqual(expectedRunStamp('arome', new Date('2026-06-11T12:00:00Z')), '20260611T09')
+  assert.strictEqual(expectedRunStamp('arome', new Date('2026-10-19T08:45:00Z')), '20261019T03')
+  assert.strictEqual(expectedRunStamp('arome', new Date('2026-10-19T11:49:59Z')), '20261019T03')
+  assert.strictEqual(expectedRunStamp('arome', new Date('2026-10-19T11:50:00Z')), '20261019T06')
 })
 
-test('nextPublishAt gives the moment the expected run advances', () => {
-  // GFS: cadence 6h, delay 5.5h. At 11:00 UTC the expected cycle is 00,
-  // so the next run (06) is fully published at 00 + 6 + 5.5 = 11:30
-  assert.strictEqual(
-    nextPublishAt('gfs', new Date('2026-06-11T11:00:00Z')).toISOString(),
-    '2026-06-11T11:30:00.000Z'
-  )
-  // One second before the rollover the next publication is still 11:30
-  assert.strictEqual(
-    nextPublishAt('gfs', new Date('2026-06-11T11:29:59Z')).toISOString(),
-    '2026-06-11T11:30:00.000Z'
-  )
-  // Just after: expected cycle is 06 → next at 17:30
-  assert.strictEqual(
-    nextPublishAt('gfs', new Date('2026-06-11T11:31:00Z')).toISOString(),
-    '2026-06-11T17:30:00.000Z'
-  )
-  // Day rollover: at 03:00 UTC the expected cycle is 18 the previous
-  // day → next run publishes at 18:00 + 11.5h = 05:30 next day
-  assert.strictEqual(
-    nextPublishAt('gfs', new Date('2026-06-11T03:00:00Z')).toISOString(),
-    '2026-06-11T05:30:00.000Z'
-  )
-  // AROME: cadence 3h, delay 2.75h → 09:00 + 5.75h = 14:45
-  assert.strictEqual(
-    nextPublishAt('arome', new Date('2026-06-11T12:00:00Z')).toISOString(),
-    '2026-06-11T14:45:00.000Z'
-  )
-  // Always strictly in the future
-  const now = new Date('2026-06-11T12:00:00Z')
-  for (const model of ['gfs', 'arome', 'arpege', 'icon-eu']) {
-    assert.ok(nextPublishAt(model, now).getTime() > now.getTime())
+test('every configured cycle opens at the lower bound and remains eligible after the upper bound', () => {
+  for (const [model, schedule] of Object.entries(MODEL_SCHEDULES)) {
+    assert.ok(schedule.probeEveryMinutes > 0)
+    for (let minute = 0; minute < 1440; minute += schedule.cycleEveryMinutes) {
+      const run = new Date(Date.UTC(2026, 9, 19, 0, minute))
+      const stamp = runStamp(run)
+      const window = publicationWindow(model, run)
+      assert.ok(window.earliestMinutes >= 0 && window.latestMinutes >= window.earliestMinutes)
+      const opens = run.getTime() + window.earliestMinutes * 60_000
+      const closes = run.getTime() + window.latestMinutes * 60_000
+      assert.ok(!candidateRuns(model, new Date(opens - 1)).some(r => runStamp(r) === stamp))
+      assert.strictEqual(probeRunStamp(model, new Date(opens)), stamp)
+      assert.notStrictEqual(expectedRunStamp(model, new Date(closes - 1)), stamp)
+      assert.strictEqual(expectedRunStamp(model, new Date(closes)), stamp)
+      assert.ok(candidateRuns(model, new Date(closes + 60_000)).some(r => runStamp(r) === stamp))
+    }
   }
+})
+
+test('nextPublishAt follows lower bounds across midnight and skips completed runs', () => {
+  assert.strictEqual(nextPublishAt('gfs', new Date('2026-10-19T03:29:59Z')).toISOString(), '2026-10-19T03:30:00.000Z')
+  assert.strictEqual(nextPublishAt('gfs', new Date('2026-10-19T03:30:00Z')).toISOString(), '2026-10-19T09:30:00.000Z')
+  assert.strictEqual(nextPublishAt('arome', new Date('2026-10-19T09:59:59Z')).toISOString(), '2026-10-19T10:00:00.000Z')
+  assert.strictEqual(nextPublishAt('arome', new Date('2026-10-19T10:00:00Z')).toISOString(), '2026-10-19T12:10:00.000Z')
+  assert.strictEqual(nextPublishAt('arome', new Date('2026-10-20T00:00:00Z')).toISOString(), '2026-10-20T00:10:00.000Z')
+  assert.strictEqual(nextPublishAt('arome', new Date('2026-10-20T00:00:00Z'), '20261019T21').toISOString(), '2026-10-20T01:50:00.000Z')
+})
+
+test('candidate windows overlap without losing an older unpublished cycle', () => {
+  const runs = candidateRuns('arome', new Date('2026-10-19T12:10:00Z')).map(runStamp)
+  assert.deepStrictEqual(runs, ['20261019T09', '20261019T06', '20261019T03', '20261019T00'])
+  assert.strictEqual(expectedRunStamp('arome', new Date('2026-10-19T12:10:00Z')), '20261019T06')
 })
 
 test('source directory name is derived from model and resolution', () => {

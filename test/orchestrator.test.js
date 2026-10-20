@@ -11,7 +11,7 @@ const os = require('os')
 const path = require('path')
 
 const { Orchestrator } = require('../dist/orchestrator.js')
-const { expectedRunStamp, fetchFingerprint, nextPublishAt } = require('../dist/scheduler.js')
+const { probeRunStamp, fetchFingerprint, nextPublishAt } = require('../dist/scheduler.js')
 
 const tmpRoot = () => fs.mkdtempSync(path.join(os.tmpdir(), 'grib-orch-'))
 
@@ -43,27 +43,144 @@ test('auto tick is suppressed behind a captive portal', async () => {
   assert.strictEqual(orch.status()[0].lastOutcome, null)
 })
 
-test('nextTickAt retries behind sources, follows publication when up to date', () => {
+test('nextTickAt starts missing data immediately and waits for the next lower bound once current', () => {
   const root = tmpRoot()
   const setting = { model: 'icon-eu', autoDownload: true }
   const orch = new Orchestrator([setting], root, () => {})
-  const timing = { retryMs: 600_000, slackMs: 300_000 }
 
-  // No data on disk → behind → retry after retryMs
+  // No data on disk: do not wait for an upper bound or a retry interval.
   const before = Date.now()
-  const retry = orch.nextTickAt(setting, timing)
-  assert.ok(retry.getTime() >= before + 599_000 && retry.getTime() <= Date.now() + 601_000)
+  const retry = orch.nextTickAt(setting)
+  assert.ok(retry.getTime() >= before && retry.getTime() <= Date.now())
 
   // Simulate the expected run completed on disk (fingerprinted marker)
   const dir = path.join(root, 'icon-eu')
   fs.mkdirSync(dir, { recursive: true })
   fs.writeFileSync(
-    path.join(dir, `.run-${expectedRunStamp('icon-eu')}.complete`),
+    path.join(dir, `.run-${probeRunStamp('icon-eu')}.complete`),
     JSON.stringify({ params: fetchFingerprint(setting) })
   )
 
-  // Up to date → wait for the model's next publication + slack
-  const scheduled = orch.nextTickAt(setting, timing)
-  const expected = nextPublishAt('icon-eu').getTime() + timing.slackMs
+  const scheduled = orch.nextTickAt(setting)
+  const expected = nextPublishAt('icon-eu').getTime()
   assert.ok(Math.abs(scheduled.getTime() - expected) < 2000)
+})
+
+function publicationFixture(t) {
+  const root = tmpRoot()
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+  let now = Date.parse('2026-10-19T10:00:00Z')
+  t.mock.method(Date, 'now', () => now)
+  const source = { model: 'arome', resolution: '0025', autoDownload: true }
+  const dir = path.join(root, 'arome-0025')
+  fs.mkdirSync(dir, { recursive: true })
+  const complete = stamp => fs.writeFileSync(path.join(dir, `.run-${stamp}.complete`),
+    JSON.stringify({ params: fetchFingerprint(source) }))
+  complete('20261019T03')
+  const requests = []
+  let available = false
+  t.mock.method(global, 'fetch', async (url, options) => {
+    requests.push({ url, method: options.method ?? 'GET' })
+    return available ? new Response(Buffer.from('GRIB fixture')) : new Response(null, { status: 404 })
+  })
+  const orch = new Orchestrator([source], root, () => {}, () => {})
+  return {
+    orch, source, requests, complete,
+    at: time => { now = Date.parse(`2026-10-19T${time}Z`) },
+    publish: () => { available = true },
+  }
+}
+
+test('probes start at the lower bound and keep the same cadence across the lateness threshold', async t => {
+  const f = publicationFixture(t)
+  f.at('09:59:59')
+  assert.strictEqual(f.orch.nextTickAt(f.source).toISOString(), '2026-10-19T10:00:00.000Z')
+  await f.orch.tick()
+  assert.strictEqual(f.requests.length, 0)
+  f.at('10:00:00')
+  await f.orch.tick()
+  assert.strictEqual(f.requests.length, 1)
+  assert.strictEqual(f.orch.status()[0].upToDate, true)
+  assert.strictEqual(f.orch.status()[0].pendingRun, '20261019T06')
+  assert.strictEqual(f.orch.status()[0].publicationLate, false)
+  f.at('10:04:00')
+  await f.orch.tick()
+  assert.strictEqual(f.requests.length, 1, 'other scheduler ticks must not re-probe early')
+  f.at('10:05:00')
+  await f.orch.tick()
+  assert.strictEqual(f.requests.length, 2)
+  f.at('11:49:00')
+  await f.orch.tick()
+  assert.strictEqual(f.requests.length, 3)
+  assert.strictEqual(f.orch.nextTickAt(f.source).toISOString(), '2026-10-19T11:54:00.000Z')
+  f.at('11:50:00')
+  assert.strictEqual(f.orch.status()[0].publicationLate, true)
+  assert.strictEqual(f.orch.nextTickAt(f.source).toISOString(), '2026-10-19T11:54:00.000Z')
+  await f.orch.tick()
+  assert.strictEqual(f.requests.length, 3)
+  f.at('11:54:00')
+  await f.orch.tick()
+  assert.strictEqual(f.requests.length, 4)
+  assert.strictEqual(f.orch.nextTickAt(f.source).toISOString(), '2026-10-19T11:59:00.000Z')
+})
+
+test('a successful in-window download stops probing until the next cycle', async t => {
+  const f = publicationFixture(t)
+  await f.orch.tick()
+  f.publish()
+  f.at('10:05:00')
+  await f.orch.tick()
+  assert.strictEqual(f.orch.lastRunStamp(f.source), '20261019T06')
+  assert.strictEqual(f.orch.status()[0].lastOutcome, 'downloaded')
+  assert.strictEqual(f.orch.status()[0].pendingRun, null)
+  assert.strictEqual(f.orch.nextTickAt(f.source).toISOString(), '2026-10-19T12:10:00.000Z')
+  const count = f.requests.length
+  f.at('11:55:00')
+  await f.orch.tick()
+  assert.strictEqual(f.requests.length, count)
+  assert.strictEqual(f.orch.status()[0].publicationLate, false)
+})
+
+test('new windows take precedence over a long override interval, without postponing existing retries', async t => {
+  const f = publicationFixture(t)
+  f.at('12:08:00')
+  const timing = { intervalMinutes: 60 }
+  await f.orch.tick('online', timing)
+  assert.strictEqual(f.orch.nextTickAt(f.source, timing).toISOString(), '2026-10-19T12:10:00.000Z')
+  f.at('12:09:00')
+  await f.orch.tick('online', timing)
+  assert.strictEqual(f.requests.length, 1)
+  f.at('12:10:00')
+  await f.orch.tick('online', timing)
+  assert.strictEqual(f.requests.length, 3, 'probe the new 09 cycle, then the still-missing 06 cycle')
+})
+
+test('metered probes retain their scaled interval before and after the upper bound', async t => {
+  const f = publicationFixture(t)
+  const timing = { scale: 3 }
+  f.at('11:45:00')
+  await f.orch.tick('metered', timing)
+  f.at('11:50:00')
+  assert.strictEqual(f.orch.status()[0].publicationLate, true)
+  assert.strictEqual(f.orch.nextTickAt(f.source, timing).toISOString(), '2026-10-19T12:00:00.000Z')
+  await f.orch.tick('metered', timing)
+  assert.strictEqual(f.requests.length, 1)
+  f.at('12:00:00')
+  await f.orch.tick('metered', timing)
+  assert.strictEqual(f.requests.length, 2)
+})
+
+test('a newer complete cycle supersedes older missing cycles and offline checks do not advance probes', async t => {
+  const f = publicationFixture(t)
+  await f.orch.tick('offline')
+  await f.orch.tick('captive')
+  assert.strictEqual(f.requests.length, 0)
+  await f.orch.tick('online')
+  assert.strictEqual(f.requests.length, 1)
+  f.at('12:10:00')
+  f.complete('20261019T09')
+  await f.orch.tick()
+  assert.strictEqual(f.requests.length, 1)
+  assert.strictEqual(f.orch.status()[0].pendingRun, null)
+  assert.strictEqual(f.orch.status()[0].publicationLate, false)
 })
