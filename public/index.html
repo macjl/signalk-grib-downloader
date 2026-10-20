@@ -215,7 +215,10 @@ function estimateMB(s) {
     const deg = { '0p25': 0.25, '0p50': 0.5, '1p00': 1 }[s.resolution || '0p25'] || 0.25
     const b = config.bbox || { latMin: 35, lonMin: -6, latMax: 45, lonMax: 17 }
     const pts = (Math.abs(b.latMax - b.latMin) / deg + 1) * (Math.abs(b.lonMax - b.lonMin) / deg + 1)
-    return pts * 15 * (Math.floor(hours / 3) + 1) / 1048576
+    // ≈21 B per grid point per step: 12 messages per step since the 850 mb
+    // level joined the fetch (was 8 → 15 B), later steps carry a few extra
+    // accumulation-bucket messages.
+    return pts * 21 * (Math.floor(hours / 3) + 1) / 1048576
   }
   if (s.model === 'icon-eu') return (Math.floor(hours / 3) + 1) * 13.8
   if (s.model === 'arome')   return hours * (s.resolution === '001' ? 53 : 8.6)

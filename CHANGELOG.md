@@ -2,6 +2,28 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Added
+- **850 mb level in the default GFS fetch.** The NOMADS filter now requests
+  `lev_850_mb=on` alongside the existing levels, adding 850 hPa temperature,
+  wind U/V and relative humidity to every downloaded step. Downstream consumers
+  need these to derive automatic surface fronts (thermal front parameter),
+  e.g. for front-passage timing in a passage briefing. Variables and levels are
+  now part of the fetch fingerprint, so the latest run of every existing GFS
+  source re-fetches once to pick the new level up.
+
+### Changed
+- GFS download volume estimate raised from ~15 to ~21 bytes per grid point per
+  step to reflect the four added 850 mb messages.
+
+### Fixed
+- **ICON-EU on Windows.** `@digitaldefiance/bzip2-wasm` 1.1.1 resolves its
+  `bzip2.wasm` by stripping `'file://'` from its module URL, which mangles
+  Windows paths (`file:///D:/…` → `/D:/…` → `D:\D:\…`) and aborts the wasm
+  load. The loader now reads the wasm file itself and hands the bytes to the
+  emscripten factory, bypassing the package's path search entirely.
+
 ## [0.2.4] — 2026-08-28
 
 ### Changed
