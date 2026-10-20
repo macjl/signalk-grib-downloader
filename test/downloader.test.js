@@ -14,6 +14,7 @@ const {
   latestCompleteStamp,
   fetchFingerprint,
   fingerprintsEqual,
+  loadBz2,
 } = require('../dist/downloader.js')
 const { sourceDirName } = require('../dist/scheduler.js')
 
@@ -137,8 +138,23 @@ test('gfs: downloads one file per step, writes a marker, reports downloaded', as
   assert.strictEqual(files.length, 3)                                // f000, f003, f006
   assert.ok(srv.log.some(e => e.method === 'HEAD' && e.url.endsWith('.idx')), 'probed the .idx')
   assert.ok(srv.log.some(e => e.url.includes('leftlon=-6') && e.url.includes('toplat=45')), 'bbox subset params sent')
+  assert.ok(srv.log.some(e => e.url.includes('lev_850_mb=on')), '850 mb level requested (front-detection fields: TMP/UGRD/VGRD @ 850)')
   assert.ok(latestCompleteStamp(dir) !== null, 'marker written')
   await srv.close()
+})
+
+// The fingerprint drives the up-to-date check: a run fetched before the 850 mb
+// level joined the defaults carries a marker without variables/levels and must
+// re-fetch rather than report up-to-date.
+test('gfs: fingerprint includes the resolved variables and levels', async () => {
+  const setting = { model: 'gfs', resolution: '0p25', hours: 6 }
+  const bbox = { latMin: 35, lonMin: -6, latMax: 45, lonMax: 17 }
+  const fp = fetchFingerprint(setting, bbox)
+  assert.ok(JSON.stringify(fp).includes('850_mb'), '850 mb level in the fingerprint')
+  assert.ok(JSON.stringify(fp).includes('UGRD'), 'variables in the fingerprint')
+  // A pre-850 marker fingerprint (no variables/levels keys) never matches.
+  const legacy = { resolution: '0p25', steps: { from: 0, to: 6, by: 3 }, bbox: [35, -6, 45, 17] }
+  assert.ok(!fingerprintsEqual(legacy, fp), 'legacy marker without variables/levels is stale')
 })
 
 // ── Météo-France smoke test (AROME: packages × groups) ───────────────────────
@@ -175,9 +191,9 @@ test('icon-eu: decompresses bz2 fragments and concatenates per step', async () =
   const root = path.join(tmpdir, 'icon-run')
   const setting = { model: 'icon-eu', hours: 0 }                     // step f000 only
   // Real bzip2 streams so the wasm decompressor path is exercised end-to-end.
-  const BZip2 = (await import('@digitaldefiance/bzip2-wasm')).default
-  const bz2 = new BZip2()
-  await bz2.init()
+  // loadBz2() pre-feeds the wasm binary, dodging the package's Windows path
+  // resolution bug — the very path under test.
+  const bz2 = await loadBz2()
   const gribA = payload(64, 11)
   const gribB = payload(64, 23)
   const compA = Buffer.from(bz2.compress(gribA, 5, gribA.length + 1024))

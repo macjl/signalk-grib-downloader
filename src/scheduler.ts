@@ -1,12 +1,88 @@
 import { ModelId, SourceSetting, Bbox } from './types'
 
-// Model run timing: cycle cadence and delay before the *complete* run
-// (all requested forecast hours) is published on the distribution server.
-const MODEL_TIMING: Record<ModelId, { cadenceH: number; delayH: number }> = {
-  gfs:       { cadenceH: 6, delayH: 5.5 },   // f384 lands ~5h15 after cycle time
-  arome:     { cadenceH: 3, delayH: 2.75 },
-  arpege:    { cadenceH: 6, delayH: 4.5 },
-  'icon-eu': { cadenceH: 6, delayH: 4.0 },
+export interface PublicationWindow {
+  earliestMinutes: number
+  latestMinutes: number
+}
+
+export interface ModelSchedule {
+  cycleEveryMinutes: number
+  probeEveryMinutes: number
+  defaultWindow: PublicationWindow
+  windowsByCycleHourUtc?: Partial<Record<number, PublicationWindow>>
+}
+
+// Offsets from the UTC cycle, not wall-clock publication hours. Lower
+// bounds allow short forecasts to arrive first; upper bounds cover the
+// full supported horizon. See README for observations and their limits.
+export const MODEL_SCHEDULES: Record<ModelId, ModelSchedule> = {
+  gfs: {
+    cycleEveryMinutes: 360, probeEveryMinutes: 5,
+    defaultWindow: { earliestMinutes: 210, latestMinutes: 330 },
+  },
+  arome: {
+    cycleEveryMinutes: 180, probeEveryMinutes: 5,
+    defaultWindow: { earliestMinutes: 100, latestMinutes: 350 },
+    windowsByCycleHourUtc: {
+      0: { earliestMinutes: 110, latestMinutes: 185 },
+      3: { earliestMinutes: 100, latestMinutes: 180 },
+      6: { earliestMinutes: 240, latestMinutes: 350 },
+      9: { earliestMinutes: 190, latestMinutes: 285 },
+      12: { earliestMinutes: 175, latestMinutes: 275 },
+      15: { earliestMinutes: 170, latestMinutes: 255 },
+      18: { earliestMinutes: 240, latestMinutes: 340 },
+      21: { earliestMinutes: 190, latestMinutes: 280 },
+    },
+  },
+  arpege: {
+    cycleEveryMinutes: 360, probeEveryMinutes: 5,
+    defaultWindow: { earliestMinutes: 145, latestMinutes: 330 },
+    windowsByCycleHourUtc: {
+      0: { earliestMinutes: 165, latestMinutes: 255 },
+      6: { earliestMinutes: 210, latestMinutes: 330 },
+      12: { earliestMinutes: 145, latestMinutes: 270 },
+      18: { earliestMinutes: 210, latestMinutes: 300 },
+    },
+  },
+  'icon-eu': {
+    cycleEveryMinutes: 360, probeEveryMinutes: 5,
+    defaultWindow: { earliestMinutes: 150, latestMinutes: 240 },
+  },
+}
+
+const MINUTE_MS = 60_000
+
+export function runStamp(run: Date): string {
+  return run.toISOString().slice(0, 13).replaceAll('-', '')
+}
+
+export function publicationWindow(model: ModelId, run: Date): PublicationWindow {
+  const schedule = MODEL_SCHEDULES[model]
+  return schedule.windowsByCycleHourUtc?.[run.getUTCHours()] ?? schedule.defaultWindow
+}
+
+// Enumerate actual cycles: variable delays cannot be implemented by
+// subtracting one delay from now. Windows may overlap across midnight.
+function cyclesAround(model: ModelId, now: Date): Date[] {
+  const schedule = MODEL_SCHEDULES[model]
+  const windows = [schedule.defaultWindow, ...Object.values(schedule.windowsByCycleHourUtc ?? {})]
+  const longestDelay = Math.max(...windows.map(w => w!.latestMinutes))
+  const cadenceMs = schedule.cycleEveryMinutes * MINUTE_MS
+  const base = Math.floor(now.getTime() / cadenceMs) * cadenceMs
+  const lookback = Math.ceil(longestDelay / schedule.cycleEveryMinutes) + 4
+  return Array.from({ length: lookback + 2 }, (_, i) => new Date(base + (1 - i) * cadenceMs))
+}
+
+// Newest-first candidates whose lower bound has opened. The upper bound
+// never excludes a run: late publications remain eligible for probing.
+export function candidateRuns(model: ModelId, now: Date = new Date(Date.now()), count = 4): Date[] {
+  return cyclesAround(model, now)
+    .filter(run => run.getTime() + publicationWindow(model, run).earliestMinutes * MINUTE_MS <= now.getTime())
+    .slice(0, count)
+}
+
+export function probeRunStamp(model: ModelId, now: Date = new Date(Date.now())): string {
+  return runStamp(candidateRuns(model, now, 1)[0])
 }
 
 export const MODEL_MAX_HOURS: Record<ModelId, number> = {
@@ -49,36 +125,30 @@ export function sourceDirName(s: SourceSetting): string {
   return res ? `${s.model}-${res}` : s.model
 }
 
-// Stamp ("YYYYMMDDTHH") of the most recent run expected to be fully
-// published at `now`, per the model's cadence and publication delay.
-export function expectedRunStamp(model: ModelId, now: Date = new Date()): string {
-  const { cadenceH, delayH } = MODEL_TIMING[model]
-  const t = new Date(now.getTime() - delayH * 3_600_000)
-  const cycleHour = Math.floor(t.getUTCHours() / cadenceH) * cadenceH
-  const y = t.getUTCFullYear()
-  const m = String(t.getUTCMonth() + 1).padStart(2, '0')
-  const d = String(t.getUTCDate()).padStart(2, '0')
-  return `${y}${m}${d}T${String(cycleHour).padStart(2, '0')}`
+// Upper bounds affect the user's lateness indicator only, never probing.
+export function expectedRunStamp(model: ModelId, now: Date = new Date(Date.now())): string {
+  const run = cyclesAround(model, now).find(run =>
+    run.getTime() + publicationWindow(model, run).latestMinutes * MINUTE_MS <= now.getTime())!
+  return runStamp(run)
 }
 
-// Date at which the run *after* the currently expected one becomes fully
-// published — the moment `expectedRunStamp(model)` next advances. The auto
-// scheduler ticks just after this (plus a slack for the upstream to
-// actually list the files) instead of polling on a blind timer.
-export function nextPublishAt(model: ModelId, now: Date = new Date()): Date {
-  const { cadenceH, delayH } = MODEL_TIMING[model]
-  const stamp = expectedRunStamp(model, now)
-  const cycle = Date.UTC(
-    Number(stamp.slice(0, 4)),
-    Number(stamp.slice(4, 6)) - 1,
-    Number(stamp.slice(6, 8)),
-    Number(stamp.slice(9, 11))
-  )
-  return new Date(cycle + (cadenceH + delayH) * 3_600_000)
+// Next unopened lower bound for a run newer than the data already held.
+export function nextPublishAt(model: ModelId, now: Date = new Date(Date.now()), lastRun?: string | null): Date {
+  const times = cyclesAround(model, now)
+    .filter(run => !lastRun || runStamp(run) > lastRun)
+    .map(run => run.getTime() + publicationWindow(model, run).earliestMinutes * MINUTE_MS)
+    .filter(time => time > now.getTime())
+  return new Date(Math.min(...times))
 }
 
 // Build the per-source fetch descriptor from a SourceSetting.
 // `dataRoot` is the local gribs root; the source directory is <root>/<name>.
+// GFS fetch parameters served by the NOMADS grib_filter: the variables and
+// levels cross-product. Part of the fetch fingerprint, so a change here
+// re-fetches affected runs instead of leaving them silently stale.
+export const GFS_FETCH_VARS = ['UGRD', 'VGRD', 'GUST', 'TMP', 'PRMSL', 'RH', 'APCP', 'TCDC']
+export const GFS_FETCH_LEVELS = ['10_m_above_ground', '2_m_above_ground', '850_mb', 'surface', 'mean_sea_level', 'entire_atmosphere']
+
 export function downloaderSourceConfig(s: SourceSetting, dataRoot: string, bbox?: Bbox) {
   const model = s.model
   const res = s.resolution || defaultResolution(model)
@@ -93,6 +163,8 @@ export function downloaderSourceConfig(s: SourceSetting, dataRoot: string, bbox?
   if (model === 'gfs') {
     entry.resolution = res
     entry.steps = { from: 0, to: hours, by: 3 }
+    entry.variables = GFS_FETCH_VARS
+    entry.levels = GFS_FETCH_LEVELS
     if (bbox) entry.bbox = [bbox.latMin, bbox.lonMin, bbox.latMax, bbox.lonMax]
   } else if (model === 'icon-eu') {
     entry.steps = { from: 0, to: hours, by: 3 }

@@ -141,7 +141,7 @@ const I18N = {
   fr: {
     title: 'GRIB Downloader', auto: 'Auto', manual: 'Manuel',
     autoHint: 'Les sources cochées se téléchargent automatiquement. Les autres restent téléchargeables manuellement.',
-    autoInterval: n => `Téléchargements auto au calendrier de publication des modèles — nouvelle tentative au plus toutes les ${n} min (réglages du plugin)`,
+    autoInterval: n => `Sondes de publication toutes les ${n} min`,
     nextCheck: d => ` · prochaine vérification : ${d}`,
     netMetered: 'mesuré — auto ralenti', netOffline: 'hors ligne — auto en pause',
     netCaptive: 'portail captif — auto en pause',
@@ -156,7 +156,7 @@ const I18N = {
     save: 'Enregistrer', saved: 'Enregistré ✓', dirty: 'Modifications non enregistrées',
     saveError: 'Erreur : ', downloadAll: 'Tout télécharger', download: '⬇',
     stUpToDate: 'à jour', stStale: 'en retard', stRunning: 'téléchargement…', stError: 'erreur',
-    stWaiting: 'attente publication', stConfigChanged: 'config modifiée',
+    stWaiting: 'attente publication', stLate: 'publication en retard', stConfigChanged: 'config modifiée',
     stManual: 'manuel', stNoData: 'aucune donnée',
     runtimeErrorTitle: 'Téléchargement automatique indisponible',
     lastRun: 'dernier run', expected: 'attendu', confirmDelete: 'Supprimer cette source ?',
@@ -169,7 +169,7 @@ const I18N = {
   en: {
     title: 'GRIB Downloader', auto: 'Auto', manual: 'Manual',
     autoHint: 'Checked sources download automatically. Others remain available for manual downloads.',
-    autoInterval: n => `Auto downloads follow each model's publication schedule — late or failed runs retried at most every ${n} min (plugin settings)`,
+    autoInterval: n => `Publication probes every ${n} min`,
     nextCheck: d => ` · next check: ${d}`,
     netMetered: 'metered — auto slowed', netOffline: 'offline — auto paused',
     netCaptive: 'captive — auto paused',
@@ -184,7 +184,7 @@ const I18N = {
     save: 'Save', saved: 'Saved ✓', dirty: 'Unsaved changes',
     saveError: 'Error: ', downloadAll: 'Download all', download: '⬇',
     stUpToDate: 'up to date', stStale: 'behind', stRunning: 'downloading…', stError: 'error',
-    stWaiting: 'awaiting publication', stConfigChanged: 'settings changed',
+    stWaiting: 'awaiting publication', stLate: 'publication late', stConfigChanged: 'settings changed',
     stManual: 'manual', stNoData: 'no data',
     runtimeErrorTitle: 'Automatic downloads unavailable',
     lastRun: 'last run', expected: 'expected', confirmDelete: 'Delete this source?',
@@ -215,7 +215,10 @@ function estimateMB(s) {
     const deg = { '0p25': 0.25, '0p50': 0.5, '1p00': 1 }[s.resolution || '0p25'] || 0.25
     const b = config.bbox || { latMin: 35, lonMin: -6, latMax: 45, lonMax: 17 }
     const pts = (Math.abs(b.latMax - b.latMin) / deg + 1) * (Math.abs(b.lonMax - b.lonMin) / deg + 1)
-    return pts * 15 * (Math.floor(hours / 3) + 1) / 1048576
+    // ≈21 B per grid point per step: 12 messages per step since the 850 mb
+    // level joined the fetch (was 8 → 15 B), later steps carry a few extra
+    // accumulation-bucket messages.
+    return pts * 21 * (Math.floor(hours / 3) + 1) / 1048576
   }
   if (s.model === 'icon-eu') return (Math.floor(hours / 3) + 1) * 13.8
   if (s.model === 'arome')   return hours * (s.resolution === '001' ? 53 : 8.6)
@@ -348,23 +351,23 @@ function sourceStateBadge(s) {
   if (st.running) return `<span class="badge run">${t.stRunning}</span>`
   if (st.lastError) return `<span class="badge err" title="${st.lastError.replace(/"/g, '&quot;')}">${t.stError}</span>`
   if (s.autoDownload === false) return `<span class="badge off">${t.stManual}</span>`
-  if (st.upToDate) return `<span class="badge ok">${t.stUpToDate}</span>`
   if (st.configStale) return `<span class="badge stale">${t.stConfigChanged}</span>`
-  // Not up to date: if the last attempt found nothing newer published
-  // upstream, we are merely waiting — not behind.
-  if (st.lastOutcome === 'unavailable' || st.lastOutcome === 'up-to-date') {
+  if (st.publicationLate) return `<span class="badge stale">${t.stLate}</span>`
+  if (!st.lastRun) return `<span class="badge stale">${t.stNoData}</span>`
+  if (st.pendingRun) {
     return `<span class="badge wait">${t.stWaiting}</span>`
   }
-  if (!st.lastRun) return `<span class="badge stale">${t.stNoData}</span>`
+  if (st.upToDate) return `<span class="badge ok">${t.stUpToDate}</span>`
   return `<span class="badge stale">${t.stStale}</span>`
 }
 
 function sourceStatusLine(s) {
   const st = statusBySource[dirName(s)]
   if (schedulerError && s.autoDownload !== false) return schedulerError
-  if (!st || !st.lastRun) return ''
-  let line = `${t.lastRun}: ${st.lastRun}`
-  if (!st.upToDate) line += ` — ${t.expected}: ${st.expectedRun}`
+  if (!st) return ''
+  let line = st.lastRun ? `${t.lastRun}: ${st.lastRun}` : t.stNoData
+  if (st.publicationLate) line += ` — ${t.expected}: ${st.expectedRun}`
+  else if (st.pendingRun) line += ` — ${t.expected}: ${st.pendingRun}`
   return line
 }
 
@@ -476,7 +479,7 @@ document.getElementById('btn-add').addEventListener('click', () => {
 
 // ── Schedule ─────────────────────────────────────────────────────────────────
 function renderSchedule() {
-  const interval = config.checkIntervalMinutes ?? 10
+  const interval = config.checkIntervalMinutes ?? 5
   let text = t.autoInterval(interval)
   if (nextAutoTickAt) text += t.nextCheck(new Date(nextAutoTickAt).toLocaleTimeString())
   document.getElementById('auto-interval').textContent = text
@@ -599,7 +602,7 @@ async function loadConfig() {
     banner.style.display = 'block'
   } else if (r.ok) {
     const c = await r.json()
-    config = Object.assign({ checkIntervalMinutes: 10, sources: [] }, c)
+    config = Object.assign({ checkIntervalMinutes: 5, sources: [] }, c)
     config.sources = (config.sources ?? []).map(s => ({
       ...s,
       autoDownload: s.autoDownload ?? (s.enabled !== false),
