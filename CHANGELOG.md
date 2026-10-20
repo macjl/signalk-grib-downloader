@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [0.3.0] - 2026-10-20
 
 ### Added
 - **850 mb level in the default GFS fetch.** The NOMADS filter now requests
@@ -16,6 +16,20 @@ All notable changes to this project will be documented in this file.
 ### Changed
 - GFS download volume estimate raised from ~15 to ~21 bytes per grid point per
   step to reflect the four added 850 mb messages.
+- **Per-cycle publication windows.** A shared model schedule now controls both
+  automatic checks and downloader run selection. AROME and ARPEGE use windows
+  specific to each UTC cycle instead of a fixed publication delay; GFS and
+  ICON-EU also have explicit earliest/latest publication bounds.
+- Automatic probing starts at the lower publication bound and continues every
+  five minutes by default, even after the upper bound has passed. An explicitly
+  configured `checkIntervalMinutes`, including a migrated legacy value,
+  overrides the model interval. Metered connections still multiply the probe
+  interval without shifting the publication thresholds.
+- The webapp and plugin status distinguish **awaiting publication** from
+  **publication late**. `GET /status` adds `pendingRun` and `publicationLate`
+  for each source; the existing status fields remain available.
+- Updated development dependency locks for `@signalk/server-api` and
+  `@types/node`.
 
 ### Fixed
 - **ICON-EU on Windows.** `@digitaldefiance/bzip2-wasm` 1.1.1 resolves its
@@ -23,6 +37,20 @@ All notable changes to this project will be documented in this file.
   Windows paths (`file:///D:/…` → `/D:/…` → `D:\D:\…`) and aborts the wasm
   load. The loader now reads the wasm file itself and hands the bytes to the
   emscripten factory, bypassing the package's path search entirely.
+- A source's probe interval is anchored to its own last attempt, so another
+  model's timer cannot trigger premature checks or postpone a retry. A newly
+  opened cycle can be checked while an older cycle is still late.
+- Keep a newer complete run instead of falling back to an older candidate
+  when the publication windows overlap.
+
+### Upgrade notes
+- Existing GFS sources are fetched again once because the default field set
+  and its fingerprint now include 850 hPa. The existing replacement-resilience
+  limitation, where a failed re-fetch can remove the previous complete run,
+  remains tracked in [#15](https://github.com/macjl/signalk-grib-downloader/issues/15).
+- Existing decoded weather-provider caches can retain their previous field
+  set when a GRIB is replaced under the same filename. Cache invalidation is
+  tracked in [signalk-grib-weather-provider#16](https://github.com/macjl/signalk-grib-weather-provider/issues/16).
 
 ## [0.2.4] — 2026-08-28
 
