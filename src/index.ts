@@ -2,16 +2,13 @@ import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 import { Path, Plugin, ServerAPI } from '@signalk/server-api'
-import { Orchestrator } from './orchestrator'
+import { Orchestrator, ProbeTiming } from './orchestrator'
 import { sourceDirName } from './scheduler'
 import { AppSettings, InternetState, PluginSettings } from './types'
 
 const PLUGIN_ID = 'signalk-grib-downloader'
-const DEFAULT_CHECK_INTERVAL_MINUTES = 10
+const DEFAULT_CHECK_INTERVAL_MINUTES = 5
 
-// Slack added to each model's expected publication time so the upstream
-// has actually listed the files, and the default metered-link stretch.
-const PUBLISH_SLACK_MS = 5 * 60_000
 const DEFAULT_METERED_MULTIPLIER = 3
 // setTimeout delays are 32-bit — never schedule further out than this.
 const TIMER_MAX_MS = 2_147_483_000
@@ -40,11 +37,10 @@ const buildSchema = (defaultRoot: string, defaultInterval: number, defaultMultip
   properties: {
     checkIntervalMinutes: {
       type: 'number',
-      title: 'Automatic check interval (minutes)',
+      title: 'Publication probe interval (minutes)',
       description:
-        'Fallback cadence for automatic downloads. The primary schedule follows ' +
-        'each model\'s publication times; when a run is late or a download ' +
-        'fails, sources are retried at most this often. ' +
+        'Overrides the model\'s probe interval while waiting for publication. ' +
+        'The same interval applies before and after the late-publication threshold. ' +
         'Manual downloads are always available from the webapp.',
       default: defaultInterval,
       minimum: 1,
@@ -54,7 +50,7 @@ const buildSchema = (defaultRoot: string, defaultInterval: number, defaultMultip
       title: 'Metered connection slowdown (×)',
       description:
         'On a metered connection (pay-per-MB satellite), automatic checks wait ' +
-        'this many times longer after each expected publication. ' +
+        'this many times longer between publication probes. ' +
         'Manual downloads are never blocked.',
       default: defaultMultiplier,
       minimum: 1,
@@ -97,10 +93,11 @@ module.exports = (server: ServerAPI): Plugin => {
     return Number.isFinite(n) && n >= 1 ? Math.floor(n) : undefined
   }
 
-  const intervalMinutes = () =>
+  const configuredIntervalMinutes = () =>
     validInterval(infra.checkIntervalMinutes) ??
-    legacyIntervalMinutes ??
-    DEFAULT_CHECK_INTERVAL_MINUTES
+    legacyIntervalMinutes
+
+  const intervalMinutes = () => configuredIntervalMinutes() ?? DEFAULT_CHECK_INTERVAL_MINUTES
 
   const validMultiplier = (value: unknown): number | undefined => {
     const n = Number(value)
@@ -163,6 +160,8 @@ module.exports = (server: ServerAPI): Plugin => {
       if (s.running) return `${s.name}: downloading…`
       if (s.lastError) return `${s.name}: error`
       const mode = s.autoDownload ? 'auto' : 'manual'
+      if (s.publicationLate) return `${s.name}: ${mode} publication late (${s.expectedRun})`
+      if (s.pendingRun) return `${s.name}: ${mode} awaiting publication (${s.pendingRun})`
       return `${s.name}: ${mode} ${s.upToDate ? '✓' : '…'} ${s.lastRun ?? 'no data'}`
     }).filter(Boolean)
     const gate = internetState === 'offline'
@@ -177,9 +176,9 @@ module.exports = (server: ServerAPI): Plugin => {
   }
 
   // ── Internet-aware, publication-aware auto scheduling ──────────────
-  // Auto checks fire shortly after each model's next run is expected to
-  // publish — not on a blind wall-clock timer. checkIntervalMinutes is the
-  // fallback: the longest we wait before retrying a late or failed run.
+  // Each source starts probing at its model's lower publication bound.
+  // The model interval (or explicit user override) stays constant when
+  // publication passes the upper bound; only the displayed status changes.
   // `network.internet.state` (when some plugin publishes it) gates the
   // schedule: offline and captive portals pause auto downloads, metered
   // stretches every wait by meteredIntervalMultiplier. Without the path
@@ -194,9 +193,13 @@ module.exports = (server: ServerAPI): Plugin => {
   // portal's login page. Both pause the scheduler identically.
   const autoPaused = () => internetState === 'offline' || internetState === 'captive'
 
-  // Everything the scheduler waits for stretches on a metered link: the
-  // post-publication slack and the fallback retry gap alike.
+  // Metering stretches probe intervals, never the lateness threshold.
   const timingScale = () => internetState === 'metered' ? meteredMultiplier() : 1
+
+  const probeTiming = (): ProbeTiming => ({
+    intervalMinutes: configuredIntervalMinutes(),
+    scale: timingScale(),
+  })
 
   // Delay until some auto source next needs attention.
   const nextAutoTickDelayMs = (): number | null => {
@@ -204,11 +207,7 @@ module.exports = (server: ServerAPI): Plugin => {
     if (!orch) return null
     const auto = orch.autoSources()
     if (auto.length === 0) return null
-    const scale = timingScale()
-    const timing = {
-      retryMs: intervalMinutes() * 60_000 * scale,
-      slackMs: PUBLISH_SLACK_MS * scale,
-    }
+    const timing = probeTiming()
     const earliest = Math.min(...auto.map(s => orch.nextTickAt(s, timing).getTime()))
     return Math.min(TIMER_MAX_MS, Math.max(0, earliest - Date.now()))
   }
@@ -232,7 +231,7 @@ module.exports = (server: ServerAPI): Plugin => {
     nextTickAtMs = null
     if (!orchestrator || ticking) return
     ticking = true
-    orchestrator.tick(internetState)
+    orchestrator.tick(internetState, probeTiming())
       .catch((err: unknown) => server.debug(`tick error: ${err}`))
       .finally(() => {
         ticking = false

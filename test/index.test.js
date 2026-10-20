@@ -14,7 +14,7 @@ const os = require('os')
 const path = require('path')
 
 const makePlugin = require('../dist/index.js')
-const { expectedRunStamp, fetchFingerprint } = require('../dist/scheduler.js')
+const { probeRunStamp, fetchFingerprint } = require('../dist/scheduler.js')
 
 const BBOX = { latMin: 35, lonMin: -6, latMax: 45, lonMax: 17 }
 const SOURCE = { model: 'icon-eu', autoDownload: true }
@@ -68,7 +68,7 @@ const writeUpToDateMarker = (root) => {
   const dir = path.join(root, 'icon-eu')
   fs.mkdirSync(dir, { recursive: true })
   fs.writeFileSync(
-    path.join(dir, `.run-${expectedRunStamp('icon-eu')}.complete`),
+    path.join(dir, `.run-${probeRunStamp('icon-eu')}.complete`),
     JSON.stringify({ params: fetchFingerprint(SOURCE, BBOX) })
   )
 }
