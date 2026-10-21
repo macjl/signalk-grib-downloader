@@ -4,7 +4,9 @@ const path = require('node:path')
 const assert = require('node:assert/strict')
 const { createHash, createHmac } = require('node:crypto')
 assert.equal(process.env.SIGNALK_CONTAINER_ID, 'signalk-sandbox')
-const root = '/home/node/.signalk', name = 'signalk-grib-downloader', base = 'http://127.0.0.1:3000'
+const root = process.env.SIGNALK_NODE_CONFIG_DIR
+assert.ok(root && path.isAbsolute(root), 'Set SIGNALK_NODE_CONFIG_DIR to the absolute Signal K configuration directory')
+const name = 'signalk-grib-downloader', base = 'http://127.0.0.1:3000'
 const security = JSON.parse(fs.readFileSync(path.join(root, 'security.json')))
 const admin = security.users.find(u => u.type === 'admin')
 const secret = security.secretKey || fs.readFileSync(path.join(root, 'security-secret.key'), 'utf8').trim()

@@ -90,3 +90,12 @@ A further readonly check streamed every existing asset through the new GRIB2
 framing validator: all 129 GFS assets and all 9 AROME assets (465,623,211 bytes)
 passed. No existing dataset was republished for this verification. Legacy local
 directories were retained; no new GRIB files are created by the downloader.
+
+## Sandbox helper configuration
+
+The deployment and verification helpers require `SIGNALK_NODE_CONFIG_DIR` to
+point to the absolute Signal K configuration directory inside the selected
+container. Pass it explicitly with Docker (for this sandbox,
+`--env SIGNALK_NODE_CONFIG_DIR=/home/node/.signalk`) alongside the existing
+`SIGNALK_CONTAINER_ID=signalk-sandbox` guard. The helpers do not assume a home
+directory and are excluded from the npm archive.

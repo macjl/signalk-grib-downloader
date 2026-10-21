@@ -7,7 +7,9 @@ const http = require('node:http')
 const assert = require('node:assert/strict')
 const { createHash } = require('node:crypto')
 assert.equal(process.env.SIGNALK_CONTAINER_ID, 'signalk-sandbox')
-const root = '/home/node/.signalk', name = 'signalk-grib-downloader'
+const root = process.env.SIGNALK_NODE_CONFIG_DIR
+assert.ok(root && path.isAbsolute(root), 'Set SIGNALK_NODE_CONFIG_DIR to the absolute Signal K configuration directory')
+const name = 'signalk-grib-downloader'
 const installed = path.join(root, 'node_modules', name)
 const { CataloguePublisher } = require(path.join(installed, 'dist/catalogue'))
 assert.equal(require(path.join(installed, 'package.json')).version, '0.4.0-beta.2')
