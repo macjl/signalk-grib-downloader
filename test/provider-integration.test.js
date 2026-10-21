@@ -9,7 +9,7 @@ const { CataloguePublisher } = require('../dist/catalogue')
 const { toDownloadSource, planRun } = require('../dist/downloader')
 const { server, grib, waitFor, hash, API } = require('./fixtures/http.cjs')
 const providerPath = process.env.FORECAST_DATASET_PROVIDER_PATH
-const integration = { skip: !providerPath && 'Set FORECAST_DATASET_PROVIDER_PATH to test against the actual provider 0.1.1 source' }
+const integration = { skip: !providerPath && 'Set FORECAST_DATASET_PROVIDER_PATH to test against the actual streaming provider source' }
 
 async function setup(t, options = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'actual-direct-provider-'))
@@ -20,7 +20,7 @@ async function setup(t, options = {}) {
   const express = requireProvider('express'), createProvider = requireProvider('./dist')
   const plugin = createProvider({ getDataDirPath: () => path.join(root, 'provider'), registerResourceProvider: () => {},
     handleMessage: () => {}, setPluginStatus: () => {}, setPluginError: message => { throw new Error(message) }, error: () => {} })
-  await plugin.start(options.limits ?? {})
+  await plugin.start(options.settings ?? {})
   t.after(() => plugin.stop())
   const app = express(), router = express.Router()
   router.access = () => router
@@ -105,7 +105,7 @@ test('actual provider: receiving progress has unknown total, and cancellation ne
 })
 
 test('actual provider: streamed size limit rejects the asset and leaves no completed dataset', integration, async t => {
-  const f = await setup(t, { limits: { maxAssetBytes: 64 } })
+  const f = await setup(t, { settings: { maxAssetMiB: 64 / 1024 ** 2 } })
   await assert.rejects(f.publish())
   assert.deepEqual(await f.get('/datasets'), {})
   const stage = Object.values(await f.get('/publications'))[0]

@@ -58,7 +58,7 @@ const buildSchema = (defaultInterval: number, defaultMultiplier: number) => ({
     },
     catalogueUrl: {
       type: 'string', title: 'Forecast catalogue server URL',
-      description: 'Signal K server running Forecast Dataset Provider 0.1.1 or later. Remote servers require HTTPS.',
+      description: 'Signal K server running Forecast Dataset Provider with streamed publications (0.1.0-beta.1 or later). Remote servers require HTTPS.',
       default: 'http://127.0.0.1:3000',
     },
     catalogueTokenFile: {

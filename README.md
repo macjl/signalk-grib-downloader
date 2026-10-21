@@ -3,7 +3,7 @@
 Signal K plugin that **downloads GRIB forecasts and publishes them as
 `forecastDatasets`** through
 [Forecast Dataset Provider](https://github.com/macjl/signalk-forecast-dataset-provider)'s
-experimental HTTP contract 0.1 with its streaming extension (provider 0.1.1+).
+experimental HTTP contract 0.1 with its streaming extension (provider 0.1.0-beta.1 or later).
 Automatic publication follows each model run;
 manual downloads remain available for intermittent connections.
 
@@ -128,7 +128,7 @@ only through the webapp — the admin config panel only holds infrastructure
 ## Catalogue connection
 
 Requires **Signal K 2.34.x or later within 2.x, Node 20.19+**, and an enabled
-**Forecast Dataset Provider 0.1.1 or later**. The previous Weather Provider dependency is
+**Forecast Dataset Provider 0.1.0-beta.1 or later**, with streamed publications. The previous Weather Provider dependency is
 replaced by Forecast Dataset Provider. Weather API decoding remains a separate
 consumer responsibility; provider 0.1 does not decode, index or subset GRIBs.
 Publication to the catalogue is mandatory for automatic and manual downloads.

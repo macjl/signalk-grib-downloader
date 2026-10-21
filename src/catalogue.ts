@@ -1,4 +1,4 @@
-// Direct streaming producer for Forecast Dataset Provider >=0.1.1, contract 0.1.
+// Direct streaming producer for Forecast Dataset Provider >=0.1.0-beta.1, contract 0.1.
 // Only receipts and resumable acquisition metadata are stored by the downloader.
 import * as fs from 'node:fs'
 import * as path from 'node:path'
@@ -103,7 +103,7 @@ export class CataloguePublisher {
   }
   private async publications(signal?: AbortSignal): Promise<any[]> {
     const list = await this.request('/publications', 'GET', signal)
-    if (!list || typeof list !== 'object' || Array.isArray(list)) throw new Error('Forecast Dataset Provider 0.1.1+ publication listing is required')
+    if (!list || typeof list !== 'object' || Array.isArray(list)) throw new Error('Forecast Dataset Provider streaming publication listing is required')
     return Object.values(list)
   }
   async verify(source: SourceSetting, stamp: string, params: unknown, signal?: AbortSignal): Promise<boolean> {
