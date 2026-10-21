@@ -1,16 +1,25 @@
 # signalk-grib-downloader
 
-Signal K plugin that **schedules GRIB downloads** for
-[signalk-grib-weather-provider](https://github.com/macjl/signalk-grib-weather-provider) —
-automatic after each model run, or on demand for intermittent connections —
-with a management webapp.
+Signal K plugin that **downloads GRIB forecasts and publishes them as
+`forecastDatasets`** through
+[Forecast Dataset Provider](https://github.com/macjl/signalk-forecast-dataset-provider)'s
+experimental HTTP contract 0.1 with its streaming extension (provider 0.1.0-beta.1 or later).
+Automatic publication follows each model run;
+manual downloads remain available for intermittent connections.
 
 ## What it does
 
-Each configured source (model + resolution) downloads into
-`<root>/<model>-<resolution>/` through an in-process fetcher — no container
-runtime, no image pulls. Point signalk-grib-weather-provider's root at the
-same directory and every source is served as a weather provider automatically.
+Each configured source streams its selected model run directly into a staged
+multi-asset publication in Forecast Dataset Provider. GFS and Météo-France bodies
+are forwarded with backpressure; ICON-EU fragments are decompressed in memory,
+one variable at a time, and streamed into one asset per timestep. The downloader
+writes no GRIB, partial file, completion marker or local archive.
+
+The provider measures each asset's actual length and SHA-256 during reception.
+Only an explicit commit after all upstream streams complete makes the dataset
+usable. Consumers discover datasets through `/signalk/v2/api/resources/forecastDatasets`
+and retrieve their version-bound assets over HTTP.
+No container runtime, Python or GRIB decoder is required by this downloader.
 
 Supported models: **GFS** (0.25°/0.5°/1°, NOMADS server-side area subsetting),
 **AROME** (0.025°/0.01°), **ARPEGE** (0.1°/0.25°), **ICON-EU**.
@@ -55,7 +64,8 @@ setting), overrides this interval; it is no longer a special late-run fallback.
 The lower bound allows the first forecast files to appear, so a short requested
 horizon need not wait for the model's full forecast. The downloader probes the
 last requested forecast step/group, downloads the requested files, and publishes
-a completion marker only after all downloads succeed. Upper bounds conservatively
+a complete dataset only after all selected assets have arrived successfully.
+Upper bounds conservatively
 cover the complete supported horizon and both Meteo-France resolutions; they
 may therefore be generous for shorter forecasts. They are estimates, not an
 upstream availability guarantee. An exceptional late publication does not move
@@ -113,28 +123,115 @@ not in the plugin config panel:
 
 Settings are stored in the plugin's data directory (`settings.json`), written
 only through the webapp — the admin config panel only holds infrastructure
-(the GRIB root directory).
+(catalogue connection and scheduler settings).
+
+## Catalogue connection
+
+Requires **Signal K 2.34.x or later within 2.x, Node 20.19+**, and an enabled
+**Forecast Dataset Provider 0.1.0-beta.1 or later**, with streamed publications. The previous Weather Provider dependency is
+replaced by Forecast Dataset Provider. Weather API decoding remains a separate
+consumer responsibility; provider 0.1 does not decode, index or subset GRIBs.
+Publication to the catalogue is mandatory for automatic and manual downloads.
+Other plugins consume published datasets through the catalogue API.
+
+In Plugin Config:
+
+- `catalogueUrl`: Signal K server base URL, default `http://127.0.0.1:3000`.
+  Adjust for another port or deployment prefix. Remote endpoints require HTTPS.
+- `catalogueTokenFile`: absolute path to a **readwrite application token**,
+  default `<plugin data directory>/catalogue-token`. When the file is missing,
+  the plugin automatically requests access. In the catalogue server's Signal K
+  Admin UI, open **Security → Access Requests** and approve the
+  **signalk-grib-downloader** request with **readwrite** permissions. The plugin
+  saves the approved token with permissions `0600` and resumes automatic work.
+  No file needs to be created manually. Pending requests survive plugin restarts;
+  a denied request requires a plugin restart to submit a new one.
+
+Existing token files are reused and reread for rotation. Automatically issued
+tokens rejected with HTTP 401 trigger a fresh approval request; externally
+configured tokens are preserved for their owner to rotate. Token contents and
+access request IDs never enter the webapp, status responses or logs. On a remote
+catalogue, approve the request on that server and enable device access requests
+there. Configure a separate token file when switching catalogue servers.
+
+The provider owns all acquisition bytes, including unfinished publications and
+archives. The downloader retains only settings and a private publication journal.
+Old `gribsRoot` options are ignored; existing directories are left untouched.
+Committed journals from beta.1 are reused without reading old files or markers,
+so already published acquisitions do not need an upstream download. Unpublished
+legacy files are not imported automatically; the next eligible acquisition is
+streamed from its upstream source.
+
+An unavailable provider or invalid token reports an error before any upstream
+body is opened. The next automatic check or manual trigger retries the acquisition.
+Automatic work still obeys offline, captive and metered-connection settings.
 
 ## Data lifecycle
 
-- A run is downloaded atomically and finished with a marker recording the
-  **fetch fingerprint** (area, duration, groups, variables…). Changing any of
-  those re-fetches the data; nothing goes stale silently.
-- When a newer run completes, the previous one is deleted — or moved to
-  `<source>/archive/` if the source keeps archives (configurable count, no
-  upper limit). Leftovers of interrupted runs are purged.
-- Old data is **never deleted while offline**: cleanup only happens when a
-  newer run has been fully downloaded.
+- Declare the expected asset identifiers, with unknown sizes, then stream their
+  bodies to the provider. Its acquisition view exposes real received bytes and
+  completed assets; total bytes remain unknown until all lengths are known.
+- A journal in `<plugin data directory>/catalogue-publications/` records model
+  cycles, fetch parameters, acquisition UUIDs, staging/dataset IDs and measured
+  hash receipts. It is fsynced and atomically replaced. No upstream credentials
+  or GRIB bytes enter this journal.
+- Resume after interruption at **asset level**: completed provider assets are
+  retained and only missing assets are fetched again. Partial-byte resume is
+  not implemented. A new acquisition must complete before retention removes an
+  earlier committed dataset.
+- Recover lost create responses through an acquisition UUID persisted before the
+  POST and stored in provenance; recover lost upload/commit responses through
+  publication status and the saved hash/dataset receipts. A generic 404 never
+  means deletion: only explicit `DATASET_NOT_FOUND` or `PUBLICATION_NOT_FOUND`
+  responses authorize clearing the corresponding reference.
+- GRIB2 framing is checked while streaming (message lengths and terminators).
+  A transport error, empty stream, HTML response or truncated GRIB prevents
+  commit and aborts the upload. Framing does not prove meteorological field or
+  geographic completeness; verified inventory still requires an indexer.
+- Metadata declares source, model and cycle. Requested parameters remain claims,
+  never verified coverage or fields. Strict verified searches exclude these
+  datasets until an independent trusted indexer supplies inventory.
+- Keep the newest committed acquisition plus `archiveRuns` previous acquisitions
+  **in the catalogue**. Only IDs in this downloader's journal are eligible for
+  deletion. Provider conflicts defer cleanup until another publication.
+- Deleting source data in the webapp deletes its recorded catalogue acquisitions
+  and staging publications. Removing only the source configuration leaves them
+  intact. Old filesystem directories are never scanned or removed automatically.
+  Settings changes and deletion are blocked while a transfer runs. Plugin stop
+  aborts both HTTP sides and waits for the active transfer.
 
-## Requirements
+A source has a one-hour acquisition timeout; upstream streams also have a
+120-second inactivity timeout. GFS/Météo-France use bounded stream buffers.
+The bzip2 WASM API requires a whole fragment in memory: ICON is processed one
+variable at a time, with a 128 MiB compressed and 512 MiB decompression ceiling
+per fragment, rather than buffering an entire timestep or model run.
 
-- Signal K server ≥ 2.x with Node ≥ 18.17
-- [signalk-grib-weather-provider](https://github.com/macjl/signalk-grib-weather-provider)
-  ≥ 0.2.0 to serve the downloaded data
+Keep the publication journal with the plugin's settings when moving servers.
+Changing catalogue servers requires preserving that old journal separately.
+Do not edit the provider's managed storage or delete journal files to implement
+retention.
 
-No container runtime is required — downloads run in-process. (ICON-EU
-downloads decompress `.bz2` GRIB fragments in-process via a bundled wasm
-bzip2 library.)
+## Development
+
+```sh
+npm ci
+npm test
+npm pack
+```
+
+Tests cover model plans, direct streaming, GRIB framing, cancellation,
+asset-level restart recovery, lost create/upload/commit responses, generic 404s,
+retention conflicts and the unchanged publication-window scheduler.
+
+For integration with the actual provider source (build it first):
+
+```sh
+FORECAST_DATASET_PROVIDER_PATH=/absolute/path/to/signalk-forecast-dataset-provider npm test
+```
+
+Without that variable, the four cross-plugin HTTP tests explicitly skip; the
+normal suite still exercises the producer against a fault-injecting HTTP server.
+See [sandbox verification](docs/sandbox-verification.md) for the live checks.
 
 ## License
 

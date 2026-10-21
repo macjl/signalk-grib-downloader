@@ -142,14 +142,13 @@ export function nextPublishAt(model: ModelId, now: Date = new Date(Date.now()), 
 }
 
 // Build the per-source fetch descriptor from a SourceSetting.
-// `dataRoot` is the local gribs root; the source directory is <root>/<name>.
 // GFS fetch parameters served by the NOMADS grib_filter: the variables and
 // levels cross-product. Part of the fetch fingerprint, so a change here
 // re-fetches affected runs instead of leaving them silently stale.
 export const GFS_FETCH_VARS = ['UGRD', 'VGRD', 'GUST', 'TMP', 'PRMSL', 'RH', 'APCP', 'TCDC']
 export const GFS_FETCH_LEVELS = ['10_m_above_ground', '2_m_above_ground', '850_mb', 'surface', 'mean_sea_level', 'entire_atmosphere']
 
-export function downloaderSourceConfig(s: SourceSetting, dataRoot: string, bbox?: Bbox) {
+export function downloaderSourceConfig(s: SourceSetting, bbox?: Bbox) {
   const model = s.model
   const res = s.resolution || defaultResolution(model)
   const hours = Math.min(s.hours ?? MODEL_MAX_HOURS[model], MODEL_MAX_HOURS[model])
@@ -157,8 +156,6 @@ export function downloaderSourceConfig(s: SourceSetting, dataRoot: string, bbox?
   const entry: Record<string, unknown> = {
     name: dirName,
     model,
-    directory: `${dataRoot}/${dirName}`,
-    archive_runs: Math.max(0, Math.floor(s.archiveRuns ?? 0)),
   }
   if (model === 'gfs') {
     entry.resolution = res
@@ -181,8 +178,8 @@ export function downloaderSourceConfig(s: SourceSetting, dataRoot: string, bbox?
 // Canonical fingerprint of the parameters that shape a source's downloaded
 // data — must mirror downloader.py's fetch_fingerprint/normalize_params
 // (floats rounded to 2 decimals, dict keys sorted, operational keys
-// excluded). Stored by the downloader in run markers; a run is only up to
-// date if its marker fingerprint matches the current settings.
+// excluded). Stored in publication journals; preserve compatibility with
+// receipts and run markers produced by the earlier downloader.
 const FP_EXCLUDE = new Set(['name', 'model', 'directory', 'archive_runs', 'keep_runs'])
 
 function normalizeParams(v: unknown): unknown {
@@ -199,7 +196,7 @@ function normalizeParams(v: unknown): unknown {
 }
 
 export function fetchFingerprint(s: SourceSetting, bbox?: Bbox): unknown {
-  const entry = downloaderSourceConfig(s, '', bbox)
+  const entry = downloaderSourceConfig(s, bbox)
   const params: Record<string, unknown> = {}
   for (const [k, v] of Object.entries(entry)) {
     if (!FP_EXCLUDE.has(k)) params[k] = v

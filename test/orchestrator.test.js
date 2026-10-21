@@ -14,12 +14,22 @@ const { Orchestrator } = require('../dist/orchestrator.js')
 const { probeRunStamp, fetchFingerprint, nextPublishAt } = require('../dist/scheduler.js')
 
 const tmpRoot = () => fs.mkdtempSync(path.join(os.tmpdir(), 'grib-orch-'))
+// Scheduling tests use a producer double; HTTP publication is tested separately.
+const publisher = () => {
+  let latest = null
+  return {
+    latest: () => latest, complete: (stamp, params) => { latest = { stamp, params } },
+    reference: () => latest ? { datasetId: 'fixture', version: 'a'.repeat(64) } : null,
+    pendingStamp: () => null, check: async () => {}, verify: async () => true,
+    publish: async (_source, plan, params) => { latest = { stamp: plan.stamp, params } },
+  }
+}
 
 test('auto tick is suppressed while offline', async () => {
   const logs = []
   const orch = new Orchestrator(
     [{ model: 'icon-eu', autoDownload: true }],
-    tmpRoot(),
+    publisher(),
     (msg) => logs.push(msg)
   )
   // A live tick would log "auto: 1 source(s) behind" and hit the network.
@@ -35,7 +45,7 @@ test('auto tick is suppressed behind a captive portal', async () => {
   const logs = []
   const orch = new Orchestrator(
     [{ model: 'icon-eu', autoDownload: true }],
-    tmpRoot(),
+    publisher(),
     (msg) => logs.push(msg)
   )
   await orch.tick('captive')
@@ -46,20 +56,15 @@ test('auto tick is suppressed behind a captive portal', async () => {
 test('nextTickAt starts missing data immediately and waits for the next lower bound once current', () => {
   const root = tmpRoot()
   const setting = { model: 'icon-eu', autoDownload: true }
-  const orch = new Orchestrator([setting], root, () => {})
+  const catalogue = publisher()
+  const orch = new Orchestrator([setting], catalogue, () => {})
 
   // No data on disk: do not wait for an upper bound or a retry interval.
   const before = Date.now()
   const retry = orch.nextTickAt(setting)
   assert.ok(retry.getTime() >= before && retry.getTime() <= Date.now())
 
-  // Simulate the expected run completed on disk (fingerprinted marker)
-  const dir = path.join(root, 'icon-eu')
-  fs.mkdirSync(dir, { recursive: true })
-  fs.writeFileSync(
-    path.join(dir, `.run-${probeRunStamp('icon-eu')}.complete`),
-    JSON.stringify({ params: fetchFingerprint(setting) })
-  )
+  catalogue.complete(probeRunStamp('icon-eu'), fetchFingerprint(setting))
 
   const scheduled = orch.nextTickAt(setting)
   const expected = nextPublishAt('icon-eu').getTime()
@@ -72,10 +77,8 @@ function publicationFixture(t) {
   let now = Date.parse('2026-10-19T10:00:00Z')
   t.mock.method(Date, 'now', () => now)
   const source = { model: 'arome', resolution: '0025', autoDownload: true }
-  const dir = path.join(root, 'arome-0025')
-  fs.mkdirSync(dir, { recursive: true })
-  const complete = stamp => fs.writeFileSync(path.join(dir, `.run-${stamp}.complete`),
-    JSON.stringify({ params: fetchFingerprint(source) }))
+  const catalogue = publisher()
+  const complete = stamp => catalogue.complete(stamp, fetchFingerprint(source))
   complete('20261019T03')
   const requests = []
   let available = false
@@ -83,13 +86,17 @@ function publicationFixture(t) {
     requests.push({ url, method: options.method ?? 'GET' })
     return available ? new Response(Buffer.from('GRIB fixture')) : new Response(null, { status: 404 })
   })
-  const orch = new Orchestrator([source], root, () => {}, () => {})
+  const orch = new Orchestrator([source], catalogue, () => {}, () => {})
   return {
     orch, source, requests, complete,
     at: time => { now = Date.parse(`2026-10-19T${time}Z`) },
     publish: () => { available = true },
   }
 }
+
+test('a catalogue publisher is required even for manual downloads', () => {
+  assert.throws(() => new Orchestrator([], undefined, () => {}), /publisher is required/)
+})
 
 test('probes start at the lower bound and keep the same cadence across the lateness threshold', async t => {
   const f = publicationFixture(t)
@@ -183,4 +190,19 @@ test('a newer complete cycle supersedes older missing cycles and offline checks 
   assert.strictEqual(f.requests.length, 1)
   assert.strictEqual(f.orch.status()[0].pendingRun, null)
   assert.strictEqual(f.orch.status()[0].publicationLate, false)
+})
+
+test('approving catalogue access retries a failed source immediately instead of waiting for its probe interval', async () => {
+  let attempts = 0
+  const catalogue = publisher()
+  catalogue.check = async () => { attempts++; throw new Error('HTTP 401') }
+  const orch = new Orchestrator([{ model: 'icon-eu', autoDownload: true }], catalogue, () => {})
+  await orch.tick()
+  assert.equal(attempts, 1)
+  await orch.tick()
+  assert.equal(attempts, 1)
+  orch.retryAfterAccessApproval()
+  await orch.tick()
+  assert.equal(attempts, 2)
+  await orch.stop()
 })
