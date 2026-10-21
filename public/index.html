@@ -159,6 +159,8 @@ const I18N = {
     stWaiting: 'attente publication', stLate: 'publication en retard', stConfigChanged: 'config modifiée',
     stPublishing: 'publication au catalogue', stPublished: 'Catalogue', stManual: 'manuel', stNoData: 'aucune donnée',
     runtimeErrorTitle: 'Téléchargement automatique indisponible',
+    cataloguePending: 'Autorisation en attente : sur le serveur du catalogue, ouvrez Security → Access Requests et approuvez signalk-grib-downloader en lecture/écriture. Le téléchargement automatique reprendra ensuite.',
+    catalogueDenied: 'Accès au catalogue refusé. Redémarrez le plugin pour envoyer une nouvelle demande d’autorisation.',
     lastRun: 'dernier run', expected: 'attendu', confirmDelete: 'Supprimer cette source ?',
     lastAttempt: 'dernière tentative', noAttempt: 'aucune tentative depuis le démarrage', logTitle: 'Journal du dernier téléchargement',
     maxLbl: 'max', totalVol: 'Volume estimé par run :', perRun: '/ run',
@@ -187,6 +189,8 @@ const I18N = {
     stWaiting: 'awaiting publication', stLate: 'publication late', stConfigChanged: 'settings changed',
     stPublishing: 'catalogue publication pending', stPublished: 'Catalogue', stManual: 'manual', stNoData: 'no data',
     runtimeErrorTitle: 'Automatic downloads unavailable',
+    cataloguePending: 'Access approval pending: on the catalogue server, open Security → Access Requests and approve signalk-grib-downloader with readwrite permissions. Automatic downloads will then resume.',
+    catalogueDenied: 'Catalogue access denied. Restart the plugin to submit a new access request.',
     lastRun: 'last run', expected: 'expected', confirmDelete: 'Delete this source?',
     lastAttempt: 'last attempt', noAttempt: 'no attempt since startup', logTitle: 'Last download log',
     maxLbl: 'max', totalVol: 'Estimated volume per run:', perRun: '/ run',
@@ -586,6 +590,9 @@ async function pollStatus() {
     }
     const data = await r.json()
     schedulerError = data.schedulerError || null
+    if (data.catalogueAccess?.state === 'pending') schedulerError = t.cataloguePending
+    else if (data.catalogueAccess?.state === 'denied') schedulerError = t.catalogueDenied
+    else if (data.catalogueAccess?.state === 'error') schedulerError = data.catalogueAccess.message
     if (data.checkIntervalMinutes) config.checkIntervalMinutes = data.checkIntervalMinutes
     internetState = data.internetState || 'unknown'
     nextAutoTickAt = data.nextAutoTickAt || null

@@ -24,6 +24,9 @@ const tmpDir = () => fs.mkdtempSync(path.join(os.tmpdir(), 'grib-host-'))
 
 // Mock Signal K server with just the surface the plugin host touches.
 const makeServer = (dataDir, { seed } = {}) => {
+  // These scheduling fixtures already have catalogue access; onboarding is
+  // exercised separately through the actual Access Requests HTTP lifecycle.
+  fs.writeFileSync(path.join(dataDir, 'catalogue-token'), 'scheduler-test-token\n')
   const stateHandlers = []
   const pluginStatuses = []
   const debugs = []

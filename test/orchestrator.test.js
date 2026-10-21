@@ -191,3 +191,18 @@ test('a newer complete cycle supersedes older missing cycles and offline checks 
   assert.strictEqual(f.orch.status()[0].pendingRun, null)
   assert.strictEqual(f.orch.status()[0].publicationLate, false)
 })
+
+test('approving catalogue access retries a failed source immediately instead of waiting for its probe interval', async () => {
+  let attempts = 0
+  const catalogue = publisher()
+  catalogue.check = async () => { attempts++; throw new Error('HTTP 401') }
+  const orch = new Orchestrator([{ model: 'icon-eu', autoDownload: true }], catalogue, () => {})
+  await orch.tick()
+  assert.equal(attempts, 1)
+  await orch.tick()
+  assert.equal(attempts, 1)
+  orch.retryAfterAccessApproval()
+  await orch.tick()
+  assert.equal(attempts, 2)
+  await orch.stop()
+})

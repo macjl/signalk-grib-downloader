@@ -139,10 +139,20 @@ In Plugin Config:
 - `catalogueUrl`: Signal K server base URL, default `http://127.0.0.1:3000`.
   Adjust for another port or deployment prefix. Remote endpoints require HTTPS.
 - `catalogueTokenFile`: absolute path to a **readwrite application token**,
-  default `<plugin data directory>/catalogue-token`. Approve a dedicated device
-  through Signal K's standard Access Requests API and store its token here with
-  permissions `0600` for the server user. File contents never enter the webapp,
-  status response, journal, provenance or logs. Rotate by replacing the file.
+  default `<plugin data directory>/catalogue-token`. When the file is missing,
+  the plugin automatically requests access. In the catalogue server's Signal K
+  Admin UI, open **Security → Access Requests** and approve the
+  **signalk-grib-downloader** request with **readwrite** permissions. The plugin
+  saves the approved token with permissions `0600` and resumes automatic work.
+  No file needs to be created manually. Pending requests survive plugin restarts;
+  a denied request requires a plugin restart to submit a new one.
+
+Existing token files are reused and reread for rotation. Automatically issued
+tokens rejected with HTTP 401 trigger a fresh approval request; externally
+configured tokens are preserved for their owner to rotate. Token contents and
+access request IDs never enter the webapp, status responses or logs. On a remote
+catalogue, approve the request on that server and enable device access requests
+there. Configure a separate token file when switching catalogue servers.
 
 The provider owns all acquisition bytes, including unfinished publications and
 archives. The downloader retains only settings and a private publication journal.

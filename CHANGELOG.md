@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.4.0-beta.3] - 2026-10-21
+
+- Request catalogue access automatically through Signal K Access Requests when
+  no token is configured; require administrator approval with this plugin's
+  least-privilege permissions and persist the token privately.
+- Resume pending requests across restarts, report waiting/denied states and
+  resume catalogue work immediately after approval. Stop polling on plugin stop.
+- Renew automatically issued tokens rejected with HTTP 401 while preserving
+  manually configured or concurrently rotated tokens.
+- Cover the access lifecycle, plugin startup and approval-driven resumption;
+  validate both permission levels against an actual Signal K server.
+
 ## [0.4.0-beta.2] - 2026-10-21
 
 - Keep journal writes compatible with Windows: flush the file before rename,

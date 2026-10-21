@@ -99,3 +99,14 @@ container. Pass it explicitly with Docker (for this sandbox,
 `--env SIGNALK_NODE_CONFIG_DIR=/home/node/.signalk`) alongside the existing
 `SIGNALK_CONTAINER_ID=signalk-sandbox` guard. The helpers do not assume a home
 directory and are excluded from the npm archive.
+
+## Automatic access requests (0.4.0-beta.3, 2026-10-21)
+
+All 76 tests passed on Node 24, including 15 access lifecycle and plugin-host
+checks. Two synthetic devices were also requested against the actual sandbox
+server, approved through its admin API with readwrite and readonly permissions,
+and verified against the Forecast Dataset Provider with their issued tokens.
+The requests were visible through the same API as the Signal K Admin UI. Token
+files used mode 0600. The two test devices and temporary token files were removed;
+existing devices and all 46 plugin configurations were preserved. This check did
+not redeploy either installed plugin.

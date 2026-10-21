@@ -22,7 +22,7 @@ const get = async (route, auth = headers) => {
   return r.json()
 }
 async function main() {
-  assert.equal(JSON.parse(fs.readFileSync(path.join(root, 'node_modules', name, 'package.json'))).version, '0.4.0-beta.2')
+  assert.equal(JSON.parse(fs.readFileSync(path.join(root, 'node_modules', name, 'package.json'))).version, '0.4.0-beta.3')
   const provider = await get('/plugins/signalk-forecast-dataset-provider/status')
   assert.equal(provider.contractVersion, '0.1')
   const status = await get(`/plugins/${name}/status`, adminHeaders)

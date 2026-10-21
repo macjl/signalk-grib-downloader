@@ -35,7 +35,7 @@ const missing = (error: unknown, code: string) => error instanceof CatalogueHttp
 
 export class CataloguePublisher {
   readonly endpoint: string
-  constructor(endpoint: string, private tokenFile: string, private dataDir: string) {
+  constructor(endpoint: string, private tokenFile: string, private dataDir: string, private tokenReader?: () => string, private onUnauthorized?: (token: string) => void) {
     const url = new URL(endpoint)
     if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) throw new Error('Catalogue URL must be HTTP(S), without credentials, query or fragment')
     if (url.protocol === 'http:' && !['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)) throw new Error('Use HTTPS for a remote catalogue server')
@@ -83,7 +83,7 @@ export class CataloguePublisher {
     return record?.version && record.datasetId ? { datasetId: record.datasetId, version: record.version, href: `/signalk/v2/api/resources/forecastDatasets/${record.datasetId}` } : null
   }
   private async request(route: string, method: string, signal?: AbortSignal, json?: unknown, stream?: Readable): Promise<any> {
-    const token = this.tokenFile ? fs.readFileSync(this.tokenFile, 'utf8').trim() : ''
+    const token = this.tokenReader ? this.tokenReader() : this.tokenFile ? fs.readFileSync(this.tokenFile, 'utf8').trim() : ''
     const headers: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {}
     if (json !== undefined) headers['Content-Type'] = 'application/json'
     if (stream) headers['Content-Type'] = 'application/octet-stream'
@@ -92,6 +92,7 @@ export class CataloguePublisher {
       ...(stream ? { duplex: 'half' } : {}), redirect: 'error',
       signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(stream ? 3600_000 : 300_000)]) : AbortSignal.timeout(stream ? 3600_000 : 300_000),
     })
+    if (response.status === 401) this.onUnauthorized?.(token)
     if (!response.ok) {
       let code: string | undefined
       try { const body = await response.json() as { code?: unknown }; if (typeof body.code === 'string' && /^[A-Z_]+$/.test(body.code)) code = body.code } catch { /* generic proxy/plugin error */ }

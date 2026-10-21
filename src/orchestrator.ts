@@ -216,6 +216,13 @@ export class Orchestrator {
     }
   }
 
+  // A newly approved credential permits an immediate retry of failed work.
+  retryAfterAccessApproval(): void {
+    for (const state of this.states.values()) {
+      if (state.lastOutcome === 'failed') state.lastProbeAt = null
+    }
+  }
+
   // Automatic tick: probe eligible sources even before their upper bound.
   // Suppressed entirely while offline or behind a captive
   // portal — neither reaches the open internet, so downloads would only

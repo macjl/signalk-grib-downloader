@@ -4,6 +4,7 @@ import * as path from 'path'
 import { Path, Plugin, ServerAPI } from '@signalk/server-api'
 import { Orchestrator, ProbeTiming } from './orchestrator'
 import { CataloguePublisher } from './catalogue'
+import { CatalogueAccess } from './catalogue-access'
 import { sourceDirName } from './scheduler'
 import { AppSettings, InternetState, PluginSettings, SourceSetting } from './types'
 
@@ -63,7 +64,7 @@ const buildSchema = (defaultInterval: number, defaultMultiplier: number) => ({
     },
     catalogueTokenFile: {
       type: 'string', title: 'Catalogue token file',
-      description: 'Absolute path to a readwrite application token. Empty uses <plugin data directory>/catalogue-token. File contents are never returned by the webapp.',
+      description: 'Token file, default <plugin data directory>/catalogue-token. When missing, approve the automatic readwrite request in Signal K Security > Access Requests. File contents are never returned by the webapp.',
       default: '',
     },
   },
@@ -89,6 +90,7 @@ module.exports = (server: ServerAPI): Plugin => {
   let stopInternetStream: (() => void) | null = null
   let infra: PluginSettings = {}
   let catalogue: CataloguePublisher
+  let access: CatalogueAccess | null = null
   const deleting = new Map<string, AbortController>()
   let settings: AppSettings = { ...DEFAULT_APP_SETTINGS }
   let legacyIntervalMinutes: number | undefined
@@ -163,6 +165,10 @@ module.exports = (server: ServerAPI): Plugin => {
 
   const updateStatus = () => {
     if (!orchestrator) return
+    if (access && access.status().state !== 'ready') {
+      server.setPluginStatus(access.status().message)
+      return
+    }
     const parts = orchestrator.status().map(s => {
       if (s.running) return `${s.name}: downloading…`
       if (s.lastError) return `${s.name}: error`
@@ -223,7 +229,7 @@ module.exports = (server: ServerAPI): Plugin => {
   const scheduleNextTick = (): void => {
     if (timer) { clearTimeout(timer); timer = null }
     nextTickAtMs = null
-    if (!orchestrator || autoPaused()) return
+    if (!orchestrator || autoPaused() || (access && access.status().state !== 'ready')) return
     const delay = nextAutoTickDelayMs()
     if (delay === null) return
     nextTickAtMs = Date.now() + delay
@@ -238,6 +244,7 @@ module.exports = (server: ServerAPI): Plugin => {
     if (timer) { clearTimeout(timer); timer = null }
     nextTickAtMs = null
     if (!orchestrator || ticking || deleting.size) return
+    if (access && access.status().state !== 'ready') { updateStatus(); return }
     ticking = true
     orchestrator.tick(internetState, probeTiming())
       .catch((err: unknown) => server.debug(`tick error: ${err}`))
@@ -304,7 +311,13 @@ module.exports = (server: ServerAPI): Plugin => {
       }
       const tokenFile = expandHome(infra.catalogueTokenFile || path.join(server.getDataDirPath(), 'catalogue-token'))
       if (!path.isAbsolute(tokenFile)) throw new Error('Catalogue token file must be absolute')
-      catalogue = new CataloguePublisher(infra.catalogueUrl || 'http://127.0.0.1:3000', tokenFile, server.getDataDirPath())
+      catalogue = new CataloguePublisher(infra.catalogueUrl || 'http://127.0.0.1:3000', tokenFile, server.getDataDirPath(), () => authorizer.token(), token => authorizer.rejected(token))
+      const authorizer = new CatalogueAccess({
+        endpoint: catalogue.endpoint, tokenFile, dataDir: server.getDataDirPath(),
+        pluginId: PLUGIN_ID, permissions: 'readwrite', onChange: updateStatus,
+        onReady: () => { orchestrator?.retryAfterAccessApproval(); updateStatus(); if (orchestrator && !autoPaused()) runTick() },
+      })
+      access = authorizer
       settings = loadSettings(options ?? {})
 
       // Follow network.internet.state if some plugin publishes it: seed
@@ -318,15 +331,19 @@ module.exports = (server: ServerAPI): Plugin => {
         .onValue(onInternetState)
 
       apply()
+      access.start()
     },
 
     stop: async () => {
+      const active = orchestrator
+      orchestrator = null
+      const previousAccess = access
+      access = null
+      await previousAccess?.stop()
       stopInternetStream?.()
       stopInternetStream = null
       if (timer) { clearTimeout(timer); timer = null }
       nextTickAtMs = null
-      const active = orchestrator
-      orchestrator = null
       for (const controller of deleting.values()) controller.abort(new Error('plugin stopped'))
       await active?.stop()
       while (deleting.size) await new Promise(resolve => setTimeout(resolve, 10))
@@ -337,6 +354,7 @@ module.exports = (server: ServerAPI): Plugin => {
         if (!orchestrator) return res.status(503).json({ error: 'plugin not started' })
         res.json({
           catalogueUrl: catalogue.endpoint,
+          catalogueAccess: access?.status(),
           checkIntervalMinutes: intervalMinutes(),
           internetState,
           nextAutoTickAt: nextTickAtMs === null ? null : new Date(nextTickAtMs).toISOString(),
