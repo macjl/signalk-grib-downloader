@@ -47,8 +47,8 @@ async function main() {
     const bytes = Buffer.from(await response.arrayBuffer())
     assert.equal(bytes.length, asset.size)
     assert.equal(createHash('sha256').update(bytes).digest('hex'), asset.sha256)
-    const original = path.join(root, 'gribs', source.name, asset.id.replace(/_grb2$/, '.grb2'))
-    if (fs.existsSync(original)) assert.deepEqual(bytes, fs.readFileSync(original))
+    const original = path.join(data, 'downloads', source.name, asset.id.replace(/_grb2$/, '.grb2'))
+    assert.deepEqual(bytes, fs.readFileSync(original))
     assert.equal(bytes.subarray(0, 4).toString(), 'GRIB')
     total += bytes.length
   }
@@ -61,8 +61,12 @@ async function main() {
   const marker = JSON.parse(fs.readFileSync(path.join(root, 'local-packages/grib-downloader-forecast-backup.json')))
   const hashes = JSON.parse(fs.readFileSync(path.join(marker.backup, 'plugin-config-hashes.json')))
   for (const [file, hash] of Object.entries(hashes)) {
+    if (file === name + '.json') continue
     assert.equal(createHash('sha256').update(fs.readFileSync(path.join(root, 'plugin-config-data', file))).digest('hex'), hash, file)
   }
+  const expectedConfig = JSON.parse(fs.readFileSync(path.join(marker.backup, 'downloader-config.json')))
+  delete expectedConfig.configuration.gribsRoot
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(root, 'plugin-config-data', name + '.json'))), expectedConfig)
   const before = JSON.parse(fs.readFileSync(path.join(marker.backup, 'plugin-data/settings.json')))
   const after = JSON.parse(fs.readFileSync(path.join(data, 'settings.json')))
   assert.deepEqual(after, before)

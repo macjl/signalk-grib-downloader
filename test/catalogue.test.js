@@ -162,7 +162,7 @@ test('manifest loss and authentication failure preserve local completed files', 
 test('catalogue outage retries before upstream download and status stays pending until commit', async t => {
   const f = await fixture(t), r = f.run()
   const source = { ...f.source, autoDownload: true }
-  const orch = new Orchestrator([source], f.root, () => {}, () => {}, undefined, f.publisher())
+  const orch = new Orchestrator([source], f.root, f.publisher(), () => {}, () => {})
   assert.equal(orch.status()[0].publicationPending, true)
   assert.equal(orch.status()[0].upToDate, false)
   f.deny(true)
@@ -201,7 +201,7 @@ test('stopping the orchestrator aborts and waits for an active publication', asy
     started()
     await new Promise((_resolve, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true }))
   })
-  const orch = new Orchestrator([f.source], f.root, () => {}, () => {}, undefined, publisher)
+  const orch = new Orchestrator([f.source], f.root, publisher, () => {}, () => {})
   const transfer = orch.downloadSource(f.source)
   await ready
   assert.equal(orch.isRunning(), true)

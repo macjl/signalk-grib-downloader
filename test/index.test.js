@@ -82,7 +82,7 @@ const settle = (ms = 50) => new Promise((resolve) => setTimeout(resolve, ms))
 
 const startPlugin = ({ seed, prepare } = {}) => {
   const dataDir = tmpDir()
-  const gribsRoot = tmpDir()
+  const gribsRoot = path.join(dataDir, 'downloads')
   fs.writeFileSync(path.join(dataDir, 'settings.json'),
     JSON.stringify({ bbox: BBOX, sources: [SOURCE] }))
   if (prepare) prepare(gribsRoot, dataDir)
@@ -90,9 +90,26 @@ const startPlugin = ({ seed, prepare } = {}) => {
   const plugin = makePlugin(server)
   const { router, call } = makeRouter()
   plugin.registerWithRouter(router)
-  plugin.start({ gribsRoot })
+  plugin.start({})
   return { plugin, server, call, gribsRoot, dataDir, stop: () => plugin.stop() }
 }
+
+test('retired shared-directory settings cannot select a local-only downloader', async t => {
+  const dataDir = tmpDir(), retiredRoot = tmpDir()
+  t.after(() => fs.rmSync(dataDir, { recursive: true, force: true }))
+  t.after(() => fs.rmSync(retiredRoot, { recursive: true, force: true }))
+  fs.writeFileSync(path.join(dataDir, 'settings.json'), JSON.stringify({ sources: [SOURCE] }))
+  writeUpToDateMarker(retiredRoot, dataDir)
+  const plugin = makePlugin(makeServer(dataDir, { seed: 'offline' }))
+  const { router, call } = makeRouter()
+  plugin.registerWithRouter(router)
+  t.after(() => plugin.stop())
+  assert.strictEqual(plugin.schema().properties.gribsRoot, undefined)
+  plugin.start({ gribsRoot: retiredRoot, inputMode: 'local' })
+  assert.strictEqual(call('GET', '/status').sources[0].lastRun, null,
+    'completion markers outside the private workspace are not read')
+  assert.ok(fs.existsSync(path.join(retiredRoot, 'icon-eu')))
+})
 
 test('entering captive pauses the auto scheduler; leaving it catches up', async () => {
   // Source up to date from the start: every 'online'-like tick finds

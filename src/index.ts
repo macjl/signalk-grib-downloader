@@ -30,7 +30,7 @@ function expandHome(p: string): string {
 // Operational download choices (area and sources) are managed in the webapp at
 // /signalk-grib-downloader/ and stored in <dataDir>/settings.json — the
 // admin form cannot clobber it.
-const buildSchema = (defaultRoot: string, defaultInterval: number, defaultMultiplier: number) => ({
+const buildSchema = (defaultInterval: number, defaultMultiplier: number) => ({
   type: 'object',
   description:
     'Sources and download area are managed in the GRIB Downloader webapp ' +
@@ -66,14 +66,6 @@ const buildSchema = (defaultRoot: string, defaultInterval: number, defaultMultip
       description: 'Absolute path to a readwrite application token. Empty uses <plugin data directory>/catalogue-token. File contents are never returned by the webapp.',
       default: '',
     },
-    gribsRoot: {
-      type: 'string',
-      title: 'Local GRIB acquisition directory',
-      description:
-        'Each source downloads into <root>/<model>-<resolution> then publishes to Forecast Dataset Provider. ' +
-        '"~" is expanded.',
-      default: defaultRoot,
-    },
   },
 })
 
@@ -101,8 +93,7 @@ module.exports = (server: ServerAPI): Plugin => {
   let settings: AppSettings = { ...DEFAULT_APP_SETTINGS }
   let legacyIntervalMinutes: number | undefined
 
-  const DEFAULT_ROOT = '~/.signalk/gribs'
-  const gribsRoot = () => expandHome(infra.gribsRoot || DEFAULT_ROOT)
+  const acquisitionRoot = () => path.join(server.getDataDirPath(), 'downloads')
 
   const settingsPath = () => path.join(server.getDataDirPath(), 'settings.json')
 
@@ -288,11 +279,11 @@ module.exports = (server: ServerAPI): Plugin => {
     orchestrator?.stop()
     orchestrator = new Orchestrator(
       sources,
-      gribsRoot(),
+      acquisitionRoot(),
+      catalogue,
       (msg: string) => server.debug(msg),
       updateStatus,
-      settings.bbox,
-      catalogue
+      settings.bbox
     )
 
     if (sources.some(s => s.autoDownload !== false)) {
@@ -305,13 +296,12 @@ module.exports = (server: ServerAPI): Plugin => {
   const plugin: Plugin = {
     id: PLUGIN_ID,
     name: 'GRIB Downloader',
-    schema: () => buildSchema(DEFAULT_ROOT, intervalMinutes(), meteredMultiplier()),
+    schema: () => buildSchema(intervalMinutes(), meteredMultiplier()),
 
     start: (options: PluginSettings & AppSettings) => {
       infra = {
         catalogueUrl: options?.catalogueUrl,
         catalogueTokenFile: options?.catalogueTokenFile,
-        gribsRoot: options?.gribsRoot,
         checkIntervalMinutes: validInterval(options?.checkIntervalMinutes),
         meteredIntervalMultiplier: validMultiplier(options?.meteredIntervalMultiplier),
       }
@@ -420,7 +410,7 @@ module.exports = (server: ServerAPI): Plugin => {
         try {
           await catalogue.removeSource(source, controller.signal)
           controller.signal.throwIfAborted()
-          const dir = path.join(gribsRoot(), name)
+          const dir = path.join(acquisitionRoot(), name)
           const existed = fs.existsSync(dir)
           await fs.promises.rm(dir, { recursive: true, force: true })
           res.json({ ok: true, existed })

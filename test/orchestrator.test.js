@@ -14,12 +14,15 @@ const { Orchestrator } = require('../dist/orchestrator.js')
 const { probeRunStamp, fetchFingerprint, nextPublishAt } = require('../dist/scheduler.js')
 
 const tmpRoot = () => fs.mkdtempSync(path.join(os.tmpdir(), 'grib-orch-'))
+// Scheduling tests use a producer double; HTTP publication is tested separately.
+const publisher = () => ({ reference: () => ({ datasetId: 'fixture', version: 'a'.repeat(64) }), publish: async () => {} })
 
 test('auto tick is suppressed while offline', async () => {
   const logs = []
   const orch = new Orchestrator(
     [{ model: 'icon-eu', autoDownload: true }],
     tmpRoot(),
+    publisher(),
     (msg) => logs.push(msg)
   )
   // A live tick would log "auto: 1 source(s) behind" and hit the network.
@@ -36,6 +39,7 @@ test('auto tick is suppressed behind a captive portal', async () => {
   const orch = new Orchestrator(
     [{ model: 'icon-eu', autoDownload: true }],
     tmpRoot(),
+    publisher(),
     (msg) => logs.push(msg)
   )
   await orch.tick('captive')
@@ -46,7 +50,7 @@ test('auto tick is suppressed behind a captive portal', async () => {
 test('nextTickAt starts missing data immediately and waits for the next lower bound once current', () => {
   const root = tmpRoot()
   const setting = { model: 'icon-eu', autoDownload: true }
-  const orch = new Orchestrator([setting], root, () => {})
+  const orch = new Orchestrator([setting], root, publisher(), () => {})
 
   // No data on disk: do not wait for an upper bound or a retry interval.
   const before = Date.now()
@@ -83,13 +87,17 @@ function publicationFixture(t) {
     requests.push({ url, method: options.method ?? 'GET' })
     return available ? new Response(Buffer.from('GRIB fixture')) : new Response(null, { status: 404 })
   })
-  const orch = new Orchestrator([source], root, () => {}, () => {})
+  const orch = new Orchestrator([source], root, publisher(), () => {}, () => {})
   return {
     orch, source, requests, complete,
     at: time => { now = Date.parse(`2026-10-19T${time}Z`) },
     publish: () => { available = true },
   }
 }
+
+test('a catalogue publisher is required even for manual downloads', () => {
+  assert.throws(() => new Orchestrator([], '/unused', undefined, () => {}), /publisher is required/)
+})
 
 test('probes start at the lower bound and keep the same cadence across the lateness threshold', async t => {
   const f = publicationFixture(t)

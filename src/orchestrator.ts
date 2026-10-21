@@ -40,17 +40,18 @@ export class Orchestrator {
   }
 
   private published(source: SourceSetting, stamp: string | null): boolean {
-    return !this.catalogue || !!this.catalogue.reference(source, stamp, stamp ? this.markerParams(source, stamp) : null)
+    return !!this.catalogue.reference(source, stamp, stamp ? this.markerParams(source, stamp) : null)
   }
 
   constructor(
     private sources: SourceSetting[],
-    private gribsRoot: string,    // local path where source subdirs live
+    private gribsRoot: string,    // private acquisition workspace
+    private catalogue: CataloguePublisher,
     private log: (msg: string) => void,
-    private onChange: () => void, // notify status updates
-    private bbox?: Bbox,
-    private catalogue?: CataloguePublisher
+    private onChange: () => void = () => {}, // notify status updates
+    private bbox?: Bbox
   ) {
+    if (!catalogue) throw new Error('Forecast Dataset Provider publisher is required')
     for (const s of sources) {
       this.states.set(sourceDirName(s), {
         running: false, lastError: null, lastOutcome: null, lastFinishedAt: null, lastLog: [],
@@ -115,8 +116,8 @@ export class Orchestrator {
         pendingRun: lastRun !== null && lastRun >= target ? null : target,
         publicationLate: lastRun === null || lastRun < expected,
         upToDate: lastRun !== null && lastRun >= expected && paramsOk && this.published(s, lastRun),
-        catalogue: this.catalogue?.reference(s, lastRun, lastRun ? this.markerParams(s, lastRun) : null) ?? null,
-        publicationPending: !!this.catalogue && lastRun !== null && !this.published(s, lastRun),
+        catalogue: this.catalogue.reference(s, lastRun, lastRun ? this.markerParams(s, lastRun) : null),
+        publicationPending: lastRun !== null && !this.published(s, lastRun),
         configStale: lastRun !== null && !paramsOk,
         running: st.running,
         lastError: st.lastError,
@@ -196,15 +197,15 @@ export class Orchestrator {
     )
 
     try {
-      // Publish completed local data first, including downloads made by 0.3.0.
+      // Publish a completed acquisition before attempting another download.
       // On catalogue failure keep these files and retry without fetching upstream.
       const previous = this.lastRunStamp(source)
-      if (this.catalogue && previous) await this.catalogue.publish(source, ds.directory, previous, onProgress, controller.signal)
+      if (previous) await this.catalogue.publish(source, ds.directory, previous, onProgress, controller.signal)
       const outcome = await fetchSource(ds, onProgress, controller.signal)
       const latest = this.lastRunStamp(source)
-      if (this.catalogue && latest && latest !== previous) await this.catalogue.publish(source, ds.directory, latest, onProgress, controller.signal)
+      if (latest && latest !== previous) await this.catalogue.publish(source, ds.directory, latest, onProgress, controller.signal)
       // A parameter change can replace the files for the same model cycle.
-      else if (this.catalogue && latest && outcome === 'downloaded') await this.catalogue.publish(source, ds.directory, latest, onProgress, controller.signal)
+      else if (latest && outcome === 'downloaded') await this.catalogue.publish(source, ds.directory, latest, onProgress, controller.signal)
       st.lastOutcome = outcome
       if (outcome === 'failed') {
         st.lastError = controller.signal.aborted

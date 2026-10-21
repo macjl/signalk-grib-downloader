@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## [0.4.0-beta.1] - 2026-10-21
 
+- Require catalogue publication in every orchestrator path; remove the internal
+  standalone local-output bypass and the shared-directory `gribsRoot` setting.
+- Keep downloads in the private `<plugin data directory>/downloads/` workspace.
+  Existing directories remain untouched and can be copied into that workspace.
 - Publish completed GRIB runs to Forecast Dataset Provider 0.1 via authenticated,
   streaming multi-asset HTTP publication with SHA-256 validation.
 - Persist publication journals for asset-level restart recovery and lost commit

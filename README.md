@@ -8,7 +8,8 @@ manual downloads remain available for intermittent connections.
 
 ## What it does
 
-Each configured source downloads into `<root>/<model>-<resolution>/`, then
+Each configured source downloads into the private
+`<plugin data directory>/downloads/<model>-<resolution>/` workspace, then
 publishes all files for the completed acquisition as one immutable multi-asset
 dataset. Consumers discover datasets through `/signalk/v2/api/resources/forecastDatasets`
 and follow version-bound HTTP asset URLs; they do not need shared directories.
@@ -116,7 +117,7 @@ not in the plugin config panel:
 
 Settings are stored in the plugin's data directory (`settings.json`), written
 only through the webapp — the admin config panel only holds infrastructure
-(local download directory, catalogue connection and scheduler settings).
+(catalogue connection and scheduler settings).
 
 ## Catalogue connection
 
@@ -124,7 +125,8 @@ Requires **Signal K 2.34.x or later within 2.x, Node 20.19+**, and an enabled
 **Forecast Dataset Provider 0.1.x**. The previous Weather Provider dependency is
 replaced by Forecast Dataset Provider. Weather API decoding remains a separate
 consumer responsibility; provider 0.1 does not decode, index or subset GRIBs.
-Existing Weather Provider installations can still read the local cache.
+Publication to the catalogue is mandatory for automatic and manual downloads.
+Other plugins consume published datasets through the catalogue API.
 
 In Plugin Config:
 
@@ -135,15 +137,22 @@ In Plugin Config:
   through Signal K's standard Access Requests API and store its token here with
   permissions `0600` for the server user. File contents never enter the webapp,
   status response, journal, provenance or logs. Rotate by replacing the file.
-- `gribsRoot`: local acquisition directory, default `~/.signalk/gribs`.
-  Existing paths and operational settings migrate unchanged.
+
+The acquisition workspace is private and has no configurable shared-directory
+output. Old `gribsRoot` options are ignored, and their directories are left
+untouched. To reuse completed downloads when upgrading, stop the downloader and
+copy the old source directories (including completion markers) into
+`<plugin data directory>/downloads/` before restarting. Do not copy or edit the
+catalogue provider's storage. Operational source settings and existing published
+datasets remain intact.
 
 An unavailable provider or invalid token leaves publication pending with an
 error in the webapp. The next automatic check or manual trigger retries it
 **before downloading upstream again**. Automatic work still obeys offline,
-captive and metered-connection settings. Existing completed local runs are
-published on their next automatic check or manual trigger; no upstream
-re-download is needed. Existing archived runs are left as local archives.
+captive and metered-connection settings. Completed runs in the private workspace
+are published on their next automatic check or manual trigger; no upstream
+re-download is needed. The workspace retains originals for transfer recovery
+and configured archives, and is not an integration API.
 
 ## Data lifecycle
 

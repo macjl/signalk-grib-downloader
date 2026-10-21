@@ -6,6 +6,13 @@ Downloader branch: `feature/forecast-dataset-provider`, package 0.4.0-beta.1.
 
 ## Deployment
 
+The subsequent catalogue-only change passes all 50 tests and removes the
+`gribsRoot` setting and standalone orchestrator path. It has not yet replaced
+the installed sandbox package. Before installing it, stop the downloader and
+copy its old source directories (including completion markers and archives)
+into `<plugin data directory>/downloads/`. The helper removes only the obsolete
+`gribsRoot` setting from this plugin's configuration; other settings are retained.
+
 Build with `npm ci && npm test && npm pack`. The sandbox-specific helper
 `tools/install-sandbox.cjs` runs as root **inside the selected container**, with
 the absolute archive path under `/home/node/.signalk/local-packages` as its

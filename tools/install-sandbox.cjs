@@ -21,6 +21,7 @@ for (const file of ['package.json', 'package-lock.json', 'node_modules/.package-
 const configs = Object.fromEntries(fs.readdirSync(configDir).filter(f => f.endsWith('.json')).map(f => [f, createHash('sha256').update(fs.readFileSync(path.join(configDir, f))).digest('hex')]))
 fs.writeFileSync(path.join(backup, 'plugin-config-hashes.json'), JSON.stringify(configs))
 const data = path.join(configDir, name)
+fs.copyFileSync(path.join(configDir, name + '.json'), path.join(backup, 'downloader-config.json'))
 fs.cpSync(data, path.join(backup, 'plugin-data'), { recursive: true })
 const destination = path.join(root, 'node_modules', name)
 execFileSync('tar', ['-czf', path.join(backup, 'previous-plugin.tgz'), '-C', destination, '.'])
@@ -95,8 +96,12 @@ async function main() {
     if (lock.packages['']) lock.packages[''].dependencies[name] = `file:${relative}`
     atomic(full, lock)
   }
+  // Acquisition files now live only in the plugin's private downloads/ workspace.
+  // Copy legacy completed runs there before installation to avoid re-fetching.
+  delete config.configuration.gribsRoot
+  atomic(path.join(configDir, name + '.json'), config)
   fs.rmSync(previous, { recursive: true })
   fs.writeFileSync(path.join(root, 'local-packages/grib-downloader-forecast-backup.json'), JSON.stringify({ backup, previous, version: pkg.version }))
-  console.log(`Installed ${name} ${pkg.version}; backup: ${backup}; existing plugin configurations preserved`)
+  console.log(`Installed ${name} ${pkg.version}; backup: ${backup}; obsolete shared-directory setting removed; other plugin configurations preserved`)
 }
 main().catch(error => { console.error(error.message); process.exitCode = 1 })
