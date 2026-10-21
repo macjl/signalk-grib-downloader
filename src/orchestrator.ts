@@ -1,5 +1,6 @@
 import * as fs from 'fs'
 import * as path from 'path'
+import { CataloguePublisher } from './catalogue'
 import { Bbox, InternetState, SourceSetting, SourceStatus } from './types'
 import { expectedRunStamp, fetchFingerprint, fingerprintsEqual, nextPublishAt, probeRunStamp, sourceDirName, MODEL_MAX_HOURS, MODEL_SCHEDULES } from './scheduler'
 import { fetchSource, toDownloadSource, type Outcome } from './downloader'
@@ -28,13 +29,27 @@ export interface ProbeTiming {
 
 export class Orchestrator {
   private states = new Map<string, SourceState>()
+  private controllers = new Set<AbortController>()
+  private stopped = false
+
+  isRunning(): boolean { return [...this.states.values()].some(s => s.running) }
+  async stop(): Promise<void> {
+    this.stopped = true
+    for (const controller of this.controllers) controller.abort(new Error('plugin stopped'))
+    while (this.controllers.size) await new Promise(resolve => setTimeout(resolve, 10))
+  }
+
+  private published(source: SourceSetting, stamp: string | null): boolean {
+    return !this.catalogue || !!this.catalogue.reference(source, stamp, stamp ? this.markerParams(source, stamp) : null)
+  }
 
   constructor(
     private sources: SourceSetting[],
     private gribsRoot: string,    // local path where source subdirs live
     private log: (msg: string) => void,
     private onChange: () => void, // notify status updates
-    private bbox?: Bbox
+    private bbox?: Bbox,
+    private catalogue?: CataloguePublisher
   ) {
     for (const s of sources) {
       this.states.set(sourceDirName(s), {
@@ -99,7 +114,9 @@ export class Orchestrator {
         expectedRun: expected,
         pendingRun: lastRun !== null && lastRun >= target ? null : target,
         publicationLate: lastRun === null || lastRun < expected,
-        upToDate: lastRun !== null && lastRun >= expected && paramsOk,
+        upToDate: lastRun !== null && lastRun >= expected && paramsOk && this.published(s, lastRun),
+        catalogue: this.catalogue?.reference(s, lastRun, lastRun ? this.markerParams(s, lastRun) : null) ?? null,
+        publicationPending: !!this.catalogue && lastRun !== null && !this.published(s, lastRun),
         configStale: lastRun !== null && !paramsOk,
         running: st.running,
         lastError: st.lastError,
@@ -114,7 +131,7 @@ export class Orchestrator {
   // whose on-disk data was fetched with different parameters.
   private isBehind(source: SourceSetting): boolean {
     const last = this.lastRunStamp(source)
-    return last === null || last < expectedRunStamp(source.model) || !this.paramsOk(source, last)
+    return last === null || last < expectedRunStamp(source.model) || !this.paramsOk(source, last) || !this.published(source, last)
   }
 
   staleSources(sources: SourceSetting[] = this.autoSources()): SourceSetting[] {
@@ -123,7 +140,7 @@ export class Orchestrator {
 
   private needsProbe(source: SourceSetting): boolean {
     const last = this.lastRunStamp(source)
-    return last === null || last < probeRunStamp(source.model) || !this.paramsOk(source, last)
+    return last === null || last < probeRunStamp(source.model) || !this.paramsOk(source, last) || !this.published(source, last)
   }
 
   // Per-source probe cadence is anchored to the last attempt, so another
@@ -149,7 +166,7 @@ export class Orchestrator {
   async downloadSource(source: SourceSetting): Promise<boolean> {
     const name = sourceDirName(source)
     const st = this.states.get(name)!
-    if (st.running) return false
+    if (st.running || this.stopped) return false
 
     fs.mkdirSync(path.join(this.gribsRoot, name), { recursive: true })
 
@@ -172,13 +189,22 @@ export class Orchestrator {
     // fetchers surface it as outcome 'failed'), and the timer is always
     // cleared once the run settles.
     const controller = new AbortController()
+    this.controllers.add(controller)
     const timer = setTimeout(
       () => controller.abort(new Error(`timeout after ${SOURCE_TIMEOUT_MS / 1000}s`)),
       SOURCE_TIMEOUT_MS
     )
 
     try {
+      // Publish completed local data first, including downloads made by 0.3.0.
+      // On catalogue failure keep these files and retry without fetching upstream.
+      const previous = this.lastRunStamp(source)
+      if (this.catalogue && previous) await this.catalogue.publish(source, ds.directory, previous, onProgress, controller.signal)
       const outcome = await fetchSource(ds, onProgress, controller.signal)
+      const latest = this.lastRunStamp(source)
+      if (this.catalogue && latest && latest !== previous) await this.catalogue.publish(source, ds.directory, latest, onProgress, controller.signal)
+      // A parameter change can replace the files for the same model cycle.
+      else if (this.catalogue && latest && outcome === 'downloaded') await this.catalogue.publish(source, ds.directory, latest, onProgress, controller.signal)
       st.lastOutcome = outcome
       if (outcome === 'failed') {
         st.lastError = controller.signal.aborted
@@ -195,6 +221,7 @@ export class Orchestrator {
       this.log(`${name}: download error: ${err}`)
       return false
     } finally {
+      this.controllers.delete(controller)
       clearTimeout(timer)
       st.running = false
       st.lastFinishedAt = new Date(Date.now()).toISOString()
@@ -205,6 +232,7 @@ export class Orchestrator {
   // Download the given sources sequentially (bandwidth-friendly).
   async downloadAll(sources?: SourceSetting[]): Promise<void> {
     for (const s of sources ?? this.sources) {
+      if (this.stopped) break
       await this.downloadSource(s)
     }
   }
@@ -218,6 +246,7 @@ export class Orchestrator {
   // stretched tick fires, downloads proceed. 'unknown' (no publisher of
   // network.internet.state) behaves as 'online'.
   async tick(internet: InternetState = 'online', timing: ProbeTiming = {}): Promise<void> {
+    if (this.stopped) return
     if (internet === 'offline' || internet === 'captive') return
     const due = this.autoSources().filter(s => this.needsProbe(s)
       && !this.states.get(sourceDirName(s))!.running

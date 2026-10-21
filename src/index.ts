@@ -3,8 +3,9 @@ import * as os from 'os'
 import * as path from 'path'
 import { Path, Plugin, ServerAPI } from '@signalk/server-api'
 import { Orchestrator, ProbeTiming } from './orchestrator'
+import { CataloguePublisher } from './catalogue'
 import { sourceDirName } from './scheduler'
-import { AppSettings, InternetState, PluginSettings } from './types'
+import { AppSettings, InternetState, PluginSettings, SourceSetting } from './types'
 
 const PLUGIN_ID = 'signalk-grib-downloader'
 const DEFAULT_CHECK_INTERVAL_MINUTES = 5
@@ -55,17 +56,32 @@ const buildSchema = (defaultRoot: string, defaultInterval: number, defaultMultip
       default: defaultMultiplier,
       minimum: 1,
     },
+    catalogueUrl: {
+      type: 'string', title: 'Forecast catalogue server URL',
+      description: 'Signal K server running Forecast Dataset Provider 0.1.x. Remote servers require HTTPS.',
+      default: 'http://127.0.0.1:3000',
+    },
+    catalogueTokenFile: {
+      type: 'string', title: 'Catalogue token file',
+      description: 'Absolute path to a readwrite application token. Empty uses <plugin data directory>/catalogue-token. File contents are never returned by the webapp.',
+      default: '',
+    },
     gribsRoot: {
       type: 'string',
-      title: 'GRIB root directory',
+      title: 'Local GRIB acquisition directory',
       description:
-        'Each source downloads into <root>/<model>-<resolution>. Point the ' +
-        'signalk-grib-weather-provider root at the same directory. ' +
+        'Each source downloads into <root>/<model>-<resolution> then publishes to Forecast Dataset Provider. ' +
         '"~" is expanded.',
       default: defaultRoot,
     },
   },
 })
+
+function parseSourceName(name: string): SourceSetting | undefined {
+  if (name === 'icon-eu') return { model: 'icon-eu' }
+  const match = /^(gfs|arome|arpege)-([A-Za-z0-9]+)$/.exec(name)
+  return match ? { model: match[1] as SourceSetting['model'], resolution: match[2] } : undefined
+}
 
 const DEFAULT_APP_SETTINGS: AppSettings = {
   bbox: { latMin: 35, lonMin: -6, latMax: 45, lonMax: 17 },
@@ -80,6 +96,8 @@ module.exports = (server: ServerAPI): Plugin => {
   let internetState: InternetState = 'unknown'
   let stopInternetStream: (() => void) | null = null
   let infra: PluginSettings = {}
+  let catalogue: CataloguePublisher
+  const deleting = new Map<string, AbortController>()
   let settings: AppSettings = { ...DEFAULT_APP_SETTINGS }
   let legacyIntervalMinutes: number | undefined
 
@@ -159,6 +177,7 @@ module.exports = (server: ServerAPI): Plugin => {
     const parts = orchestrator.status().map(s => {
       if (s.running) return `${s.name}: downloading…`
       if (s.lastError) return `${s.name}: error`
+      if (s.publicationPending) return `${s.name}: catalogue publication pending`
       const mode = s.autoDownload ? 'auto' : 'manual'
       if (s.publicationLate) return `${s.name}: ${mode} publication late (${s.expectedRun})`
       if (s.pendingRun) return `${s.name}: ${mode} awaiting publication (${s.pendingRun})`
@@ -229,7 +248,7 @@ module.exports = (server: ServerAPI): Plugin => {
   const runTick = (): void => {
     if (timer) { clearTimeout(timer); timer = null }
     nextTickAtMs = null
-    if (!orchestrator || ticking) return
+    if (!orchestrator || ticking || deleting.size) return
     ticking = true
     orchestrator.tick(internetState, probeTiming())
       .catch((err: unknown) => server.debug(`tick error: ${err}`))
@@ -266,12 +285,14 @@ module.exports = (server: ServerAPI): Plugin => {
     nextTickAtMs = null
 
     const sources = settings.sources ?? []
+    orchestrator?.stop()
     orchestrator = new Orchestrator(
       sources,
       gribsRoot(),
       (msg: string) => server.debug(msg),
       updateStatus,
-      settings.bbox
+      settings.bbox,
+      catalogue
     )
 
     if (sources.some(s => s.autoDownload !== false)) {
@@ -288,10 +309,15 @@ module.exports = (server: ServerAPI): Plugin => {
 
     start: (options: PluginSettings & AppSettings) => {
       infra = {
+        catalogueUrl: options?.catalogueUrl,
+        catalogueTokenFile: options?.catalogueTokenFile,
         gribsRoot: options?.gribsRoot,
         checkIntervalMinutes: validInterval(options?.checkIntervalMinutes),
         meteredIntervalMultiplier: validMultiplier(options?.meteredIntervalMultiplier),
       }
+      const tokenFile = expandHome(infra.catalogueTokenFile || path.join(server.getDataDirPath(), 'catalogue-token'))
+      if (!path.isAbsolute(tokenFile)) throw new Error('Catalogue token file must be absolute')
+      catalogue = new CataloguePublisher(infra.catalogueUrl || 'http://127.0.0.1:3000', tokenFile, server.getDataDirPath())
       settings = loadSettings(options ?? {})
 
       // Follow network.internet.state if some plugin publishes it: seed
@@ -307,18 +333,23 @@ module.exports = (server: ServerAPI): Plugin => {
       apply()
     },
 
-    stop: () => {
+    stop: async () => {
       stopInternetStream?.()
       stopInternetStream = null
       if (timer) { clearTimeout(timer); timer = null }
       nextTickAtMs = null
+      const active = orchestrator
       orchestrator = null
+      for (const controller of deleting.values()) controller.abort(new Error('plugin stopped'))
+      await active?.stop()
+      while (deleting.size) await new Promise(resolve => setTimeout(resolve, 10))
     },
 
     registerWithRouter: (router: any) => {
       router.get('/status', (_req: any, res: any) => {
         if (!orchestrator) return res.status(503).json({ error: 'plugin not started' })
         res.json({
+          catalogueUrl: catalogue.endpoint,
           checkIntervalMinutes: intervalMinutes(),
           internetState,
           nextAutoTickAt: nextTickAtMs === null ? null : new Date(nextTickAtMs).toISOString(),
@@ -333,8 +364,10 @@ module.exports = (server: ServerAPI): Plugin => {
       })
 
       router.put('/settings', (req: any, res: any) => {
+        if (orchestrator?.isRunning() || deleting.size) return res.status(409).json({ error: 'Wait for the current transfer or deletion to finish' })
+        if (!orchestrator) return res.status(503).json({ error: 'plugin not started' })
         const nextRaw = req.body as AppSettings
-        if (!nextRaw || typeof nextRaw !== 'object') {
+        if (!nextRaw || typeof nextRaw !== 'object' || (nextRaw.sources !== undefined && !Array.isArray(nextRaw.sources))) {
           return res.status(400).json({ error: 'invalid settings' })
         }
         const next = normalizeSettings(nextRaw)
@@ -343,6 +376,7 @@ module.exports = (server: ServerAPI): Plugin => {
           return res.status(400).json({ error: `model must be one of: ${valid.join(', ')}` })
         }
         const names = (next.sources ?? []).map(s => sourceDirName(s))
+        if (names.some(name => !/^[A-Za-z0-9_-]+$/.test(name))) return res.status(400).json({ error: 'invalid source name' })
         if (new Set(names).size !== names.length) {
           return res.status(400).json({ error: 'duplicate source: each (model, resolution) pair must be unique' })
         }
@@ -361,6 +395,7 @@ module.exports = (server: ServerAPI): Plugin => {
       })
 
       router.post('/download', (_req: any, res: any) => {
+        if (deleting.size) return res.status(409).json({ error: 'Source deletion in progress' })
         if (!orchestrator) return res.status(503).json({ error: 'plugin not started' })
         const sources = settings.sources ?? []
         const stale = orchestrator.staleSources(sources)
@@ -371,23 +406,31 @@ module.exports = (server: ServerAPI): Plugin => {
         })
       })
 
-      // Delete a source's downloaded data (gribs, markers, archive). The
-      // provider unregisters the source and purges its caches at next scan.
-      router.delete('/source-data/:name', (req: any, res: any) => {
+      // Only delete catalogue IDs recorded by this downloader; provider locks
+      // and derived-data conflicts are respected (no forced deletion).
+      router.delete('/source-data/:name', async (req: any, res: any) => {
+        if (!orchestrator) return res.status(503).json({ error: 'plugin not started' })
         const name = req.params.name
-        if (!/^[A-Za-z0-9._-]+$/.test(name)) {
-          return res.status(400).json({ error: 'invalid source name' })
-        }
-        const dir = path.join(gribsRoot(), name)
-        if (!fs.existsSync(dir)) return res.json({ ok: true, existed: false })
-        fs.rm(dir, { recursive: true, force: true }, (err) => {
-          if (err) return res.status(500).json({ error: String(err) })
-          server.debug(`deleted source data: ${dir}`)
-          res.json({ ok: true, existed: true })
-        })
+        if (!/^[A-Za-z0-9_-]+$/.test(name)) return res.status(400).json({ error: 'invalid source name' })
+        if (orchestrator?.isRunning() || deleting.has(name)) return res.status(409).json({ error: 'Source is busy' })
+        const source = orchestrator?.findSource(name) ?? parseSourceName(name)
+        if (!source) return res.status(400).json({ error: 'invalid source name' })
+        const controller = new AbortController()
+        deleting.set(name, controller)
+        try {
+          await catalogue.removeSource(source, controller.signal)
+          controller.signal.throwIfAborted()
+          const dir = path.join(gribsRoot(), name)
+          const existed = fs.existsSync(dir)
+          await fs.promises.rm(dir, { recursive: true, force: true })
+          res.json({ ok: true, existed })
+        } catch (error) {
+          res.status(502).json({ error: String(error) })
+        } finally { deleting.delete(name); scheduleNextTick() }
       })
 
       router.post('/download/:name', (req: any, res: any) => {
+        if (deleting.size) return res.status(409).json({ error: 'Source deletion in progress' })
         if (!orchestrator) return res.status(503).json({ error: 'plugin not started' })
         const source = orchestrator.findSource(req.params.name)
         if (!source) return res.status(404).json({ error: `no source named ${req.params.name}` })

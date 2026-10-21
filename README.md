@@ -1,16 +1,19 @@
 # signalk-grib-downloader
 
-Signal K plugin that **schedules GRIB downloads** for
-[signalk-grib-weather-provider](https://github.com/macjl/signalk-grib-weather-provider) —
-automatic after each model run, or on demand for intermittent connections —
-with a management webapp.
+Signal K plugin that **downloads GRIB forecasts and publishes them as
+`forecastDatasets`** through
+[Forecast Dataset Provider](https://github.com/macjl/signalk-forecast-dataset-provider)'s
+experimental HTTP contract 0.1. Automatic publication follows each model run;
+manual downloads remain available for intermittent connections.
 
 ## What it does
 
-Each configured source (model + resolution) downloads into
-`<root>/<model>-<resolution>/` through an in-process fetcher — no container
-runtime, no image pulls. Point signalk-grib-weather-provider's root at the
-same directory and every source is served as a weather provider automatically.
+Each configured source downloads into `<root>/<model>-<resolution>/`, then
+publishes all files for the completed acquisition as one immutable multi-asset
+dataset. Consumers discover datasets through `/signalk/v2/api/resources/forecastDatasets`
+and follow version-bound HTTP asset URLs; they do not need shared directories.
+The provider owns its stored content independently of the local download cache.
+No container runtime, Python or GRIB decoder is required by this downloader.
 
 Supported models: **GFS** (0.25°/0.5°/1°, NOMADS server-side area subsetting),
 **AROME** (0.025°/0.01°), **ARPEGE** (0.1°/0.25°), **ICON-EU**.
@@ -113,28 +116,81 @@ not in the plugin config panel:
 
 Settings are stored in the plugin's data directory (`settings.json`), written
 only through the webapp — the admin config panel only holds infrastructure
-(the GRIB root directory).
+(local download directory, catalogue connection and scheduler settings).
+
+## Catalogue connection
+
+Requires **Signal K 2.34.x or later within 2.x, Node 20.19+**, and an enabled
+**Forecast Dataset Provider 0.1.x**. The previous Weather Provider dependency is
+replaced by Forecast Dataset Provider. Weather API decoding remains a separate
+consumer responsibility; provider 0.1 does not decode, index or subset GRIBs.
+Existing Weather Provider installations can still read the local cache.
+
+In Plugin Config:
+
+- `catalogueUrl`: Signal K server base URL, default `http://127.0.0.1:3000`.
+  Adjust for another port or deployment prefix. Remote endpoints require HTTPS.
+- `catalogueTokenFile`: absolute path to a **readwrite application token**,
+  default `<plugin data directory>/catalogue-token`. Approve a dedicated device
+  through Signal K's standard Access Requests API and store its token here with
+  permissions `0600` for the server user. File contents never enter the webapp,
+  status response, journal, provenance or logs. Rotate by replacing the file.
+- `gribsRoot`: local acquisition directory, default `~/.signalk/gribs`.
+  Existing paths and operational settings migrate unchanged.
+
+An unavailable provider or invalid token leaves publication pending with an
+error in the webapp. The next automatic check or manual trigger retries it
+**before downloading upstream again**. Automatic work still obeys offline,
+captive and metered-connection settings. Existing completed local runs are
+published on their next automatic check or manual trigger; no upstream
+re-download is needed. Existing archived runs are left as local archives.
 
 ## Data lifecycle
 
-- A run is downloaded atomically and finished with a marker recording the
-  **fetch fingerprint** (area, duration, groups, variables…). Changing any of
-  those re-fetches the data; nothing goes stale silently.
-- When a newer run completes, the previous one is deleted — or moved to
-  `<source>/archive/` if the source keeps archives (configurable count, no
-  upper limit). Leftovers of interrupted runs are purged.
-- Old data is **never deleted while offline**: cleanup only happens when a
-  newer run has been fully downloaded.
+- A completion marker records the download fingerprint and file manifest.
+  A complete local download and a committed catalogue dataset are distinct:
+  status includes `publicationPending` and a `catalogue` reference (dataset ID,
+  version and discovery URL). A source becomes up to date after publication.
+- Files stream over authenticated HTTP with exact lengths and SHA-256 hashes.
+  No GRIB is buffered wholesale for catalogue upload. Content becomes visible
+  only after atomic commit of every asset.
+- A private journal in `<plugin data directory>/catalogue-publications/` records
+  staging IDs, hashes and committed references. Restart resumes only missing
+  assets. A lost commit response is recovered using the saved dataset ID.
+  Contract 0.1 has no idempotency key for a lost *create-publication* response;
+  such an orphaned staging entry must be removed through the provider API.
+- Metadata declares source, model and cycle; requested fetch parameters are
+  retained as acquisition claims. This downloader never marks requested bounds,
+  forecast periods or fields as **verified inventory**. A trusted independent
+  indexer must supply that metadata. Strict coverage/field searches therefore
+  exclude these datasets until indexed.
+- Once a newer acquisition commits, keep it plus `archiveRuns` previous
+  acquisitions in the catalogue. Retention touches only dataset IDs in this
+  downloader's journal, respects provider deletion conflicts and retries
+  deferred cleanup on a later publication. Local archives follow the existing
+  run-based policy. No older run is cleaned up merely because the link is offline.
+- Deleting source data from the webapp deletes both recorded catalogue data and
+  local files. Deleting just the source configuration leaves both intact.
+  Busy transfers block settings changes and data deletion; stopping the plugin
+  aborts and waits for active transfers so a restart cannot race its journal.
 
-## Requirements
+Keep the publication journal with the plugin's settings when moving servers.
+Changing catalogue servers requires preserving that old journal separately.
+Do not edit the provider's managed storage or delete journal files to implement
+retention.
 
-- Signal K server ≥ 2.x with Node ≥ 18.17
-- [signalk-grib-weather-provider](https://github.com/macjl/signalk-grib-weather-provider)
-  ≥ 0.2.0 to serve the downloaded data
+## Development
 
-No container runtime is required — downloads run in-process. (ICON-EU
-downloads decompress `.bz2` GRIB fragments in-process via a bundled wasm
-bzip2 library.)
+```sh
+npm ci
+npm test
+npm pack
+```
+
+Tests cover model downloads, scheduling, HTTP publication, asset-level restart
+recovery, a lost commit response, hashes, catalogue deletion/republication,
+retention conflicts and publication-pending status. See
+[the sandbox verification](docs/sandbox-verification.md) for deployment results.
 
 ## License
 

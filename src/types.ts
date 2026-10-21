@@ -2,7 +2,7 @@ export type ModelId = 'gfs' | 'arome' | 'arpege' | 'icon-eu'
 
 // The source directory name is derived: <model>[-<resolution>] (e.g.
 // "gfs-0p25", "icon-eu") — one directory per (model, resolution) pair,
-// created under gribsRoot. The provider discovers it by name.
+// created under gribsRoot as the local acquisition cache.
 export interface SourceSetting {
   model: ModelId
   resolution?: string   // gfs: 0p25|0p50|1p00 ; arome: 0025|001 ; arpege: 01|025
@@ -29,6 +29,8 @@ export type InternetState = 'online' | 'offline' | 'metered' | 'captive' | 'unkn
 
 // Infrastructure settings — managed in the SignalK plugin config panel.
 export interface PluginSettings {
+  catalogueUrl?: string             // Signal K server URL, default loopback:3000
+  catalogueTokenFile?: string       // readwrite bearer token; never exposed via settings/status
   gribsRoot?: string                 // local path where source subdirs live
   checkIntervalMinutes?: number      // optional override of every model's probe interval
   meteredIntervalMultiplier?: number // auto waits stretch by this factor when metered
@@ -52,6 +54,8 @@ export interface SourceStatus {
   expectedRun: string         // stamp of the run that should be available now
   pendingRun: string | null   // newest cycle with an open probing window, if missing
   publicationLate: boolean   // missing a run whose upper publication bound has passed
+  catalogue: { datasetId: string; version: string; href: string } | null
+  publicationPending: boolean
   upToDate: boolean
   configStale: boolean        // data on disk was fetched with different parameters (area, duration, …)
   running: boolean

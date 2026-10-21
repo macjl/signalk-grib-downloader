@@ -64,9 +64,14 @@ const makeRouter = () => {
 
 // An up-to-date marker for the source, so 'online' ticks find nothing
 // to download and never touch the network.
-const writeUpToDateMarker = (root) => {
+const writeUpToDateMarker = (root, dataDir) => {
   const dir = path.join(root, 'icon-eu')
   fs.mkdirSync(dir, { recursive: true })
+  fs.mkdirSync(path.join(dataDir, 'catalogue-publications'), { recursive: true })
+  fs.writeFileSync(path.join(dataDir, 'catalogue-publications/icon-eu.json'), JSON.stringify({
+    endpoint: 'http://127.0.0.1:3000', records: [{ stamp: probeRunStamp('icon-eu'),
+      params: fetchFingerprint(SOURCE, BBOX), datasetId: 'test-dataset', version: 'a'.repeat(64) }]
+  }))
   fs.writeFileSync(
     path.join(dir, `.run-${probeRunStamp('icon-eu')}.complete`),
     JSON.stringify({ params: fetchFingerprint(SOURCE, BBOX) })
@@ -80,13 +85,13 @@ const startPlugin = ({ seed, prepare } = {}) => {
   const gribsRoot = tmpDir()
   fs.writeFileSync(path.join(dataDir, 'settings.json'),
     JSON.stringify({ bbox: BBOX, sources: [SOURCE] }))
-  if (prepare) prepare(gribsRoot)
+  if (prepare) prepare(gribsRoot, dataDir)
   const server = makeServer(dataDir, { seed })
   const plugin = makePlugin(server)
   const { router, call } = makeRouter()
   plugin.registerWithRouter(router)
   plugin.start({ gribsRoot })
-  return { plugin, server, call, gribsRoot, stop: () => plugin.stop() }
+  return { plugin, server, call, gribsRoot, dataDir, stop: () => plugin.stop() }
 }
 
 test('entering captive pauses the auto scheduler; leaving it catches up', async () => {
@@ -140,7 +145,7 @@ test('no automatic download starts behind a captive portal', async () => {
 
     // Leaving the portal with the source since brought up to date:
     // the catch-up tick runs, downloads nothing, and reschedules.
-    writeUpToDateMarker(t.gribsRoot)
+    writeUpToDateMarker(t.gribsRoot, t.dataDir)
     t.server.publishInternetState('online')
     await settle()
     const after = t.call('GET', '/status')

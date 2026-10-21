@@ -44,7 +44,7 @@ export interface FetchResult {
   log: string[]                // tail of log lines for the webapp status view
 }
 
-const UA = 'grib-downloader/0.1 (signalk-grib-weather-provider)'
+const UA = 'signalk-grib-downloader/0.4 (forecastDatasets producer)'
 const HTTP_TIMEOUT_MS = 60_000
 const RETRIES = 3
 const HTTP_BACKOFF_BASE_MS = 2_000
@@ -143,7 +143,7 @@ function readMarkerParams(directory: string, stamp: string): unknown {
 }
 
 function writeMarker(directory: string, stamp: string, params: unknown): void {
-  fs.writeFileSync(markerPath(directory, stamp), JSON.stringify({ params }))
+  fs.writeFileSync(markerPath(directory, stamp), JSON.stringify({ params, files: fs.readdirSync(directory).filter(f => f.includes(`__${stamp}__`) && f.endsWith('.grb2')).sort() }))
 }
 
 // Run stamp encoded in a downloaded filename: '...__<stamp>__...' or a marker.

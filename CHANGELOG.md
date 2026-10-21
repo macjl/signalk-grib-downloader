@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.4.0-beta.1] - 2026-10-21
+
+- Publish completed GRIB runs to Forecast Dataset Provider 0.1 via authenticated,
+  streaming multi-asset HTTP publication with SHA-256 validation.
+- Persist publication journals for asset-level restart recovery and lost commit
+  responses; publish existing completed runs without downloading them again.
+- Expose publication-pending state and committed dataset links in the webapp.
+- Apply archive retention and explicit source-data deletion to owned catalogue
+  acquisitions, respecting provider conflicts and preserving local cache use.
+- Use a readwrite token file; replace the Weather Provider requirement with
+  Forecast Dataset Provider. Require Node 20.19+ and Signal K 2.34+ within 2.x.
+- Abort transfers on stop and reject configuration/deletion races while busy.
+
 ## [0.3.0] - 2026-10-20
 
 ### Added
