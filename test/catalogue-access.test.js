@@ -221,9 +221,11 @@ test('a rejected externally configured token is preserved for its owner to rotat
   fs.writeFileSync(f.options.tokenFile, 'manual-token\n')
   const access = f.manager(); access.start()
   access.rejected('manual-token')
-  assert.equal(access.status().state, 'error')
+  assert.equal(access.status().state, 'ready')
   assert.equal(fs.readFileSync(f.options.tokenFile, 'utf8'), 'manual-token\n')
   assert.equal(f.requests.length, 0)
+  fs.writeFileSync(f.options.tokenFile, 'rotated-manual-token\n')
+  assert.equal(access.token(), 'rotated-manual-token')
 })
 
 test('an approval in flight cannot overwrite a token configured manually in the meantime', async t => {

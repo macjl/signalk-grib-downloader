@@ -71,10 +71,7 @@ export class CatalogueAccess {
     // Only renew tokens issued to this plugin; never remove a manually
     // configured credential or a newer token after a concurrent 401.
     if (!token || this.controller.signal.aborted || this.readToken() !== token) return
-    if (!this.pending?.tokenHash || this.pending.tokenHash !== createHash('sha256').update(token).digest('hex')) {
-      this.change('error', 'Configured catalogue token rejected: replace it or remove the file and restart the plugin to request access')
-      return
-    }
+    if (!this.pending?.tokenHash || this.pending.tokenHash !== createHash('sha256').update(token).digest('hex')) return
     fs.unlinkSync(this.options.tokenFile)
     delete this.pending.requestId; delete this.pending.tokenHash; delete this.pending.denied
     this.save()
