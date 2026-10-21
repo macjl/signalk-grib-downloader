@@ -3,17 +3,22 @@
 Signal K plugin that **downloads GRIB forecasts and publishes them as
 `forecastDatasets`** through
 [Forecast Dataset Provider](https://github.com/macjl/signalk-forecast-dataset-provider)'s
-experimental HTTP contract 0.1. Automatic publication follows each model run;
+experimental HTTP contract 0.1 with its streaming extension (provider 0.1.1+).
+Automatic publication follows each model run;
 manual downloads remain available for intermittent connections.
 
 ## What it does
 
-Each configured source downloads into the private
-`<plugin data directory>/downloads/<model>-<resolution>/` workspace, then
-publishes all files for the completed acquisition as one immutable multi-asset
-dataset. Consumers discover datasets through `/signalk/v2/api/resources/forecastDatasets`
-and follow version-bound HTTP asset URLs; they do not need shared directories.
-The provider owns its stored content independently of the local download cache.
+Each configured source streams its selected model run directly into a staged
+multi-asset publication in Forecast Dataset Provider. GFS and Météo-France bodies
+are forwarded with backpressure; ICON-EU fragments are decompressed in memory,
+one variable at a time, and streamed into one asset per timestep. The downloader
+writes no GRIB, partial file, completion marker or local archive.
+
+The provider measures each asset's actual length and SHA-256 during reception.
+Only an explicit commit after all upstream streams complete makes the dataset
+usable. Consumers discover datasets through `/signalk/v2/api/resources/forecastDatasets`
+and retrieve their version-bound assets over HTTP.
 No container runtime, Python or GRIB decoder is required by this downloader.
 
 Supported models: **GFS** (0.25°/0.5°/1°, NOMADS server-side area subsetting),
@@ -59,7 +64,8 @@ setting), overrides this interval; it is no longer a special late-run fallback.
 The lower bound allows the first forecast files to appear, so a short requested
 horizon need not wait for the model's full forecast. The downloader probes the
 last requested forecast step/group, downloads the requested files, and publishes
-a completion marker only after all downloads succeed. Upper bounds conservatively
+a complete dataset only after all selected assets have arrived successfully.
+Upper bounds conservatively
 cover the complete supported horizon and both Meteo-France resolutions; they
 may therefore be generous for shorter forecasts. They are estimates, not an
 upstream availability guarantee. An exceptional late publication does not move
@@ -122,7 +128,7 @@ only through the webapp — the admin config panel only holds infrastructure
 ## Catalogue connection
 
 Requires **Signal K 2.34.x or later within 2.x, Node 20.19+**, and an enabled
-**Forecast Dataset Provider 0.1.x**. The previous Weather Provider dependency is
+**Forecast Dataset Provider 0.1.1 or later**. The previous Weather Provider dependency is
 replaced by Forecast Dataset Provider. Weather API decoding remains a separate
 consumer responsibility; provider 0.1 does not decode, index or subset GRIBs.
 Publication to the catalogue is mandatory for automatic and manual downloads.
@@ -138,50 +144,57 @@ In Plugin Config:
   permissions `0600` for the server user. File contents never enter the webapp,
   status response, journal, provenance or logs. Rotate by replacing the file.
 
-The acquisition workspace is private and has no configurable shared-directory
-output. Old `gribsRoot` options are ignored, and their directories are left
-untouched. To reuse completed downloads when upgrading, stop the downloader and
-copy the old source directories (including completion markers) into
-`<plugin data directory>/downloads/` before restarting. Do not copy or edit the
-catalogue provider's storage. Operational source settings and existing published
-datasets remain intact.
+The provider owns all acquisition bytes, including unfinished publications and
+archives. The downloader retains only settings and a private publication journal.
+Old `gribsRoot` options are ignored; existing directories are left untouched.
+Committed journals from beta.1 are reused without reading old files or markers,
+so already published acquisitions do not need an upstream download. Unpublished
+legacy files are not imported automatically; the next eligible acquisition is
+streamed from its upstream source.
 
-An unavailable provider or invalid token leaves publication pending with an
-error in the webapp. The next automatic check or manual trigger retries it
-**before downloading upstream again**. Automatic work still obeys offline,
-captive and metered-connection settings. Completed runs in the private workspace
-are published on their next automatic check or manual trigger; no upstream
-re-download is needed. The workspace retains originals for transfer recovery
-and configured archives, and is not an integration API.
+An unavailable provider or invalid token reports an error before any upstream
+body is opened. The next automatic check or manual trigger retries the acquisition.
+Automatic work still obeys offline, captive and metered-connection settings.
 
 ## Data lifecycle
 
-- A completion marker records the download fingerprint and file manifest.
-  A complete local download and a committed catalogue dataset are distinct:
-  status includes `publicationPending` and a `catalogue` reference (dataset ID,
-  version and discovery URL). A source becomes up to date after publication.
-- Files stream over authenticated HTTP with exact lengths and SHA-256 hashes.
-  No GRIB is buffered wholesale for catalogue upload. Content becomes visible
-  only after atomic commit of every asset.
-- A private journal in `<plugin data directory>/catalogue-publications/` records
-  staging IDs, hashes and committed references. Restart resumes only missing
-  assets. A lost commit response is recovered using the saved dataset ID.
-  Contract 0.1 has no idempotency key for a lost *create-publication* response;
-  such an orphaned staging entry must be removed through the provider API.
-- Metadata declares source, model and cycle; requested fetch parameters are
-  retained as acquisition claims. This downloader never marks requested bounds,
-  forecast periods or fields as **verified inventory**. A trusted independent
-  indexer must supply that metadata. Strict coverage/field searches therefore
-  exclude these datasets until indexed.
-- Once a newer acquisition commits, keep it plus `archiveRuns` previous
-  acquisitions in the catalogue. Retention touches only dataset IDs in this
-  downloader's journal, respects provider deletion conflicts and retries
-  deferred cleanup on a later publication. Local archives follow the existing
-  run-based policy. No older run is cleaned up merely because the link is offline.
-- Deleting source data from the webapp deletes both recorded catalogue data and
-  local files. Deleting just the source configuration leaves both intact.
-  Busy transfers block settings changes and data deletion; stopping the plugin
-  aborts and waits for active transfers so a restart cannot race its journal.
+- Declare the expected asset identifiers, with unknown sizes, then stream their
+  bodies to the provider. Its acquisition view exposes real received bytes and
+  completed assets; total bytes remain unknown until all lengths are known.
+- A journal in `<plugin data directory>/catalogue-publications/` records model
+  cycles, fetch parameters, acquisition UUIDs, staging/dataset IDs and measured
+  hash receipts. It is fsynced and atomically replaced. No upstream credentials
+  or GRIB bytes enter this journal.
+- Resume after interruption at **asset level**: completed provider assets are
+  retained and only missing assets are fetched again. Partial-byte resume is
+  not implemented. A new acquisition must complete before retention removes an
+  earlier committed dataset.
+- Recover lost create responses through an acquisition UUID persisted before the
+  POST and stored in provenance; recover lost upload/commit responses through
+  publication status and the saved hash/dataset receipts. A generic 404 never
+  means deletion: only explicit `DATASET_NOT_FOUND` or `PUBLICATION_NOT_FOUND`
+  responses authorize clearing the corresponding reference.
+- GRIB2 framing is checked while streaming (message lengths and terminators).
+  A transport error, empty stream, HTML response or truncated GRIB prevents
+  commit and aborts the upload. Framing does not prove meteorological field or
+  geographic completeness; verified inventory still requires an indexer.
+- Metadata declares source, model and cycle. Requested parameters remain claims,
+  never verified coverage or fields. Strict verified searches exclude these
+  datasets until an independent trusted indexer supplies inventory.
+- Keep the newest committed acquisition plus `archiveRuns` previous acquisitions
+  **in the catalogue**. Only IDs in this downloader's journal are eligible for
+  deletion. Provider conflicts defer cleanup until another publication.
+- Deleting source data in the webapp deletes its recorded catalogue acquisitions
+  and staging publications. Removing only the source configuration leaves them
+  intact. Old filesystem directories are never scanned or removed automatically.
+  Settings changes and deletion are blocked while a transfer runs. Plugin stop
+  aborts both HTTP sides and waits for the active transfer.
+
+A source has a one-hour acquisition timeout; upstream streams also have a
+120-second inactivity timeout. GFS/Météo-France use bounded stream buffers.
+The bzip2 WASM API requires a whole fragment in memory: ICON is processed one
+variable at a time, with a 128 MiB compressed and 512 MiB decompression ceiling
+per fragment, rather than buffering an entire timestep or model run.
 
 Keep the publication journal with the plugin's settings when moving servers.
 Changing catalogue servers requires preserving that old journal separately.
@@ -196,10 +209,19 @@ npm test
 npm pack
 ```
 
-Tests cover model downloads, scheduling, HTTP publication, asset-level restart
-recovery, a lost commit response, hashes, catalogue deletion/republication,
-retention conflicts and publication-pending status. See
-[the sandbox verification](docs/sandbox-verification.md) for deployment results.
+Tests cover model plans, direct streaming, GRIB framing, cancellation,
+asset-level restart recovery, lost create/upload/commit responses, generic 404s,
+retention conflicts and the unchanged publication-window scheduler.
+
+For integration with the actual provider source (build it first):
+
+```sh
+FORECAST_DATASET_PROVIDER_PATH=/absolute/path/to/signalk-forecast-dataset-provider npm test
+```
+
+Without that variable, the four cross-plugin HTTP tests explicitly skip; the
+normal suite still exercises the producer against a fault-injecting HTTP server.
+See [sandbox verification](docs/sandbox-verification.md) for the live checks.
 
 ## License
 

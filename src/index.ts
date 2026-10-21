@@ -19,7 +19,7 @@ const TIMER_MAX_MS = 2_147_483_000
 // installed.
 const INTERNET_STATE_PATH = 'network.internet.state' as Path
 
-// "~/gribs" is not expanded by Node — resolve it ourselves.
+// Expand home-relative token-file paths.
 function expandHome(p: string): string {
   if (p === '~') return os.homedir()
   if (p.startsWith('~/')) return path.join(os.homedir(), p.slice(2))
@@ -58,7 +58,7 @@ const buildSchema = (defaultInterval: number, defaultMultiplier: number) => ({
     },
     catalogueUrl: {
       type: 'string', title: 'Forecast catalogue server URL',
-      description: 'Signal K server running Forecast Dataset Provider 0.1.x. Remote servers require HTTPS.',
+      description: 'Signal K server running Forecast Dataset Provider 0.1.1 or later. Remote servers require HTTPS.',
       default: 'http://127.0.0.1:3000',
     },
     catalogueTokenFile: {
@@ -92,8 +92,6 @@ module.exports = (server: ServerAPI): Plugin => {
   const deleting = new Map<string, AbortController>()
   let settings: AppSettings = { ...DEFAULT_APP_SETTINGS }
   let legacyIntervalMinutes: number | undefined
-
-  const acquisitionRoot = () => path.join(server.getDataDirPath(), 'downloads')
 
   const settingsPath = () => path.join(server.getDataDirPath(), 'settings.json')
 
@@ -279,7 +277,6 @@ module.exports = (server: ServerAPI): Plugin => {
     orchestrator?.stop()
     orchestrator = new Orchestrator(
       sources,
-      acquisitionRoot(),
       catalogue,
       (msg: string) => server.debug(msg),
       updateStatus,
@@ -410,10 +407,7 @@ module.exports = (server: ServerAPI): Plugin => {
         try {
           await catalogue.removeSource(source, controller.signal)
           controller.signal.throwIfAborted()
-          const dir = path.join(acquisitionRoot(), name)
-          const existed = fs.existsSync(dir)
-          await fs.promises.rm(dir, { recursive: true, force: true })
-          res.json({ ok: true, existed })
+          res.json({ ok: true })
         } catch (error) {
           res.status(502).json({ error: String(error) })
         } finally { deleting.delete(name); scheduleNextTick() }

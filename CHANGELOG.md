@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.4.0-beta.2] - 2026-10-21
+
+- Stream GFS and Météo-France bodies directly to Forecast Dataset Provider 0.1.1+;
+  declare asset IDs without sizes and let the provider measure size and SHA-256.
+- Decompress ICON-EU in memory one variable at a time and stream concatenated
+  GRIB messages without temporary GRIB files, markers or local archives.
+- Schedule from durable catalogue receipts, preserving beta.1 publication journals.
+- Resume only missing provider assets; recover lost create, upload and commit
+  responses using acquisition IDs and fsynced stream receipts.
+- Preserve publication references on generic 404 responses; require explicit
+  provider not-found codes before discarding an identity.
+- Reject empty, truncated or non-GRIB2 streams before commit and abort both
+  upstream and upload on cancellation. Preserve previous committed acquisitions.
+- Add actual provider integration tests for progress, interruption, limits and
+  lost commit responses; retain publication-window and connectivity tests.
+
 ## [0.4.0-beta.1] - 2026-10-21
 
 - Require catalogue publication in every orchestrator path; remove the internal

@@ -1,13 +1,12 @@
 export type ModelId = 'gfs' | 'arome' | 'arpege' | 'icon-eu'
 
-// The source directory name is derived: <model>[-<resolution>] (e.g.
-// "gfs-0p25", "icon-eu") — one directory per (model, resolution) pair,
-// created under the plugin's private downloads/ acquisition workspace.
+// Stable source identity: <model>[-<resolution>] (e.g. "gfs-0p25", "icon-eu").
+// All original bytes and archived acquisitions are owned by the catalogue.
 export interface SourceSetting {
   model: ModelId
   resolution?: string   // gfs: 0p25|0p50|1p00 ; arome: 0025|001 ; arpege: 01|025
   hours?: number        // forecast duration to download (capped per model)
-  archiveRuns?: number  // past runs kept in <source>/archive/ (0 = none, no upper limit)
+  archiveRuns?: number  // past acquisitions retained in the catalogue (0 = none, no upper limit)
   autoDownload?: boolean // default true: include this source in automatic checks
   enabled?: boolean      // legacy: false migrates to autoDownload false
 }
@@ -49,14 +48,14 @@ export interface SourceStatus {
   name: string
   model: ModelId
   autoDownload: boolean
-  lastRun: string | null      // stamp of last completed run (from marker files)
+  lastRun: string | null      // stamp of last committed catalogue acquisition
   expectedRun: string         // stamp of the run that should be available now
   pendingRun: string | null   // newest cycle with an open probing window, if missing
   publicationLate: boolean   // missing a run whose upper publication bound has passed
   catalogue: { datasetId: string; version: string; href: string } | null
   publicationPending: boolean
   upToDate: boolean
-  configStale: boolean        // data on disk was fetched with different parameters (area, duration, …)
+  configStale: boolean        // last acquisition used different parameters (area, duration, …)
   running: boolean
   lastError: string | null
   lastOutcome: 'downloaded' | 'up-to-date' | 'unavailable' | 'failed' | null

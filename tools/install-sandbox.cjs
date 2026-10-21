@@ -22,7 +22,6 @@ const configs = Object.fromEntries(fs.readdirSync(configDir).filter(f => f.endsW
 fs.writeFileSync(path.join(backup, 'plugin-config-hashes.json'), JSON.stringify(configs))
 const data = path.join(configDir, name)
 fs.copyFileSync(path.join(configDir, name + '.json'), path.join(backup, 'downloader-config.json'))
-fs.cpSync(data, path.join(backup, 'plugin-data'), { recursive: true })
 const destination = path.join(root, 'node_modules', name)
 execFileSync('tar', ['-czf', path.join(backup, 'previous-plugin.tgz'), '-C', destination, '.'])
 const staging = path.join(root, 'node_modules', `.grib-downloader-install-${stamp}`)
@@ -30,7 +29,7 @@ fs.mkdirSync(staging)
 execFileSync('tar', ['-xzf', archive, '--strip-components=1', '--no-same-owner', '-C', staging])
 const pkg = JSON.parse(fs.readFileSync(path.join(staging, 'package.json')))
 assert.equal(pkg.name, name)
-assert.equal(pkg.version, '0.4.0-beta.1')
+assert.equal(pkg.version, '0.4.0-beta.2')
 assert.ok(fs.existsSync(path.join(staging, 'dist/catalogue.js')))
 assert.ok(require(require.resolve('@digitaldefiance/bzip2-wasm/package.json', { paths: [destination] })).version)
 execFileSync('chown', ['-R', 'node:node', staging])
@@ -78,6 +77,17 @@ async function main() {
   const token = fs.readFileSync(tokenFile, 'utf8').trim()
   response = await call('/plugins/signalk-forecast-dataset-provider/status', 'GET', undefined, { Authorization: `Bearer ${token}` })
   assert.equal(response.status, 200)
+  // Freeze only this plugin before snapshotting its journal and swapping code.
+  // The original enabled configuration was backed up before this API call.
+  response = await call(`/plugins/${name}/config`, 'POST', { ...config, enabled: false })
+  assert.equal(response.status, 200)
+  for (let n = 0; n < 100; n++) {
+    const state = await call(`/plugins/${name}/status`)
+    if (state.status === 503) break
+    assert.ok(n < 99, 'Downloader did not stop before installation')
+    await new Promise(resolve => setTimeout(resolve, 50))
+  }
+  fs.cpSync(data, path.join(backup, 'plugin-data'), { recursive: true })
   const previous = path.join(root, 'node_modules', '.grib-downloader-before-forecast')
   assert.ok(!fs.existsSync(previous))
   fs.renameSync(destination, previous)
@@ -96,8 +106,7 @@ async function main() {
     if (lock.packages['']) lock.packages[''].dependencies[name] = `file:${relative}`
     atomic(full, lock)
   }
-  // Acquisition files now live only in the plugin's private downloads/ workspace.
-  // Copy legacy completed runs there before installation to avoid re-fetching.
+  // All acquisition bytes now belong to the provider; retain legacy files for rollback.
   delete config.configuration.gribsRoot
   atomic(path.join(configDir, name + '.json'), config)
   fs.rmSync(previous, { recursive: true })

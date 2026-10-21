@@ -1,14 +1,12 @@
-import * as fs from 'fs'
-import * as path from 'path'
 import { CataloguePublisher } from './catalogue'
 import { Bbox, InternetState, SourceSetting, SourceStatus } from './types'
-import { expectedRunStamp, fetchFingerprint, fingerprintsEqual, nextPublishAt, probeRunStamp, sourceDirName, MODEL_MAX_HOURS, MODEL_SCHEDULES } from './scheduler'
-import { fetchSource, toDownloadSource, type Outcome } from './downloader'
+import { candidateRuns, expectedRunStamp, fetchFingerprint, fingerprintsEqual, nextPublishAt, probeRunStamp, sourceDirName, MODEL_MAX_HOURS, MODEL_SCHEDULES } from './scheduler'
+import { planRun, runAvailable, toDownloadSource, type Outcome } from './downloader'
 
 // Per-source download timeout — equivalent to the previous container job
 // timeout (JOB_TIMEOUT_S = 3600). Firing it aborts the run's AbortController,
 // which cancels the in-flight fetches, so a timed-out download actually
-// stops instead of continuing against the same .part/output files.
+// stops instead of leaving an upstream or provider upload running.
 const SOURCE_TIMEOUT_MS = 3600_000
 const LOG_TAIL = 30
 
@@ -40,12 +38,11 @@ export class Orchestrator {
   }
 
   private published(source: SourceSetting, stamp: string | null): boolean {
-    return !!this.catalogue.reference(source, stamp, stamp ? this.markerParams(source, stamp) : null)
+    return !!this.catalogue.reference(source, stamp, this.catalogue.latest(source)?.params)
   }
 
   constructor(
     private sources: SourceSetting[],
-    private gribsRoot: string,    // private acquisition workspace
     private catalogue: CataloguePublisher,
     private log: (msg: string) => void,
     private onChange: () => void = () => {}, // notify status updates
@@ -64,39 +61,14 @@ export class Orchestrator {
     return this.sources.filter(s => s.autoDownload !== false)
   }
 
-  // Fetch-parameter fingerprint recorded in a run marker, or null
-  // (legacy/empty markers — treated as a parameter change).
-  private markerParams(source: SourceSetting, stamp: string): unknown {
-    try {
-      const p = path.join(this.gribsRoot, sourceDirName(source), `.run-${stamp}.complete`)
-      const content = fs.readFileSync(p, 'utf-8').trim()
-      if (!content) return null
-      return JSON.parse(content).params ?? null
-    } catch {
-      return null
-    }
-  }
-
-  // A run only matches the settings if it was downloaded with the same
-  // fetch parameters (area, duration, groups, variables, …).
+  // The provider owns GRIB bytes. Scheduling reads only durable publication receipts.
   private paramsOk(source: SourceSetting, stamp: string | null): boolean {
-    if (stamp === null) return true
-    const stored = this.markerParams(source, stamp)
-    if (stored === null) return false
-    return fingerprintsEqual(stored, fetchFingerprint(source, this.bbox))
+    if (!stamp) return true
+    return fingerprintsEqual(this.catalogue.latest(source)?.params, fetchFingerprint(source, this.bbox))
   }
 
-  // Latest completed run stamp, read from the downloader's marker files.
   lastRunStamp(source: SourceSetting): string | null {
-    const dir = path.join(this.gribsRoot, sourceDirName(source))
-    try {
-      const stamps = fs.readdirSync(dir)
-        .map(f => /^\.run-(\d{8}T\d{2})\.complete$/.exec(f)?.[1])
-        .filter((s): s is string => !!s)
-      return stamps.length > 0 ? stamps.sort().reverse()[0] : null
-    } catch {
-      return null
-    }
+    return this.catalogue.latest(source)?.stamp ?? null
   }
 
   status(): SourceStatus[] {
@@ -116,8 +88,8 @@ export class Orchestrator {
         pendingRun: lastRun !== null && lastRun >= target ? null : target,
         publicationLate: lastRun === null || lastRun < expected,
         upToDate: lastRun !== null && lastRun >= expected && paramsOk && this.published(s, lastRun),
-        catalogue: this.catalogue.reference(s, lastRun, lastRun ? this.markerParams(s, lastRun) : null),
-        publicationPending: lastRun !== null && !this.published(s, lastRun),
+        catalogue: this.catalogue.reference(s, lastRun, this.catalogue.latest(s)?.params),
+        publicationPending: this.catalogue.pendingStamp(s, fetchFingerprint(s, this.bbox)) !== null,
         configStale: lastRun !== null && !paramsOk,
         running: st.running,
         lastError: st.lastError,
@@ -129,7 +101,7 @@ export class Orchestrator {
   }
 
   // Sources whose expected run is newer than the last completed one, or
-  // whose on-disk data was fetched with different parameters.
+  // whose last publication used different parameters.
   private isBehind(source: SourceSetting): boolean {
     const last = this.lastRunStamp(source)
     return last === null || last < expectedRunStamp(source.model) || !this.paramsOk(source, last) || !this.published(source, last)
@@ -169,8 +141,6 @@ export class Orchestrator {
     const st = this.states.get(name)!
     if (st.running || this.stopped) return false
 
-    fs.mkdirSync(path.join(this.gribsRoot, name), { recursive: true })
-
     st.running = true
     st.lastError = null
     st.lastLog = []
@@ -179,7 +149,7 @@ export class Orchestrator {
     this.onChange()
     this.log(`${name}: starting download`)
 
-    const ds = toDownloadSource(source, this.gribsRoot, this.bbox)
+    const ds = toDownloadSource(source, this.bbox)
     const onProgress = (line: string) => {
       st.lastLog.push(line)
       if (st.lastLog.length > LOG_TAIL) st.lastLog.shift()
@@ -197,24 +167,32 @@ export class Orchestrator {
     )
 
     try {
-      // Publish a completed acquisition before attempting another download.
-      // On catalogue failure keep these files and retry without fetching upstream.
-      const previous = this.lastRunStamp(source)
-      if (previous) await this.catalogue.publish(source, ds.directory, previous, onProgress, controller.signal)
-      const outcome = await fetchSource(ds, onProgress, controller.signal)
-      const latest = this.lastRunStamp(source)
-      if (latest && latest !== previous) await this.catalogue.publish(source, ds.directory, latest, onProgress, controller.signal)
-      // A parameter change can replace the files for the same model cycle.
-      else if (latest && outcome === 'downloaded') await this.catalogue.publish(source, ds.directory, latest, onProgress, controller.signal)
-      st.lastOutcome = outcome
-      if (outcome === 'failed') {
-        st.lastError = controller.signal.aborted
-          ? `download aborted: ${controller.signal.reason ?? 'aborted'}`
-          : `download failed: ${st.lastLog.slice(-3).join(' | ') || 'see log'}`
-        this.log(`${name}: ${st.lastError}`)
-      } else {
-        this.log(`${name}: download finished (${outcome})`)
+      // Check the provider and existing receipt before opening an upstream body.
+      // A generic 404 must never erase a committed acquisition's identity.
+      await this.catalogue.check(controller.signal)
+      const previous = this.catalogue.latest(source)
+      if (previous) await this.catalogue.verify(source, previous.stamp, previous.params, controller.signal)
+      let outcome: Outcome = 'unavailable'
+      const pending = this.catalogue.pendingStamp(source, ds.fingerprint)
+      if (pending) {
+        const run = new Date(`${pending.slice(0, 4)}-${pending.slice(4, 6)}-${pending.slice(6, 8)}T${pending.slice(9)}:00:00Z`)
+        await this.catalogue.publish(source, planRun(ds, run), ds.fingerprint, onProgress, controller.signal)
+        outcome = 'downloaded'
       }
+      for (const run of candidateRuns(source.model)) {
+        controller.signal.throwIfAborted()
+        const plan = planRun(ds, run), latest = this.catalogue.latest(source)
+        if (latest && latest.stamp >= plan.stamp) {
+          if (fingerprintsEqual(latest.params, ds.fingerprint)) { if (outcome !== 'downloaded') outcome = 'up-to-date'; break }
+          if (latest.stamp > plan.stamp) continue
+        }
+        if (!(await runAvailable(plan, controller.signal))) { onProgress(`run ${plan.stamp} not published yet`); continue }
+        await this.catalogue.publish(source, plan, ds.fingerprint, onProgress, controller.signal)
+        outcome = 'downloaded'
+        break
+      }
+      st.lastOutcome = outcome
+      this.log(`${name}: download finished (${outcome})`)
       return true
     } catch (err) {
       st.lastOutcome = 'failed'

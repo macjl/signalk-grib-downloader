@@ -20,7 +20,7 @@ const get = async (route, auth = headers) => {
   return r.json()
 }
 async function main() {
-  assert.equal(JSON.parse(fs.readFileSync(path.join(root, 'node_modules', name, 'package.json'))).version, '0.4.0-beta.1')
+  assert.equal(JSON.parse(fs.readFileSync(path.join(root, 'node_modules', name, 'package.json'))).version, '0.4.0-beta.2')
   const provider = await get('/plugins/signalk-forecast-dataset-provider/status')
   assert.equal(provider.contractVersion, '0.1')
   const status = await get(`/plugins/${name}/status`, adminHeaders)
@@ -47,8 +47,8 @@ async function main() {
     const bytes = Buffer.from(await response.arrayBuffer())
     assert.equal(bytes.length, asset.size)
     assert.equal(createHash('sha256').update(bytes).digest('hex'), asset.sha256)
-    const original = path.join(data, 'downloads', source.name, asset.id.replace(/_grb2$/, '.grb2'))
-    assert.deepEqual(bytes, fs.readFileSync(original))
+    const expected = receipt.received?.[asset.id] ?? receipt.assets.find(a => a.id === asset.id)
+    assert.ok(expected && expected.size === bytes.length && expected.sha256 === createHash('sha256').update(bytes).digest('hex'))
     assert.equal(bytes.subarray(0, 4).toString(), 'GRIB')
     total += bytes.length
   }

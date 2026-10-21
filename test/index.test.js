@@ -62,20 +62,13 @@ const makeRouter = () => {
   } }
 }
 
-// An up-to-date marker for the source, so 'online' ticks find nothing
-// to download and never touch the network.
-const writeUpToDateMarker = (root, dataDir) => {
-  const dir = path.join(root, 'icon-eu')
-  fs.mkdirSync(dir, { recursive: true })
+// Durable receipts make the source current without local GRIB files.
+const writeCommittedReceipt = (_root, dataDir) => {
   fs.mkdirSync(path.join(dataDir, 'catalogue-publications'), { recursive: true })
   fs.writeFileSync(path.join(dataDir, 'catalogue-publications/icon-eu.json'), JSON.stringify({
     endpoint: 'http://127.0.0.1:3000', records: [{ stamp: probeRunStamp('icon-eu'),
       params: fetchFingerprint(SOURCE, BBOX), datasetId: 'test-dataset', version: 'a'.repeat(64) }]
   }))
-  fs.writeFileSync(
-    path.join(dir, `.run-${probeRunStamp('icon-eu')}.complete`),
-    JSON.stringify({ params: fetchFingerprint(SOURCE, BBOX) })
-  )
 }
 
 const settle = (ms = 50) => new Promise((resolve) => setTimeout(resolve, ms))
@@ -85,7 +78,7 @@ const startPlugin = ({ seed, prepare } = {}) => {
   const gribsRoot = path.join(dataDir, 'downloads')
   fs.writeFileSync(path.join(dataDir, 'settings.json'),
     JSON.stringify({ bbox: BBOX, sources: [SOURCE] }))
-  if (prepare) prepare(gribsRoot, dataDir)
+  if (prepare) prepare(undefined, dataDir)
   const server = makeServer(dataDir, { seed })
   const plugin = makePlugin(server)
   const { router, call } = makeRouter()
@@ -99,7 +92,8 @@ test('retired shared-directory settings cannot select a local-only downloader', 
   t.after(() => fs.rmSync(dataDir, { recursive: true, force: true }))
   t.after(() => fs.rmSync(retiredRoot, { recursive: true, force: true }))
   fs.writeFileSync(path.join(dataDir, 'settings.json'), JSON.stringify({ sources: [SOURCE] }))
-  writeUpToDateMarker(retiredRoot, dataDir)
+  fs.mkdirSync(path.join(retiredRoot, 'icon-eu'), { recursive: true })
+  fs.writeFileSync(path.join(retiredRoot, 'icon-eu', `.run-${probeRunStamp('icon-eu')}.complete`), '{}')
   const plugin = makePlugin(makeServer(dataDir, { seed: 'offline' }))
   const { router, call } = makeRouter()
   plugin.registerWithRouter(router)
@@ -107,14 +101,14 @@ test('retired shared-directory settings cannot select a local-only downloader', 
   assert.strictEqual(plugin.schema().properties.gribsRoot, undefined)
   plugin.start({ gribsRoot: retiredRoot, inputMode: 'local' })
   assert.strictEqual(call('GET', '/status').sources[0].lastRun, null,
-    'completion markers outside the private workspace are not read')
+    'retired filesystem completion markers are never read')
   assert.ok(fs.existsSync(path.join(retiredRoot, 'icon-eu')))
 })
 
 test('entering captive pauses the auto scheduler; leaving it catches up', async () => {
   // Source up to date from the start: every 'online'-like tick finds
   // nothing to download, so no network is ever touched.
-  const t = startPlugin({ prepare: writeUpToDateMarker })
+  const t = startPlugin({ prepare: writeCommittedReceipt })
   try {
     // Sanity: online-like state schedules the next auto check.
     await settle()
@@ -162,7 +156,7 @@ test('no automatic download starts behind a captive portal', async () => {
 
     // Leaving the portal with the source since brought up to date:
     // the catch-up tick runs, downloads nothing, and reschedules.
-    writeUpToDateMarker(t.gribsRoot, t.dataDir)
+    writeCommittedReceipt(t.gribsRoot, t.dataDir)
     t.server.publishInternetState('online')
     await settle()
     const after = t.call('GET', '/status')
