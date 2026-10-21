@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## [0.4.0-beta.2] - 2026-10-21
 
+- Keep journal writes compatible with Windows: flush the file before rename,
+  and flush the containing directory on systems that support directory fsync.
 - Stream GFS and Météo-France bodies directly to Forecast Dataset Provider 0.1.1+;
   declare asset IDs without sizes and let the provider measure size and SHA-256.
 - Decompress ICON-EU in memory one variable at a time and stream concatenated

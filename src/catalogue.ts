@@ -62,8 +62,12 @@ export class CataloguePublisher {
     const fd = fs.openSync(file + '.tmp', 'w', 0o600)
     try { fs.writeFileSync(fd, JSON.stringify(journal, null, 2)); fs.fsyncSync(fd) } finally { fs.closeSync(fd) }
     fs.renameSync(file + '.tmp', file)
-    const dir = fs.openSync(path.dirname(file), 'r')
-    try { fs.fsyncSync(dir) } finally { fs.closeSync(dir) }
+    // Windows does not support fsync on directory handles. The journal file
+    // itself is flushed above on every platform before its atomic rename.
+    if (process.platform !== 'win32') {
+      const dir = fs.openSync(path.dirname(file), 'r')
+      try { fs.fsyncSync(dir) } finally { fs.closeSync(dir) }
+    }
   }
   latest(source: SourceSetting): CompletedRun | null {
     const all = this.read(source).records
