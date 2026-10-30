@@ -182,12 +182,16 @@ In Plugin Config:
   No file needs to be created manually. Pending requests survive plugin restarts;
   a denied request requires a plugin restart to submit a new one.
 
-Existing token files are reused and reread for rotation. Automatically issued
-tokens rejected with HTTP 401 trigger a fresh approval request; externally
+Existing token files are reused and reread for rotation. After a catalogue HTTP
+401, automatically issued tokens are checked through Signal K's `/loginStatus`.
+A fresh approval is requested only for a confirmed invalid credential; a valid
+token or an unavailable/inconclusive check is preserved. Externally
 configured tokens are preserved for their owner to rotate. Token contents and
 access request IDs never enter the webapp, status responses or logs. On a remote
 catalogue, approve the request on that server and enable device access requests
 there. Configure a separate token file when switching catalogue servers.
+
+For repeated requests, see [redacted access diagnostics](docs/catalogue-access-diagnostics.md).
 
 The provider owns all acquisition bytes, including unfinished publications and
 archives. The downloader retains only settings and a private publication journal.
