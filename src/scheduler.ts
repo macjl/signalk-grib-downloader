@@ -20,6 +20,12 @@ export const MODEL_SCHEDULES: Record<ModelId, ModelSchedule> = {
     cycleEveryMinutes: 360, probeEveryMinutes: 5,
     defaultWindow: { earliestMinutes: 210, latestMinutes: 330 },
   },
+  'gfs-wave': {
+    // Initial estimates follow GFS; independent wave-file probes determine
+    // actual availability and late runs continue to be retried.
+    cycleEveryMinutes: 360, probeEveryMinutes: 5,
+    defaultWindow: { earliestMinutes: 210, latestMinutes: 330 },
+  },
   arome: {
     cycleEveryMinutes: 180, probeEveryMinutes: 5,
     defaultWindow: { earliestMinutes: 100, latestMinutes: 350 },
@@ -87,6 +93,7 @@ export function probeRunStamp(model: ModelId, now: Date = new Date(Date.now())):
 
 export const MODEL_MAX_HOURS: Record<ModelId, number> = {
   gfs: 384,
+  'gfs-wave': 384,
   arome: 51,
   arpege: 102,
   'icon-eu': 120,
@@ -111,15 +118,14 @@ const MF_GROUPS: Record<string, { group: string; fromH: number }[]> = {
 }
 
 export function defaultResolution(model: ModelId): string | undefined {
-  if (model === 'gfs') return '0p25'
+  if (model === 'gfs' || model === 'gfs-wave') return '0p25'
   if (model === 'arome') return '0025'
   if (model === 'arpege') return '01'
   return undefined
 }
 
-// Directory name (and source ID): <model>[-<resolution>].
-// This is the contract with signalk-grib-weather-provider, which discovers
-// subdirectories of the shared root and serves each as a weather provider.
+// Stable catalogue source ID: <model>[-<resolution>]. Atmospheric and wave
+// acquisitions keep independent publication journals and retention histories.
 export function sourceDirName(s: SourceSetting): string {
   const res = s.resolution || defaultResolution(s.model)
   return res ? `${s.model}-${res}` : s.model
@@ -147,6 +153,8 @@ export function nextPublishAt(model: ModelId, now: Date = new Date(Date.now()), 
 // re-fetches affected runs instead of leaving them silently stale.
 export const GFS_FETCH_VARS = ['UGRD', 'VGRD', 'GUST', 'TMP', 'PRMSL', 'RH', 'APCP', 'TCDC']
 export const GFS_FETCH_LEVELS = ['10_m_above_ground', '2_m_above_ground', '850_mb', 'surface', 'mean_sea_level', 'entire_atmosphere']
+// NOAA GFS-Wave selectors used in contributor haipule's downloader PR #19.
+export const GFS_WAVE_VARS = ['HTSGW', 'WVDIR', 'WVPER']
 
 export function downloaderSourceConfig(s: SourceSetting, bbox?: Bbox) {
   const model = s.model
@@ -157,11 +165,12 @@ export function downloaderSourceConfig(s: SourceSetting, bbox?: Bbox) {
     name: dirName,
     model,
   }
-  if (model === 'gfs') {
+  if (model === 'gfs' || model === 'gfs-wave') {
+    if (model === 'gfs-wave' && res !== '0p25') throw new Error('GFS-Wave supports only 0p25 resolution')
     entry.resolution = res
     entry.steps = { from: 0, to: hours, by: 3 }
-    entry.variables = GFS_FETCH_VARS
-    entry.levels = GFS_FETCH_LEVELS
+    entry.variables = model === 'gfs-wave' ? GFS_WAVE_VARS : GFS_FETCH_VARS
+    entry.levels = model === 'gfs-wave' ? ['surface'] : GFS_FETCH_LEVELS
     if (bbox) entry.bbox = [bbox.latMin, bbox.lonMin, bbox.latMax, bbox.lonMax]
   } else if (model === 'icon-eu') {
     entry.steps = { from: 0, to: hours, by: 3 }

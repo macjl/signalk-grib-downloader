@@ -150,8 +150,8 @@ const I18N = {
     confirmCaptive: 'Derrière un portail captif (page de connexion réseau) — le téléchargement va très probablement échouer. Essayer quand même ?',
     checkEvery: 'Vérifier toutes les', sources: 'Sources',
     thModel: 'Modèle', thRes: 'Résol.', thHours: 'Durée (h)', thDir: 'Source', thState: 'État',
-    addSource: '+ Ajouter une source', zone: 'Zone de téléchargement (GFS)',
-    zoneHint: 'Glissez les coins du rectangle sur la carte — appliqué aux modèles avec découpe serveur (GFS). AROME / Arpège / ICON distribuent leur domaine entier.',
+    addSource: '+ Ajouter une source', zone: 'Zone de téléchargement (GFS / GFS-Wave)',
+    zoneHint: 'Glissez les coins du rectangle sur la carte — appliqué à GFS et GFS-Wave. AROME / Arpège / ICON distribuent leur domaine entier.',
     north: 'Nord', south: 'Sud', west: 'Ouest', east: 'Est',
     save: 'Enregistrer', saved: 'Enregistré ✓', dirty: 'Modifications non enregistrées',
     saveError: 'Erreur : ', downloadAll: 'Tout télécharger', download: '⬇',
@@ -164,6 +164,7 @@ const I18N = {
     lastRun: 'dernier run', expected: 'attendu', confirmDelete: 'Supprimer cette source ?',
     lastAttempt: 'dernière tentative', noAttempt: 'aucune tentative depuis le démarrage', logTitle: 'Journal du dernier téléchargement',
     maxLbl: 'max', totalVol: 'Volume estimé par run :', perRun: '/ run',
+    volumeUnknown: 'estimation indisponible',
     archivesLbl: 'archives', archivesTitle: 'Acquisitions précédentes conservées dans le catalogue (0 = aucune)',
     confirmDeleteData: n => `Supprimer aussi les données téléchargées de « ${n} » (acquisitions et archives du catalogue) ?\nElles seront effacées à l'enregistrement.`,
     loginRequired: 'Connexion requise — <a href="/admin/#/login" style="color:#7fc4e3">connectez-vous à SignalK</a> puis rechargez cette page.',
@@ -180,8 +181,8 @@ const I18N = {
     confirmCaptive: 'Behind a captive portal (network login page) — the download will most likely fail. Try anyway?',
     checkEvery: 'Check every', sources: 'Sources',
     thModel: 'Model', thRes: 'Res.', thHours: 'Hours', thDir: 'Source', thState: 'State',
-    addSource: '+ Add source', zone: 'Download area (GFS)',
-    zoneHint: 'Drag the rectangle corners on the map — applies to models with server-side subsetting (GFS). AROME / Arpège / ICON distribute their whole domain.',
+    addSource: '+ Add source', zone: 'Download area (GFS / GFS-Wave)',
+    zoneHint: 'Drag the rectangle corners on the map — applies to GFS and GFS-Wave. AROME / Arpège / ICON distribute their whole domain.',
     north: 'North', south: 'South', west: 'West', east: 'East',
     save: 'Save', saved: 'Saved ✓', dirty: 'Unsaved changes',
     saveError: 'Error: ', downloadAll: 'Download all', download: '⬇',
@@ -194,6 +195,7 @@ const I18N = {
     lastRun: 'last run', expected: 'expected', confirmDelete: 'Delete this source?',
     lastAttempt: 'last attempt', noAttempt: 'no attempt since startup', logTitle: 'Last download log',
     maxLbl: 'max', totalVol: 'Estimated volume per run:', perRun: '/ run',
+    volumeUnknown: 'estimate unavailable',
     archivesLbl: 'archives', archivesTitle: 'Previous acquisitions kept in the catalogue (0 = none)',
     confirmDeleteData: n => `Also delete the downloaded data of "${n}" (catalogue acquisitions and archives)?\nDeleted when you save.`,
     loginRequired: 'Login required — <a href="/admin/#/login" style="color:#7fc4e3">log in to SignalK</a> and reload this page.',
@@ -206,6 +208,7 @@ document.querySelectorAll('[data-i18n]').forEach(el => { el.textContent = t[el.d
 const API = '/plugins/signalk-grib-downloader'
 const MODELS = {
   gfs:       { resolutions: ['0p25', '0p50', '1p00'], maxHours: 384, sliderStep: 3 },
+  'gfs-wave': { label: 'GFS-Wave', resolutions: ['0p25'], maxHours: 384, sliderStep: 3 },
   arome:     { resolutions: ['0025', '001'],          maxHours: 51,  sliderStep: 1 },
   arpege:    { resolutions: ['01', '025'],            maxHours: 102, sliderStep: 1 },
   'icon-eu': { resolutions: [],                       maxHours: 120, sliderStep: 3 },
@@ -215,6 +218,9 @@ const MODELS = {
 // GFS is bbox-subsetted server-side: size ∝ grid points × steps.
 function estimateMB(s) {
   const hours = s.hours ?? MODELS[s.model].maxHours
+  // No measured wave compression estimate yet; do not show zero or reuse
+  // atmospheric sizing. Any total including waves is also unknown.
+  if (s.model === 'gfs-wave') return NaN
   if (s.model === 'gfs') {
     const deg = { '0p25': 0.25, '0p50': 0.5, '1p00': 1 }[s.resolution || '0p25'] || 0.25
     const b = config.bbox || { latMin: 35, lonMin: -6, latMax: 45, lonMax: 17 }
@@ -234,6 +240,10 @@ function fmtVol(mb) {
   if (mb >= 1024) return (mb / 1024).toFixed(1) + ' GB'
   if (mb >= 1)    return Math.round(mb) + ' MB'
   return Math.max(1, Math.round(mb * 1024)) + ' kB'
+}
+
+function fmtEstimate(mb) {
+  return Number.isFinite(mb) ? '≈ ' + fmtVol(mb) : t.volumeUnknown
 }
 
 // ── State ────────────────────────────────────────────────────────────────────
@@ -343,7 +353,7 @@ function refreshRect(fit) {
 
 // ── Sources table ────────────────────────────────────────────────────────────
 // Directory name derived from model+resolution — the contract with the provider.
-const DEFAULT_RES = { gfs: '0p25', arome: '0025', arpege: '01', 'icon-eu': null }
+const DEFAULT_RES = { gfs: '0p25', 'gfs-wave': '0p25', arome: '0025', arpege: '01', 'icon-eu': null }
 function dirName(s) {
   const res = s.resolution || DEFAULT_RES[s.model]
   return res ? `${s.model}-${res}` : s.model
@@ -398,7 +408,7 @@ function renderSources() {
           <input type="checkbox" ${s.autoDownload !== false ? 'checked' : ''} data-f="autoDownload">
           <span>${t.auto}</span>
         </label>
-        <select data-f="model">${Object.keys(MODELS).map(m => `<option ${m === s.model ? 'selected' : ''}>${m}</option>`).join('')}</select>
+        <select data-f="model">${Object.keys(MODELS).map(m => `<option value="${m}" ${m === s.model ? 'selected' : ''}>${MODELS[m].label || m}</option>`).join('')}</select>
         <select data-f="resolution" ${resOpts.length === 0 ? 'disabled' : ''}>
           ${resOpts.map(r => `<option ${r === s.resolution ? 'selected' : ''}>${r}</option>`).join('')}
         </select>
@@ -417,7 +427,7 @@ function renderSources() {
         <span class="hours-label ${hours >= model.maxHours ? 'at-max' : ''}">
           <b data-r="hval">${hours}</b> h <span class="max">/ ${t.maxLbl} ${model.maxHours} h</span>
         </span>
-        <span class="vol" data-r="vol">≈ ${fmtVol(mb)}</span>
+        <span class="vol" data-r="vol">${fmtEstimate(mb)}</span>
         <span style="font-size:12px;color:#9fb0c5;white-space:nowrap" title="${t.archivesTitle}">
           ${t.archivesLbl}
           <input type="number" data-f="archiveRuns" min="0" step="1" value="${s.archiveRuns ?? 0}"
@@ -436,7 +446,7 @@ function renderSources() {
           const lbl = card.querySelector('[data-r="hval"]')
           lbl.textContent = h
           lbl.parentElement.classList.toggle('at-max', h >= model.maxHours)
-          card.querySelector('[data-r="vol"]').textContent = '≈ ' + fmtVol(estimateMB({ ...s, hours: h }))
+          card.querySelector('[data-r="vol"]').textContent = fmtEstimate(estimateMB({ ...s, hours: h }))
         })
         el.addEventListener('change', () => {
           s.hours = parseInt(el.value, 10)
@@ -474,7 +484,7 @@ function renderSources() {
     list.appendChild(card)
   })
   document.getElementById('total-vol').innerHTML =
-    `${t.totalVol} <b>≈ ${fmtVol(totalMB)}</b> ${t.perRun}`
+    `${t.totalVol} <b>${fmtEstimate(totalMB)}</b> ${t.perRun}`
 }
 
 document.getElementById('btn-add').addEventListener('click', () => {

@@ -15,7 +15,7 @@ approval, existing-file handling and verification.
 ## What it does
 
 Each configured source streams its selected model run directly into a staged
-multi-asset publication in Forecast Dataset Provider. GFS and Météo-France bodies
+multi-asset publication in Forecast Dataset Provider. GFS, GFS-Wave and Météo-France bodies
 are forwarded with backpressure; ICON-EU fragments are decompressed in memory,
 one variable at a time, and streamed into one asset per timestep. The downloader
 writes no GRIB, partial file, completion marker or local archive.
@@ -27,7 +27,32 @@ and retrieve their version-bound assets over HTTP.
 No container runtime, Python or GRIB decoder is required by this downloader.
 
 Supported models: **GFS** (0.25°/0.5°/1°, NOMADS server-side area subsetting),
-**AROME** (0.025°/0.01°), **ARPEGE** (0.1°/0.25°), **ICON-EU**.
+**GFS-Wave** (0.25°, NOMADS server-side area subsetting), **AROME** (0.025°/0.01°),
+**ARPEGE** (0.1°/0.25°), **ICON-EU**.
+
+### GFS-Wave
+
+Add a **GFS-Wave** source in the webapp (model `gfs-wave`, resolution `0p25`).
+It publishes separate `gfs-wave-0p25` forecast datasets with model `GFS-WAVE`;
+atmospheric GFS sources, journals and retention remain independent. The shared
+download-area rectangle applies to both products. Manual/automatic mode and
+archive retention work as for the other sources. No wave source is enabled
+automatically when upgrading.
+
+Each acquisition selects NOAA's `HTSGW` (combined wind-wave and swell significant
+height), `WVDIR` (wind-wave direction) and `WVPER` (wind-wave period) at the surface,
+with one original GRIB2 asset per three-hour step, from f000 to the configured
+horizon (maximum 384 hours). The directions/periods are wind-wave parameters,
+not directions/periods for the entire combined sea. Publication waits for all
+requested wave assets; it never depends on an atmospheric acquisition.
+
+The files come from `gfs.YYYYMMDD/HH/wave/gridded/` and `filter_gfswave.pl`.
+These URL/parameter choices follow [haipule's contribution in PR #19](https://github.com/macjl/signalk-grib-downloader/pull/19).
+Originals stream directly into the catalogue, without local assembly or OpenCPN
+export. Weather API decoding of wave-only datasets is separate work: the current
+GRIB Weather Provider does not recognize these wave fields and reports a
+conversion error for this source, while retaining its atmospheric forecasts.
+Wave download-volume estimates are shown as unavailable until measured.
 
 ## Modes
 
@@ -51,6 +76,7 @@ setting), overrides this interval; it is no longer a special late-run fallback.
 | Model | Cycle interval | Lower bound | Upper bound |
 | --- | --- | --- | --- |
 | GFS | 6 hours | 210 min | 330 min |
+| GFS-Wave | 6 hours | 210 min | 330 min |
 | AROME | 3 hours | Per-cycle table below | Per-cycle table below |
 | ARPEGE | 6 hours | Per-cycle table below | Per-cycle table below |
 | ICON-EU | 6 hours | 150 min | 240 min |
@@ -75,6 +101,10 @@ cover the complete supported horizon and both Meteo-France resolutions; they
 may therefore be generous for shorter forecasts. They are estimates, not an
 upstream availability guarantee. An exceptional late publication does not move
 the bounds automatically or slow down subsequent probes.
+
+GFS-Wave initially uses the same estimated window as atmospheric GFS, but probes
+its own last requested wave file. This is an initial scheduling estimate, not a
+measured wave publication SLA; a late or missing wave run continues to be probed.
 
 For example, the AROME 06 UTC run starts probing at 10:00 UTC. If it is still
 missing at 11:50 UTC, the status changes to late and the same five-minute probing

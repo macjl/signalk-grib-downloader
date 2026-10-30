@@ -5,7 +5,7 @@ const assert = require('node:assert')
 
 const {
   expectedRunStamp, probeRunStamp, nextPublishAt, candidateRuns, publicationWindow,
-  runStamp, downloaderSourceConfig, sourceDirName, MODEL_MAX_HOURS, MODEL_SCHEDULES,
+  runStamp, downloaderSourceConfig, sourceDirName, MODEL_MAX_HOURS, MODEL_SCHEDULES, fetchFingerprint,
 } = require('../dist/scheduler.js')
 
 test('expectedRunStamp uses upper bounds, including per-cycle AROME delays', () => {
@@ -78,6 +78,19 @@ test('hours are capped at the model maximum', () => {
   const c = downloaderSourceConfig({ model: 'icon-eu', hours: 999 })
   assert.deepStrictEqual(c.steps, { from: 0, to: MODEL_MAX_HOURS['icon-eu'], by: 3 })
   assert.strictEqual(c.name, 'icon-eu')
+})
+
+test('wave source identity, horizon and fingerprints remain independent of atmospheric GFS', () => {
+  const source = { model: 'gfs-wave', hours: 999 }
+  const box = { latMin: 40, lonMin: -5, latMax: 45, lonMax: 0 }
+  const config = downloaderSourceConfig(source, box)
+  assert.equal(sourceDirName(source), 'gfs-wave-0p25')
+  assert.deepStrictEqual(config.steps, { from: 0, to: 384, by: 3 })
+  assert.deepStrictEqual(config.variables, ['HTSGW', 'WVDIR', 'WVPER'])
+  assert.deepStrictEqual(config.levels, ['surface'])
+  assert.deepStrictEqual(config.bbox, [40, -5, 45, 0])
+  assert.notDeepStrictEqual(fetchFingerprint(source, box), fetchFingerprint({ model: 'gfs', hours: 999 }, box))
+  assert.notDeepStrictEqual(fetchFingerprint(source, box), fetchFingerprint(source, { ...box, latMax: 46 }))
 })
 
 test('arome groups follow the requested duration', () => {
