@@ -26,7 +26,7 @@ actual approval/token lifecycle must still be checked before closing the issue.
 ## Collect diagnostics without disclosing credentials
 
 The standalone collector is maintained in GRIB Downloader at
-[docs/diagnose-catalogue.cjs](https://github.com/macjl/signalk-grib-downloader/blob/fix/catalogue-access-renewal/docs/diagnose-catalogue.cjs).
+[docs/diagnose-catalogue.cjs](https://github.com/macjl/signalk-grib-downloader/blob/v0.5.1/docs/diagnose-catalogue.cjs).
 It covers both plugins. Run it as the Signal K service user, supplying the actual
 configuration directory, for example:
 

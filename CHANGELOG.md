@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## Unreleased
+## [0.5.1] - 2026-10-31
 
 - Preserve automatically issued tokens when catalogue HTTP 401 is a permission
   refusal: confirm authentication through Signal K loginStatus before renewal.
