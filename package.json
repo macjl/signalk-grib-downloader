@@ -1,7 +1,7 @@
 {
   "name": "signalk-grib-downloader",
-  "version": "0.3.0",
-  "description": "Orchestrates automatic or manual GRIB downloads (GFS, AROME, ARPEGE, ICON-EU) in-process — feeds signalk-grib-weather-provider",
+  "version": "0.4.0",
+  "description": "Downloads GRIB forecasts and publishes immutable datasets to signalk-forecast-dataset-provider",
   "main": "dist/index.js",
   "scripts": {
     "build": "tsc",
@@ -37,10 +37,11 @@
     "public/",
     "test/",
     "README.md",
-    "CHANGELOG.md"
+    "CHANGELOG.md",
+    "docs/"
   ],
   "engines": {
-    "node": ">=18.17"
+    "node": ">=20.19"
   },
   "signalk-plugin-enabled-by-default": false,
   "signalk": {
@@ -53,7 +54,7 @@
       "@meri-imperiumi/signalk-internet"
     ],
     "requires": [
-      "signalk-grib-weather-provider"
+      "signalk-forecast-dataset-provider"
     ]
   },
   "peerDependencies": {

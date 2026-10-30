@@ -2,6 +2,64 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.4.0] - 2026-10-30
+
+- First stable catalogue-based downloader, including direct streaming,
+  asset-level restart recovery and automatic readwrite access requests.
+- Breaking upgrade from 0.3.x: publish only to Forecast Dataset Provider 0.1.0;
+  update GRIB Weather Provider to 0.7.0 in the same maintenance window. Existing
+  local GRIB files are preserved but not imported automatically.
+- Document installation, access approvals, verification and rollback in
+  docs/upgrading.md. The complete weather chain requires Node 24+.
+- Failed replacement acquisitions retain previously committed forecasts (#15).
+
+## [0.4.0-beta.3] - 2026-10-21
+
+- Request catalogue access automatically through Signal K Access Requests when
+  no token is configured; require administrator approval with this plugin's
+  least-privilege permissions and persist the token privately.
+- Resume pending requests across restarts, report waiting/denied states and
+  resume catalogue work immediately after approval. Stop polling on plugin stop.
+- Renew automatically issued tokens rejected with HTTP 401 while preserving
+  manually configured or concurrently rotated tokens.
+- Cover the access lifecycle, plugin startup and approval-driven resumption;
+  validate both permission levels against an actual Signal K server.
+
+## [0.4.0-beta.2] - 2026-10-21
+
+- Keep journal writes compatible with Windows: flush the file before rename,
+  and flush the containing directory on systems that support directory fsync.
+- Stream GFS and Météo-France bodies directly to Forecast Dataset Provider 0.1.1+;
+  declare asset IDs without sizes and let the provider measure size and SHA-256.
+- Decompress ICON-EU in memory one variable at a time and stream concatenated
+  GRIB messages without temporary GRIB files, markers or local archives.
+- Schedule from durable catalogue receipts, preserving beta.1 publication journals.
+- Resume only missing provider assets; recover lost create, upload and commit
+  responses using acquisition IDs and fsynced stream receipts.
+- Preserve publication references on generic 404 responses; require explicit
+  provider not-found codes before discarding an identity.
+- Reject empty, truncated or non-GRIB2 streams before commit and abort both
+  upstream and upload on cancellation. Preserve previous committed acquisitions.
+- Add actual provider integration tests for progress, interruption, limits and
+  lost commit responses; retain publication-window and connectivity tests.
+
+## [0.4.0-beta.1] - 2026-10-21
+
+- Require catalogue publication in every orchestrator path; remove the internal
+  standalone local-output bypass and the shared-directory `gribsRoot` setting.
+- Keep downloads in the private `<plugin data directory>/downloads/` workspace.
+  Existing directories remain untouched and can be copied into that workspace.
+- Publish completed GRIB runs to Forecast Dataset Provider 0.1 via authenticated,
+  streaming multi-asset HTTP publication with SHA-256 validation.
+- Persist publication journals for asset-level restart recovery and lost commit
+  responses; publish existing completed runs without downloading them again.
+- Expose publication-pending state and committed dataset links in the webapp.
+- Apply archive retention and explicit source-data deletion to owned catalogue
+  acquisitions, respecting provider conflicts and preserving local cache use.
+- Use a readwrite token file; replace the Weather Provider requirement with
+  Forecast Dataset Provider. Require Node 20.19+ and Signal K 2.34+ within 2.x.
+- Abort transfers on stop and reject configuration/deletion races while busy.
+
 ## [0.3.0] - 2026-10-20
 
 ### Added

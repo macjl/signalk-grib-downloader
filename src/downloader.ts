@@ -1,344 +1,168 @@
-import * as fs from 'fs'
-import * as path from 'path'
-import { createRequire } from 'module'
-import { Readable } from 'stream'
-import { pipeline } from 'stream/promises'
+import * as fs from 'node:fs'
+import * as path from 'node:path'
+import { createRequire } from 'node:module'
 import { Bbox, ModelId, SourceSetting } from './types'
-import { candidateRuns, downloaderSourceConfig, fetchFingerprint, fingerprintsEqual, runStamp, sourceDirName, GFS_FETCH_VARS, GFS_FETCH_LEVELS } from './scheduler'
-
-// Native in-process GRIB downloader — a TypeScript port of the previous
-// containerised Python job (grib-downloader/downloader.py). No container
-// runtime, no image pulls, no Python. Runs on Node ≥ 18.17 (uses global fetch
-// and AbortSignal.any).
-//
-// Outcome protocol per source (mirrors the Python logs):
-//   'downloaded' | 'up-to-date' | 'unavailable' | 'failed'
-// Log lines are streamed to the caller via `onLog`.
+import { downloaderSourceConfig, fetchFingerprint, runStamp, GFS_FETCH_VARS, GFS_FETCH_LEVELS } from './scheduler'
+import { GribStreamValidator } from './grib-stream'
 
 export type Outcome = 'downloaded' | 'up-to-date' | 'unavailable' | 'failed'
-
 export interface DownloadSource {
   name: string
   model: ModelId
-  directory: string            // absolute on-disk source directory
   resolution?: string
   steps?: { from: number; to: number; by: number } | number[]
-  bbox?: number[]              // [latMin, lonMin, latMax, lonMax] (GFS only)
+  bbox?: number[]
   variables?: string[]
   levels?: string[]
   packages?: string[]
   groups?: string[]
-  archiveRuns?: number
-  /** Override the upstream base URL (testing / proxying). When set, the
-   *  fetcher uses `<base>/...` instead of the model's hardcoded distribution URL. */
-  base?: string
-  /** Canonical fetch-parameter fingerprint — computed once from the
-   *  SourceSetting + bbox via downloaderSourceConfig, the same shape the
-   *  orchestrator compares run markers against. Written into run markers so a
-   *  run is only up to date if its marker fingerprint matches the settings. */
+  base?: string // Upstream override for isolated tests/proxies; never contains the catalogue token.
   fingerprint: unknown
 }
-
-export interface FetchResult {
-  outcome: Outcome
-  log: string[]                // tail of log lines for the webapp status view
-}
-
-const UA = 'grib-downloader/0.1 (signalk-grib-weather-provider)'
+export interface RemoteAsset { id: string; urls: string[]; compression?: 'bzip2' }
+export interface RunPlan { stamp: string; probe: string; assets: RemoteAsset[] }
+const UA = 'signalk-grib-downloader/0.4 (direct forecastDatasets producer)'
 const HTTP_TIMEOUT_MS = 60_000
-const RETRIES = 3
-const HTTP_BACKOFF_BASE_MS = 2_000
+const MAX_ICON_COMPRESSED_BYTES = 128 * 1024 ** 2
+const MAX_ICON_DECOMPRESSED_BYTES = 512 * 1024 ** 2
+const GFS_PRODUCTS: Record<string, string> = { '0p25': 'pgrb2.0p25', '0p50': 'pgrb2full.0p50', '1p00': 'pgrb2.1p00' }
+const MF_BASE = 'https://meteofrance-pnt.s3.rbx.io.cloud.ovh.net/pnt'
+const ICON_BASE = 'https://opendata.dwd.de/weather/nwp/icon-eu/grib'
+const ICON_VARS = ['t_2m', 'u_10m', 'v_10m', 'vmax_10m', 'pmsl', 'relhum_2m', 'tot_prec', 'clct']
 
-// ── HTTP helpers ─────────────────────────────────────────────────────────────
-
-// Per-request timeout, combined with the caller's run-level abort signal
-// (if any) so aborting a run also cancels its in-flight requests.
-// AbortSignal.any: Node ≥ 18.17.
 function requestSignal(signal?: AbortSignal): AbortSignal {
   const timeout = AbortSignal.timeout(HTTP_TIMEOUT_MS)
   return signal ? AbortSignal.any([signal, timeout]) : timeout
 }
-
-async function httpOk(url: string, signal?: AbortSignal): Promise<boolean> {
-  try {
-    const r = await fetch(url, { method: 'HEAD', headers: { 'User-Agent': UA }, redirect: 'follow', signal: requestSignal(signal) })
-    return r.status === 200
-  } catch {
-    return false
-  }
-}
-
-// Stream a URL to `dest` atomically (.part → rename). True on success.
-// Retries with linear backoff; an empty body is a failure. The body is piped
-// to disk (network read paced by file-write backpressure) instead of being
-// buffered in memory. A caller-initiated abort is not retried.
-async function download(url: string, dest: string, signal?: AbortSignal): Promise<boolean> {
-  const part = dest + '.part'
-  for (let attempt = 1; attempt <= RETRIES; attempt++) {
-    let out: fs.WriteStream | null = null
-    try {
-      const r = await fetch(url, { headers: { 'User-Agent': UA }, redirect: 'follow', signal: requestSignal(signal) })
-      if (r.status !== 200 || !r.body) throw new Error(`HTTP ${r.status}`)
-      out = fs.createWriteStream(part)
-      await pipeline(Readable.fromWeb(r.body), out)
-      out = null                            // pipeline already ended the stream
-      const stat = fs.statSync(part)
-      if (stat.size === 0) throw new Error('empty download')
-      fs.renameSync(part, dest)
-      return true
-    } catch {
-      if (out) { try { out.destroy() } catch { /* ignore */ } }
-      if (signal?.aborted) break            // run aborted — do not retry
-      if (attempt < RETRIES) await sleep(HTTP_BACKOFF_BASE_MS * attempt)
-    }
-  }
-  try { fs.unlinkSync(part) } catch { /* may not exist */ }
-  return false
-}
-
-// Fetch a whole buffer (used for the bz2 GRIB fragments, which are small).
-async function fetchBuffer(url: string, signal?: AbortSignal): Promise<Buffer> {
-  const r = await fetch(url, { headers: { 'User-Agent': UA }, redirect: 'follow', signal: requestSignal(signal) })
-  if (r.status !== 200) throw new Error(`HTTP ${r.status} for ${url}`)
-  return Buffer.from(await r.arrayBuffer())
-}
-
-function sleep(ms: number): Promise<void> { return new Promise(r => setTimeout(r, ms)) }
-
-// ── Run / cycle / marker helpers ─────────────────────────────────────────────
-
-type StepsSpec = { from: number; to: number; by: number } | number[] | undefined
-function stepsList(spec: StepsSpec): number[] {
-  if (Array.isArray(spec)) return spec.map(s => Math.floor(s))
-  if (spec && typeof spec === 'object') {
-    const out: number[] = []
-    for (let s = spec.from; s <= spec.to; s += spec.by) out.push(s)
-    return out
+function stepsList(spec: DownloadSource['steps']): number[] {
+  if (Array.isArray(spec)) return spec.map(Math.floor)
+  if (spec) {
+    if (!(spec.by > 0) || !Number.isFinite(spec.to) || !Number.isFinite(spec.from)) throw new Error('Invalid forecast steps')
+    const result: number[] = []
+    for (let n = spec.from; n <= spec.to; n += spec.by) result.push(n)
+    return result
   }
   return []
 }
-
-function markerPath(directory: string, stamp: string): string {
-  return path.join(directory, `.run-${stamp}.complete`)
+export function toDownloadSource(setting: SourceSetting, bbox?: Bbox): DownloadSource {
+  const cfg = downloaderSourceConfig(setting, bbox)
+  return { name: cfg.name as string, model: setting.model, resolution: cfg.resolution as string | undefined,
+    steps: cfg.steps as DownloadSource['steps'], bbox: cfg.bbox as number[] | undefined,
+    variables: cfg.variables as string[] | undefined, levels: cfg.levels as string[] | undefined,
+    packages: cfg.packages as string[] | undefined, groups: cfg.groups as string[] | undefined,
+    fingerprint: fetchFingerprint(setting, bbox) }
 }
 
-function latestCompleteStamp(directory: string): string | null {
-  let files: string[]
-  try { files = fs.readdirSync(directory) } catch { return null }
-  const stamps = files
-    .map(f => /^\.run-(\d{8}T\d{2})\.complete$/.exec(f)?.[1])
-    .filter((s): s is string => !!s)
-  return stamps.length > 0 ? stamps.sort().reverse()[0] : null
-}
-
-function readMarkerParams(directory: string, stamp: string): unknown {
-  try {
-    const content = fs.readFileSync(markerPath(directory, stamp), 'utf-8').trim()
-    if (!content) return null
-    const data = JSON.parse(content)
-    return (data && typeof data === 'object' && 'params' in data) ? (data as { params: unknown }).params : null
-  } catch {
-    return null
-  }
-}
-
-function writeMarker(directory: string, stamp: string, params: unknown): void {
-  fs.writeFileSync(markerPath(directory, stamp), JSON.stringify({ params }))
-}
-
-// Run stamp encoded in a downloaded filename: '...__<stamp>__...' or a marker.
-function fileRunStamp(filename: string): string | null {
-  const m = /__(\d{8}T\d{2})__/.exec(filename)
-  if (m) return m[1]
-  const mm = /^\.run-(\d{8}T\d{2})\.complete$/.exec(filename)
-  return mm ? mm[1] : null
-}
-
-function wipeRun(directory: string, stamp: string): void {
-  let files: string[]
-  try { files = fs.readdirSync(directory) } catch { return }
-  for (const f of files) {
-    if (f.includes(`__${stamp}__`) || f === `.run-${stamp}.complete`) {
-      try { fs.unlinkSync(path.join(directory, f)) } catch { /* ignore */ }
-    }
-  }
-}
-
-// After a run completes: keep only the newest complete run in the active dir.
-// Older complete runs → archive/ (if archiveRuns > 0) or deleted; leftovers of
-// interrupted runs older than the newest complete run are purged, along with
-// stale .part files (> 1h). The archive keeps the newest archiveRuns runs.
-function cleanupOldRuns(directory: string, archiveRuns: number, log: (m: string) => void, prefix: string): void {
-  let files: string[]
-  try { files = fs.readdirSync(directory) } catch { return }
-  const markers = new Set(files.map(f => /^\.run-(\d{8}T\d{2})\.complete$/.exec(f)?.[1]).filter((s): s is string => !!s))
-  if (markers.size === 0) return
-  const newest = [...markers].sort().reverse()[0]
-  const archiveDir = path.join(directory, 'archive')
-  const archived = new Set<string>()
-  const deleted = new Set<string>()
-
-  for (const f of files) {
-    const full = path.join(directory, f)
-    let st: fs.Stats
-    try { st = fs.statSync(full) } catch { continue }
-    if (!st.isFile()) continue
-    if (f.endsWith('.part')) {
-      try { if (Date.now() - st.mtimeMs > 3_600_000) fs.unlinkSync(full); log(`${prefix}: removed stale partial file ${f}`) } catch { /* ignore */ }
-      continue
-    }
-    const stamp = fileRunStamp(f)
-    if (stamp === null || stamp >= newest) continue
-    try {
-      if (markers.has(stamp) && archiveRuns > 0) {
-        fs.mkdirSync(archiveDir, { recursive: true })
-        fs.renameSync(full, path.join(archiveDir, f))
-        archived.add(stamp)
-      } else {
-        fs.unlinkSync(full)
-        deleted.add(stamp)
-      }
-    } catch (e) {
-      log(`${prefix}: cannot clean ${f}: ${e}`)
-    }
-  }
-  for (const s of [...archived].sort()) log(`${prefix}: archived run ${s}`)
-  for (const s of [...deleted].sort()) log(`${prefix}: purged run ${s}`)
-
-  if (archiveRuns > 0 && fs.existsSync(archiveDir)) {
-    const afiles = fs.readdirSync(archiveDir)
-    // Distinct run stamps only (a run may have several files + a marker).
-    const astamps = [...new Set(afiles.map(fileRunStamp).filter((s): s is string => !!s))].sort().reverse()
-    for (const old of astamps.slice(archiveRuns)) {
-      for (const f of afiles) {
-        if (fileRunStamp(f) === old) {
-          try { fs.unlinkSync(path.join(archiveDir, f)) } catch (e) { log(`${prefix}: cannot prune archive ${f}: ${e}`) }
-        }
-      }
-      log(`${prefix}: pruned archived run ${old}`)
-    }
-  }
-}
-
-// ── GFS (NOMADS grib_filter) ─────────────────────────────────────────────────
-
-const GFS_PRODUCTS: Record<string, string> = { '0p25': 'pgrb2.0p25', '0p50': 'pgrb2full.0p50', '1p00': 'pgrb2.1p00' }
-
-async function gfsFetch(src: DownloadSource, log: (m: string) => void, signal?: AbortSignal): Promise<Outcome> {
-  const res = src.resolution ?? '0p25'
-  const directory = src.directory
-  const steps = stepsList(src.steps ?? { from: 0, to: 24, by: 3 })
-  const bbox = src.bbox
-  const variables = src.variables ?? GFS_FETCH_VARS
-  const levels = src.levels ?? GFS_FETCH_LEVELS
-  const name = src.name
-  const prod = GFS_PRODUCTS[res] ?? `pgrb2.${res}`
-  const fingerprint = src.fingerprint
-
-  for (const run of candidateRuns(src.model)) {
-    const stamp = runStamp(run)
-    if (signal?.aborted) { log(`${name}: aborted — cancelling run search`); return 'failed' }
-    let paramsChanged = false
-    const latest = latestCompleteStamp(directory)
-    if (latest !== null && latest >= stamp) {
-      if (fingerprintsEqual(readMarkerParams(directory, latest), fingerprint)) return 'up-to-date'
-      if (latest > stamp) continue
-      paramsChanged = true
-    }
-    const date = stamp.slice(0, 8)
-    const hh = stamp.slice(9, 11)
-    const nomads = src.base ?? 'https://nomads.ncep.noaa.gov'
-    const probe = `${nomads}/pub/data/nccf/com/gfs/prod/gfs.${date}/${hh}/atmos/gfs.t${hh}z.${prod}.f${String(steps[steps.length - 1]).padStart(3, '0')}.idx`
-    if (!(await httpOk(probe, signal))) { log(`${name}: run ${stamp} not published yet (probe failed)`); continue }
-
-    if (paramsChanged) { log(`${name}: fetch parameters changed — re-fetching run ${stamp}`); wipeRun(directory, stamp) }
-
-    log(`${name}: downloading run ${stamp} (${steps.length} steps)`)
-    const params = variables.map(v => `var_${v}=on`).concat(levels.map(l => `lev_${l}=on`))
-    if (bbox) {
-      const [lat0, lon0, lat1, lon1] = bbox
+export function planRun(src: DownloadSource, run: Date): RunPlan {
+  const stamp = runStamp(run), hh = stamp.slice(9), ymdh = stamp.replace('T', '')
+  const asset = (suffix: string, urls: string[], compression?: 'bzip2'): RemoteAsset => ({
+    id: `${src.name}__${stamp}__${suffix}_grb2`, urls, ...(compression ? { compression } : {}),
+  })
+  if (src.model === 'gfs') {
+    const resolution = src.resolution ?? '0p25', product = GFS_PRODUCTS[resolution]
+    if (!product) throw new Error('Unsupported GFS resolution')
+    const base = src.base ?? 'https://nomads.ncep.noaa.gov', date = stamp.slice(0, 8)
+    const steps = stepsList(src.steps ?? { from: 0, to: 24, by: 3 })
+    if (!steps.length) throw new Error('No forecast steps configured')
+    const params = (src.variables ?? GFS_FETCH_VARS).map(v => `var_${v}=on`).concat((src.levels ?? GFS_FETCH_LEVELS).map(l => `lev_${l}=on`))
+    if (src.bbox) {
+      const [lat0, lon0, lat1, lon1] = src.bbox
       params.push('subregion=', `leftlon=${lon0}`, `rightlon=${lon1}`, `bottomlat=${lat0}`, `toplat=${lat1}`)
     }
-    for (const step of steps) {
-      const dest = path.join(directory, `${name}__${stamp}__f${String(step).padStart(3, '0')}.grb2`)
-      if (fs.existsSync(dest)) continue
-      const url = `${nomads}/cgi-bin/filter_gfs_${res}.pl?dir=%2Fgfs.${date}%2F${hh}%2Fatmos&file=gfs.t${hh}z.${prod}.f${String(step).padStart(3, '0')}&` + params.join('&')
-      if (!(await download(url, dest, signal))) { log(`${name}: run ${stamp} failed at step f${String(step).padStart(3, '0')} — aborting`); return 'failed' }
+    const file = (step: number) => `gfs.t${hh}z.${product}.f${String(step).padStart(3, '0')}`
+    return { stamp,
+      probe: `${base}/pub/data/nccf/com/gfs/prod/gfs.${date}/${hh}/atmos/${file(steps[steps.length - 1])}.idx`,
+      assets: steps.map(step => asset(`f${String(step).padStart(3, '0')}`, [
+        `${base}/cgi-bin/filter_gfs_${resolution}.pl?dir=%2Fgfs.${date}%2F${hh}%2Fatmos&file=${file(step)}&${params.join('&')}`,
+      ])),
     }
-    writeMarker(directory, stamp, fingerprint)
-    cleanupOldRuns(directory, src.archiveRuns ?? 0, log, name)
-    log(`${name}: run ${stamp} complete`)
-    return 'downloaded'
   }
-  log(`${name}: no published run found among recent cycles`)
-  return 'unavailable'
-}
-
-// ── Météo-France (AROME / ARPEGE, OVH public bucket) ─────────────────────────
-
-const MF_BASE = 'https://meteofrance-pnt.s3.rbx.io.cloud.ovh.net/pnt'
-const MF_MODELS: Record<string, { template: string }> = {
-  'arome/0025': { template: '{d}/arome/0025/{p}/arome__0025__{p}__{g}__{d}.grib2' },
-  'arome/001': { template: '{d}/arome/001/{p}/arome__001__{p}__{g}__{d}.grib2' },
-  'arpege/025': { template: '{d}/arpege/025/{p}/arpege__025__{p}__{g}__{d}.grib2' },
-  'arpege/01': { template: '{d}/arpege/01/{p}/arpege__01__{p}__{g}__{d}.grib2' },
-}
-
-function mfUrl(base: string, template: string, d: string, p: string, g: string): string {
-  return `${base}/${template.replaceAll('{d}', d).replaceAll('{p}', p).replaceAll('{g}', g)}`
-}
-
-async function mfFetch(src: DownloadSource, log: (m: string) => void, signal?: AbortSignal): Promise<Outcome> {
-  const model = src.model
-  const res = src.resolution ?? (model === 'arome' ? '0025' : '025')
-  const key = `${model}/${res}`
-  const spec = MF_MODELS[key]
-  if (!spec) { log(`${src.name}: unknown ${model} resolution ${res}`); return 'failed' }
-  const groups = src.groups ?? []
-  const packages = src.packages ?? ['SP1']
-  const directory = src.directory
-  const name = src.name
-  const fingerprint = src.fingerprint
-
-  const mfBase = src.base ?? MF_BASE
-  for (const run of candidateRuns(src.model)) {
-    const stamp = runStamp(run)
-    if (signal?.aborted) { log(`${name}: aborted — cancelling run search`); return 'failed' }
-    let paramsChanged = false
-    const latest = latestCompleteStamp(directory)
-    if (latest !== null && latest >= stamp) {
-      if (fingerprintsEqual(readMarkerParams(directory, latest), fingerprint)) return 'up-to-date'
-      if (latest > stamp) continue
-      paramsChanged = true
+  if (src.model === 'arome' || src.model === 'arpege') {
+    const resolution = src.resolution ?? (src.model === 'arome' ? '0025' : '025')
+    const groups = src.groups ?? [], packages = src.packages ?? ['SP1']
+    if (!groups.length || !packages.length) throw new Error('No Météo-France groups configured')
+    const date = `${stamp.slice(0, 4)}-${stamp.slice(4, 6)}-${stamp.slice(6, 8)}T${hh}:00:00Z`
+    const url = (p: string, g: string) => `${src.base ?? MF_BASE}/${date}/${src.model}/${resolution}/${p}/${src.model}__${resolution}__${p}__${g}__${date}.grib2`
+    return { stamp, probe: url(packages[0], groups[groups.length - 1]),
+      assets: packages.flatMap(p => groups.map(g => asset(`${p}_${g}`, [url(p, g)]))),
     }
-    const d = `${stamp.slice(0, 4)}-${stamp.slice(4, 6)}-${stamp.slice(6, 8)}T${stamp.slice(9, 11)}:00:00Z`
-    const probe = mfUrl(mfBase, spec.template, d, packages[0], groups[groups.length - 1])
-    if (!(await httpOk(probe, signal))) { log(`${name}: run ${stamp} not published yet (probe failed)`); continue }
+  }
+  if (src.model !== 'icon-eu') throw new Error('Unsupported forecast model')
+  const variables = src.variables ?? ICON_VARS, steps = stepsList(src.steps ?? { from: 0, to: 48, by: 3 })
+  if (!variables.length || !steps.length) throw new Error('No ICON variables or steps configured')
+  const url = (step: number, variable: string) => `${src.base ?? ICON_BASE}/${hh}/${variable}/icon-eu_europe_regular-lat-lon_single-level_${ymdh}_${String(step).padStart(3, '0')}_${variable.toUpperCase()}.grib2.bz2`
+  return { stamp, probe: url(steps[steps.length - 1], variables[0]),
+    assets: steps.map(step => asset(`f${String(step).padStart(3, '0')}`, variables.map(v => url(step, v)), 'bzip2')),
+  }
+}
 
-    if (paramsChanged) { log(`${name}: fetch parameters changed — re-fetching run ${stamp}`); wipeRun(directory, stamp) }
+export async function runAvailable(plan: RunPlan, signal?: AbortSignal): Promise<boolean> {
+  try {
+    const response = await fetch(plan.probe, { method: 'HEAD', headers: { 'User-Agent': UA }, redirect: 'follow', signal: requestSignal(signal) })
+    await response.body?.cancel()
+    if (response.status === 200) return true
+    if ([403, 404, 410, 425].includes(response.status)) return false
+    throw new Error(`Upstream probe: HTTP ${response.status}`)
+  } catch (error) {
+    signal?.throwIfAborted()
+    throw error
+  }
+}
 
-    log(`${name}: downloading run ${stamp} (${packages.length} packages × ${groups.length} groups)`)
-    for (const p of packages) {
-      for (const g of groups) {
-        const dest = path.join(directory, `${name}__${stamp}__${p}_${g}.grb2`)
-        if (fs.existsSync(dest)) continue
-        const url = mfUrl(mfBase, spec.template, d, p, g)
-        if (!(await download(url, dest, signal))) { log(`${name}: run ${stamp} failed at ${p}/${g} — aborting`); return 'failed' }
+async function* upstream(asset: RemoteAsset, signal: AbortSignal): AsyncGenerator<Buffer> {
+  for (const url of asset.urls) {
+    signal.throwIfAborted()
+    const controller = new AbortController(), active = AbortSignal.any([signal, controller.signal])
+    let timer: ReturnType<typeof setTimeout>
+    const touch = () => {
+      clearTimeout(timer)
+      timer = setTimeout(() => controller.abort(new Error('Upstream transfer inactivity timeout')), 120_000)
+    }
+    touch()
+    let reader: ReadableStreamDefaultReader<Uint8Array> | undefined
+    try {
+      const response = await fetch(url, { headers: { 'User-Agent': UA, 'Accept-Encoding': 'identity' }, redirect: 'follow', signal: active })
+      if (response.status !== 200 || !response.body) {
+        await response.body?.cancel()
+        throw new Error(`Upstream asset: HTTP ${response.status}`)
       }
+      reader = response.body.getReader()
+      if (asset.compression === 'bzip2') {
+        // The WASM API decompresses one fragment at a time. Never collect all
+        // variables/steps together, and never write an intermediate GRIB to disk.
+        const chunks: Buffer[] = []
+        let size = 0
+        for (;;) {
+          const { done, value } = await reader.read()
+          if (done) break
+          touch()
+          size += value.length
+          if (size > MAX_ICON_COMPRESSED_BYTES) throw new Error('ICON compressed fragment exceeds memory limit')
+          chunks.push(Buffer.from(value))
+        }
+        yield await bz2Decompress(Buffer.concat(chunks))
+      } else {
+        for (;;) {
+          const { done, value } = await reader.read()
+          if (done) break
+          touch()
+          signal.throwIfAborted()
+          yield Buffer.from(value)
+        }
+      }
+    } finally {
+      clearTimeout(timer!)
+      controller.abort()
+      if (reader) { await reader.cancel().catch(() => {}); reader.releaseLock() }
     }
-    writeMarker(directory, stamp, fingerprint)
-    cleanupOldRuns(directory, src.archiveRuns ?? 0, log, name)
-    log(`${name}: run ${stamp} complete`)
-    return 'downloaded'
   }
-  log(`${name}: no published run found among recent cycles`)
-  return 'unavailable'
 }
-
-// ── DWD ICON-EU (opendata.dwd.de) ────────────────────────────────────────────
-
-const ICON_EU_DEFAULT_VARS = ['t_2m', 'u_10m', 'v_10m', 'vmax_10m', 'pmsl', 'relhum_2m', 'tot_prec', 'clct']
-const ICON_EU_BASE = 'https://opendata.dwd.de/weather/nwp/icon-eu/grib'
+export async function* readAsset(asset: RemoteAsset, signal: AbortSignal): AsyncGenerator<Buffer> {
+  const validator = new GribStreamValidator()
+  for await (const chunk of upstream(asset, signal)) { validator.push(chunk); yield chunk }
+  signal.throwIfAborted()
+  validator.finish()
+}
 
 // Minimal surface of @digitaldefiance/bzip2-wasm we drive, plus the raw
 // emscripten module the wrapper class expects on `wasmModule`.
@@ -404,116 +228,7 @@ async function bz2Decompress(comp: Buffer): Promise<Buffer> {
     } catch (e) {
       if (!/OUTBUFF_FULL/i.test(String(e))) throw e
       outCap *= 2
+      if (outCap > MAX_ICON_DECOMPRESSED_BYTES) throw new Error('ICON fragment exceeds decompression limit')
     }
   }
 }
-
-async function iconEuFetch(src: DownloadSource, log: (m: string) => void, signal?: AbortSignal): Promise<Outcome> {
-  const directory = src.directory
-  const steps = stepsList(src.steps ?? { from: 0, to: 48, by: 3 })
-  const variables = src.variables ?? ICON_EU_DEFAULT_VARS
-  const name = src.name
-  const fingerprint = src.fingerprint
-
-  const iconBase = src.base ?? ICON_EU_BASE
-  for (const run of candidateRuns(src.model)) {
-    const stamp = runStamp(run)
-    if (signal?.aborted) { log(`${name}: aborted — cancelling run search`); return 'failed' }
-    let paramsChanged = false
-    const latest = latestCompleteStamp(directory)
-    if (latest !== null && latest >= stamp) {
-      if (fingerprintsEqual(readMarkerParams(directory, latest), fingerprint)) return 'up-to-date'
-      if (latest > stamp) continue
-      paramsChanged = true
-    }
-    const hh = stamp.slice(9, 11)
-    const ymdh = stamp.replace('T', '')
-    const v0 = variables[0]
-    const probe = `${iconBase}/${hh}/${v0}/icon-eu_europe_regular-lat-lon_single-level_${ymdh}_${String(steps[steps.length - 1]).padStart(3, '0')}_${v0.toUpperCase()}.grib2.bz2`
-    if (!(await httpOk(probe, signal))) { log(`${name}: run ${stamp} not published yet (probe failed)`); continue }
-
-    if (paramsChanged) { log(`${name}: fetch parameters changed — re-fetching run ${stamp}`); wipeRun(directory, stamp) }
-
-    log(`${name}: downloading run ${stamp} (${steps.length} steps × ${variables.length} vars)`)
-    for (const step of steps) {
-      const dest = path.join(directory, `${name}__${stamp}__f${String(step).padStart(3, '0')}.grb2`)
-      if (fs.existsSync(dest)) continue
-      const part = dest + '.part'
-      try {
-        // One GRIB per variable — decompress and concatenate into one file
-        // per step (the provider expects all variables of a validity time
-        // in a single GRIB file).
-        const chunks: Buffer[] = []
-        for (const v of variables) {
-          const url = `${iconBase}/${hh}/${v}/icon-eu_europe_regular-lat-lon_single-level_${ymdh}_${String(step).padStart(3, '0')}_${v.toUpperCase()}.grib2.bz2`
-          const comp = await fetchBuffer(url, signal)
-          chunks.push(await bz2Decompress(comp))
-        }
-        fs.writeFileSync(part, Buffer.concat(chunks))
-        fs.renameSync(part, dest)
-      } catch (e) {
-        log(`${name}: run ${stamp} failed at step f${String(step).padStart(3, '0')}: ${e} — aborting`)
-        try { fs.unlinkSync(part) } catch { /* ignore */ }
-        return 'failed'
-      }
-    }
-    writeMarker(directory, stamp, fingerprint)
-    cleanupOldRuns(directory, src.archiveRuns ?? 0, log, name)
-    log(`${name}: run ${stamp} complete`)
-    return 'downloaded'
-  }
-  log(`${name}: no published run found among recent cycles`)
-  return 'unavailable'
-}
-
-// ── Public entry point ───────────────────────────────────────────────────────
-
-const FETCHERS: Record<ModelId, (s: DownloadSource, log: (m: string) => void, signal?: AbortSignal) => Promise<Outcome>> = {
-  gfs: gfsFetch,
-  arome: mfFetch,
-  arpege: mfFetch,
-  'icon-eu': iconEuFetch,
-}
-
-// Build the on-disk DownloadSource for a SourceSetting, resolving the
-// directory under the local gribsRoot (no container path remapping).
-export function toDownloadSource(s: SourceSetting, gribsRoot: string, bbox?: Bbox): DownloadSource {
-  const cfg = downloaderSourceConfig(s, gribsRoot, bbox) as Record<string, unknown>
-  return {
-    name: cfg.name as string,
-    model: cfg.model as ModelId,
-    directory: cfg.directory as string,
-    resolution: cfg.resolution as string | undefined,
-    steps: cfg.steps as DownloadSource['steps'],
-    variables: cfg.variables as string[] | undefined,
-    levels: cfg.levels as string[] | undefined,
-    bbox: cfg.bbox as number[] | undefined,
-    packages: cfg.packages as string[] | undefined,
-    groups: cfg.groups as string[] | undefined,
-    archiveRuns: (cfg.archive_runs as number | undefined) ?? 0,
-    // Canonical fingerprint — the same shape the orchestrator compares run
-    // markers against, so a run is up to date iff its marker matches.
-    fingerprint: fetchFingerprint(s, bbox),
-  }
-}
-
-// Fetch one source's latest run. `signal` aborts the work in flight: every
-// HTTP request of the run is bound to it, so aborting cancels the current
-// download instead of leaving it running in the background.
-export async function fetchSource(src: DownloadSource, onLog: (line: string) => void, signal?: AbortSignal): Promise<Outcome> {
-  const log: string[] = []
-  const sink = (m: string) => { log.push(m); onLog(m) }
-  const fetcher = FETCHERS[src.model]
-  if (!fetcher) { sink(`${src.name}: unknown model ${src.model}`); return 'failed' }
-  fs.mkdirSync(src.directory, { recursive: true })
-  try {
-    const outcome = await fetcher(src, sink, signal)
-    sink(`${src.name}: ${outcome}`)
-    return outcome
-  } catch (e) {
-    sink(`${src.name}: unexpected error: ${e}`)
-    return 'failed'
-  }
-}
-
-export { sourceDirName, fetchFingerprint, fingerprintsEqual, latestCompleteStamp }

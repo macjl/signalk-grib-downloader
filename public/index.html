@@ -149,7 +149,7 @@ const I18N = {
     confirmOffline: 'Actuellement hors ligne — le téléchargement va très probablement échouer. Essayer quand même ?',
     confirmCaptive: 'Derrière un portail captif (page de connexion réseau) — le téléchargement va très probablement échouer. Essayer quand même ?',
     checkEvery: 'Vérifier toutes les', sources: 'Sources',
-    thModel: 'Modèle', thRes: 'Résol.', thHours: 'Durée (h)', thDir: 'Répertoire', thState: 'État',
+    thModel: 'Modèle', thRes: 'Résol.', thHours: 'Durée (h)', thDir: 'Source', thState: 'État',
     addSource: '+ Ajouter une source', zone: 'Zone de téléchargement (GFS)',
     zoneHint: 'Glissez les coins du rectangle sur la carte — appliqué aux modèles avec découpe serveur (GFS). AROME / Arpège / ICON distribuent leur domaine entier.',
     north: 'Nord', south: 'Sud', west: 'Ouest', east: 'Est',
@@ -157,13 +157,15 @@ const I18N = {
     saveError: 'Erreur : ', downloadAll: 'Tout télécharger', download: '⬇',
     stUpToDate: 'à jour', stStale: 'en retard', stRunning: 'téléchargement…', stError: 'erreur',
     stWaiting: 'attente publication', stLate: 'publication en retard', stConfigChanged: 'config modifiée',
-    stManual: 'manuel', stNoData: 'aucune donnée',
+    stPublishing: 'publication au catalogue', stPublished: 'Catalogue', stManual: 'manuel', stNoData: 'aucune donnée',
     runtimeErrorTitle: 'Téléchargement automatique indisponible',
+    cataloguePending: 'Autorisation en attente : sur le serveur du catalogue, ouvrez Security → Access Requests et approuvez signalk-grib-downloader en lecture/écriture. Le téléchargement automatique reprendra ensuite.',
+    catalogueDenied: 'Accès au catalogue refusé. Redémarrez le plugin pour envoyer une nouvelle demande d’autorisation.',
     lastRun: 'dernier run', expected: 'attendu', confirmDelete: 'Supprimer cette source ?',
     lastAttempt: 'dernière tentative', noAttempt: 'aucune tentative depuis le démarrage', logTitle: 'Journal du dernier téléchargement',
     maxLbl: 'max', totalVol: 'Volume estimé par run :', perRun: '/ run',
-    archivesLbl: 'archives', archivesTitle: 'Runs précédents conservés dans <source>/archive/ (0 = aucun)',
-    confirmDeleteData: n => `Supprimer aussi les données téléchargées de « ${n} » (gribs, archives) ?\nElles seront effacées à l'enregistrement.`,
+    archivesLbl: 'archives', archivesTitle: 'Acquisitions précédentes conservées dans le catalogue (0 = aucune)',
+    confirmDeleteData: n => `Supprimer aussi les données téléchargées de « ${n} » (acquisitions et archives du catalogue) ?\nElles seront effacées à l'enregistrement.`,
     loginRequired: 'Connexion requise — <a href="/admin/#/login" style="color:#7fc4e3">connectez-vous à SignalK</a> puis rechargez cette page.',
   },
   en: {
@@ -177,7 +179,7 @@ const I18N = {
     confirmOffline: 'Currently offline — the download will most likely fail. Try anyway?',
     confirmCaptive: 'Behind a captive portal (network login page) — the download will most likely fail. Try anyway?',
     checkEvery: 'Check every', sources: 'Sources',
-    thModel: 'Model', thRes: 'Res.', thHours: 'Hours', thDir: 'Directory', thState: 'State',
+    thModel: 'Model', thRes: 'Res.', thHours: 'Hours', thDir: 'Source', thState: 'State',
     addSource: '+ Add source', zone: 'Download area (GFS)',
     zoneHint: 'Drag the rectangle corners on the map — applies to models with server-side subsetting (GFS). AROME / Arpège / ICON distribute their whole domain.',
     north: 'North', south: 'South', west: 'West', east: 'East',
@@ -185,13 +187,15 @@ const I18N = {
     saveError: 'Error: ', downloadAll: 'Download all', download: '⬇',
     stUpToDate: 'up to date', stStale: 'behind', stRunning: 'downloading…', stError: 'error',
     stWaiting: 'awaiting publication', stLate: 'publication late', stConfigChanged: 'settings changed',
-    stManual: 'manual', stNoData: 'no data',
+    stPublishing: 'catalogue publication pending', stPublished: 'Catalogue', stManual: 'manual', stNoData: 'no data',
     runtimeErrorTitle: 'Automatic downloads unavailable',
+    cataloguePending: 'Access approval pending: on the catalogue server, open Security → Access Requests and approve signalk-grib-downloader with readwrite permissions. Automatic downloads will then resume.',
+    catalogueDenied: 'Catalogue access denied. Restart the plugin to submit a new access request.',
     lastRun: 'last run', expected: 'expected', confirmDelete: 'Delete this source?',
     lastAttempt: 'last attempt', noAttempt: 'no attempt since startup', logTitle: 'Last download log',
     maxLbl: 'max', totalVol: 'Estimated volume per run:', perRun: '/ run',
-    archivesLbl: 'archives', archivesTitle: 'Past runs kept in <source>/archive/ (0 = none)',
-    confirmDeleteData: n => `Also delete the downloaded data of "${n}" (gribs, archives)?\nDeleted when you save.`,
+    archivesLbl: 'archives', archivesTitle: 'Previous acquisitions kept in the catalogue (0 = none)',
+    confirmDeleteData: n => `Also delete the downloaded data of "${n}" (catalogue acquisitions and archives)?\nDeleted when you save.`,
     loginRequired: 'Login required — <a href="/admin/#/login" style="color:#7fc4e3">log in to SignalK</a> and reload this page.',
   },
 }
@@ -350,6 +354,7 @@ function sourceStateBadge(s) {
   if (!st) return ''
   if (st.running) return `<span class="badge run">${t.stRunning}</span>`
   if (st.lastError) return `<span class="badge err" title="${st.lastError.replace(/"/g, '&quot;')}">${t.stError}</span>`
+  if (st.publicationPending) return `<span class="badge wait">${t.stPublishing}</span>`
   if (s.autoDownload === false) return `<span class="badge off">${t.stManual}</span>`
   if (st.configStale) return `<span class="badge stale">${t.stConfigChanged}</span>`
   if (st.publicationLate) return `<span class="badge stale">${t.stLate}</span>`
@@ -368,6 +373,7 @@ function sourceStatusLine(s) {
   let line = st.lastRun ? `${t.lastRun}: ${st.lastRun}` : t.stNoData
   if (st.publicationLate) line += ` — ${t.expected}: ${st.expectedRun}`
   else if (st.pendingRun) line += ` — ${t.expected}: ${st.pendingRun}`
+  if (st.catalogue) line += ` · <a href="${st.catalogue.href}" target="_blank" rel="noopener">${t.stPublished}</a>`
   return line
 }
 
@@ -523,8 +529,9 @@ document.getElementById('btn-save').addEventListener('click', async () => {
       throw new Error(body.error || `HTTP ${r.status}`)
     }
     for (const name of pendingDataDeletions) {
-      try { await fetch(`${API}/source-data/${encodeURIComponent(name)}`, { method: 'DELETE' }) }
-      catch (e) { console.error('data deletion failed for', name, e) }
+      const deletion = await fetch(`${API}/source-data/${encodeURIComponent(name)}`, { method: 'DELETE' })
+      if (!deletion.ok) throw new Error((await deletion.json()).error || `HTTP ${deletion.status}`)
+      pendingDataDeletions.delete(name)
     }
     pendingDataDeletions.clear()
     dirty = false
@@ -583,6 +590,9 @@ async function pollStatus() {
     }
     const data = await r.json()
     schedulerError = data.schedulerError || null
+    if (data.catalogueAccess?.state === 'pending') schedulerError = t.cataloguePending
+    else if (data.catalogueAccess?.state === 'denied') schedulerError = t.catalogueDenied
+    else if (data.catalogueAccess?.state === 'error') schedulerError = data.catalogueAccess.message
     if (data.checkIntervalMinutes) config.checkIntervalMinutes = data.checkIntervalMinutes
     internetState = data.internetState || 'unknown'
     nextAutoTickAt = data.nextAutoTickAt || null

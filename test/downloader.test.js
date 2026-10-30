@@ -1,459 +1,115 @@
 'use strict'
-
 const { test } = require('node:test')
-const assert = require('node:assert')
-const fs = require('fs')
-const os = require('os')
-const path = require('path')
-const http = require('http')
-const { Writable } = require('stream')
+const assert = require('node:assert/strict')
+const { toDownloadSource, planRun, readAsset, runAvailable, loadBz2 } = require('../dist/downloader')
+const { GribStreamValidator } = require('../dist/grib-stream')
+const { fetchFingerprint, fingerprintsEqual } = require('../dist/scheduler')
+const { server, grib } = require('./fixtures/http.cjs')
+const run = new Date('2026-10-21T06:00:00Z')
+const collect = async iterable => { const chunks = []; for await (const chunk of iterable) chunks.push(chunk); return Buffer.concat(chunks) }
 
-const {
-  toDownloadSource,
-  fetchSource,
-  latestCompleteStamp,
-  fetchFingerprint,
-  fingerprintsEqual,
-  loadBz2,
-} = require('../dist/downloader.js')
-const { sourceDirName } = require('../dist/scheduler.js')
+test('source descriptors contain acquisition parameters and no filesystem directory', () => {
+  const source = toDownloadSource({ model: 'gfs', hours: 6 }, { latMin: 35, lonMin: -6, latMax: 45, lonMax: 17 })
+  assert.equal(source.directory, undefined)
+  assert.deepEqual(source.steps, { from: 0, to: 6, by: 3 })
+  assert.deepEqual(source.bbox, [35, -6, 45, 17])
+})
 
-// ── Local HTTP test server ──────────────────────────────────────────────────
-// Serves deterministic bytes per request so the fetchers can be exercised
-// without any live upstream. Records the request log so tests can assert
-// probe + GET behaviour (retries, ordering, subsetting params).
-function startServer(handler) {
-  const log = []
-  const server = http.createServer((req, res) => {
-    log.push({ method: req.method, url: req.url })
-    try {
-      handler(req, res)
-    } catch (e) {
-      res.statusCode = 500
-      res.end(String(e))
+test('GFS plans stable asset IDs, the last-step probe, subsetting and 850 hPa fields', () => {
+  const source = toDownloadSource({ model: 'gfs', resolution: '0p25', hours: 6 }, { latMin: 35, lonMin: -6, latMax: 45, lonMax: 17 })
+  const plan = planRun(source, run)
+  assert.equal(plan.stamp, '20261021T06'); assert.equal(plan.assets.length, 3)
+  assert.match(plan.probe, /f006.idx$/)
+  assert.equal(plan.assets[0].id, 'gfs-0p25__20261021T06__f000_grb2')
+  assert.match(plan.assets[0].urls[0], /leftlon=-6/)
+  assert.match(plan.assets[0].urls[0], /lev_850_mb=on/)
+  assert.match(plan.assets[0].urls[0], /filter_gfs_0p25/)
+})
+for (const [model, resolution] of [['arome', '0025'], ['arpege', '01']]) {
+  test(`${model} plans all selected SP1 groups with no unexpanded URL placeholder`, () => {
+    const source = toDownloadSource({ model, resolution, hours: 18 })
+    const plan = planRun(source, run)
+    assert.equal(plan.assets.length, source.groups.length)
+    for (const asset of plan.assets) {
+      assert.equal((asset.urls[0].match(/SP1/g) || []).length, 2)
+      assert.ok(!/[{}]/.test(asset.urls[0]))
+      assert.match(asset.urls[0], /2026-10-21T06:00:00Z/)
     }
   })
-  return new Promise((resolve, reject) => {
-    server.listen(0, '127.0.0.1', () => {
-      const base = `http://127.0.0.1:${server.address().port}`
-      // closeAllConnections: a stalled/dangling request can never hang the suite.
-      const close = () => new Promise((r) => { server.closeAllConnections(); server.close(() => r()) })
-      resolve({ base, log, close })
-    })
-    server.on('error', reject)
-  })
 }
 
-// Payload builder: N bytes of predictable content so tests can assert sizes.
-function payload(n, seed = 1) {
-  const b = Buffer.alloc(n)
-  for (let i = 0; i < n; i++) b[i] = (i * seed) & 0xff
-  return b
-}
-
-// Source data lives in <gribsRoot>/<name>; the fetcher creates that subdir.
-function srcDir(gribsRoot, setting) {
-  return path.join(gribsRoot, sourceDirName(setting))
-}
-
-// Poll `cond` until truthy or `timeoutMs` elapses; resolves to the last result.
-async function waitFor(cond, timeoutMs = 5000, stepMs = 10) {
-  const start = Date.now()
-  while (!cond() && Date.now() - start < timeoutMs) {
-    await new Promise((r) => setTimeout(r, stepMs))
-  }
-  return cond()
-}
-
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
-
-let tmpdir
-
-test.before(async () => {
-  tmpdir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'grib-dl-'))
+test('fetch fingerprints preserve legacy compatibility and change with area or requested fields', () => {
+  const source = { model: 'gfs', hours: 6 }, box = { latMin: 35, lonMin: -6, latMax: 45, lonMax: 17 }
+  const fp = fetchFingerprint(source, box)
+  assert.ok(fingerprintsEqual(fp, toDownloadSource(source, box).fingerprint))
+  assert.ok(!fingerprintsEqual(fp, fetchFingerprint(source, { ...box, latMax: 46 })))
+  assert.ok(JSON.stringify(fp).includes('850_mb'))
+  assert.ok(JSON.stringify(fp).includes('UGRD'))
+  assert.ok(!fingerprintsEqual(fp, { resolution: '0p25', steps: { from: 0, to: 6, by: 3 }, bbox: [35, -6, 45, 17] }))
 })
 
-// ── Fingerprint parity ──────────────────────────────────────────────────────
-
-test('fingerprint is order-independent across the parameter object', () => {
-  // The fingerprint normalizes object keys to a canonical sorted order, so
-  // two equivalent parameter sets compare equal regardless of insertion order.
-  const a = fetchFingerprint({ model: 'gfs', resolution: '0p25', hours: 24 },
-    { latMin: 35, lonMin: -6, latMax: 45, lonMax: 17 })
-  // Re-fetching the same settings yields the same fingerprint.
-  const b = fetchFingerprint({ model: 'gfs', resolution: '0p25', hours: 24 },
-    { latMin: 35, lonMin: -6, latMax: 45, lonMax: 17 })
-  assert.ok(fingerprintsEqual(a, b))
-})
-
-test('fingerprint changes when the download area changes', () => {
-  const a = fetchFingerprint({ model: 'gfs', hours: 24 },
-    { latMin: 35, lonMin: -6, latMax: 45, lonMax: 17 })
-  const b = fetchFingerprint({ model: 'gfs', hours: 24 },
-    { latMin: 36, lonMin: -6, latMax: 45, lonMax: 17 })
-  assert.ok(!fingerprintsEqual(a, b))
-})
-
-test('toDownloadSource resolves the directory under the local gribsRoot', () => {
-  const ds = toDownloadSource(
-    { model: 'gfs', resolution: '0p25', hours: 24 },
-    '/var/gribs',
-    { latMin: 35, lonMin: -6, latMax: 45, lonMax: 17 }
-  )
-  assert.strictEqual(ds.name, 'gfs-0p25')
-  assert.strictEqual(ds.directory, '/var/gribs/gfs-0p25')
-  assert.deepStrictEqual(ds.bbox, [35, -6, 45, 17])
-  assert.deepStrictEqual(ds.steps, { from: 0, to: 24, by: 3 })
-  assert.strictEqual(ds.archiveRuns, 0)
-})
-
-// ── Marker round-trip ───────────────────────────────────────────────────────
-
-test('latestCompleteStamp reads back a written run marker', () => {
-  const dir = path.join(tmpdir, 'marker-rt')
-  fs.mkdirSync(dir, { recursive: true })
-  const fp = fetchFingerprint({ model: 'gfs', hours: 24 }, { latMin: 35, lonMin: -6, latMax: 45, lonMax: 17 })
-  fs.writeFileSync(path.join(dir, '.run-20260101T00.complete'), JSON.stringify({ params: fp }))
-  assert.strictEqual(latestCompleteStamp(dir), '20260101T00')
-})
-
-// ── GFS smoke test (probe + subset download + marker) ───────────────────────
-
-test('gfs: downloads one file per step, writes a marker, reports downloaded', async () => {
-  const root = path.join(tmpdir, 'gfs-run')
-  const setting = { model: 'gfs', resolution: '0p25', hours: 6 }     // steps 0,3,6
-  const srv = await startServer((req, res) => {
-    if (req.url.endsWith('.idx')) { res.end('idx\n'); return }       // probe
-    res.end(payload(16, 7))                                           // grib_filter CGI
-  })
-
-  const ds = toDownloadSource(setting, root, { latMin: 35, lonMin: -6, latMax: 45, lonMax: 17 })
-  ds.base = srv.base
-  const log = []
-  const outcome = await fetchSource(ds, (m) => log.push(m))
-
-  assert.strictEqual(outcome, 'downloaded')
-  const dir = srcDir(root, setting)
-  const files = fs.readdirSync(dir).filter(f => f.endsWith('.grb2'))
-  assert.strictEqual(files.length, 3)                                // f000, f003, f006
-  assert.ok(srv.log.some(e => e.method === 'HEAD' && e.url.endsWith('.idx')), 'probed the .idx')
-  assert.ok(srv.log.some(e => e.url.includes('leftlon=-6') && e.url.includes('toplat=45')), 'bbox subset params sent')
-  assert.ok(srv.log.some(e => e.url.includes('lev_850_mb=on')), '850 mb level requested (front-detection fields: TMP/UGRD/VGRD @ 850)')
-  assert.ok(latestCompleteStamp(dir) !== null, 'marker written')
-  await srv.close()
-})
-
-// The fingerprint drives the up-to-date check: a run fetched before the 850 mb
-// level joined the defaults carries a marker without variables/levels and must
-// re-fetch rather than report up-to-date.
-test('gfs: fingerprint includes the resolved variables and levels', async () => {
-  const setting = { model: 'gfs', resolution: '0p25', hours: 6 }
-  const bbox = { latMin: 35, lonMin: -6, latMax: 45, lonMax: 17 }
-  const fp = fetchFingerprint(setting, bbox)
-  assert.ok(JSON.stringify(fp).includes('850_mb'), '850 mb level in the fingerprint')
-  assert.ok(JSON.stringify(fp).includes('UGRD'), 'variables in the fingerprint')
-  // A pre-850 marker fingerprint (no variables/levels keys) never matches.
-  const legacy = { resolution: '0p25', steps: { from: 0, to: 6, by: 3 }, bbox: [35, -6, 45, 17] }
-  assert.ok(!fingerprintsEqual(legacy, fp), 'legacy marker without variables/levels is stale')
-})
-
-// ── Météo-France smoke test (AROME: packages × groups) ───────────────────────
-
-test('arome: downloads each package×group, writes a marker', async () => {
-  const root = path.join(tmpdir, 'arome-run')
-  const setting = { model: 'arome', resolution: '0025', hours: 18 }  // 3 groups
-  const srv = await startServer((req, res) => {
-    // Assert the requested path has no unreplaced placeholders
-    assert.ok(!req.url.includes('{d}') && !req.url.includes('{p}') && !req.url.includes('{g}'),
-      `URL contains unreplaced placeholders: ${req.url}`)
-    // SP1 should appear in both the directory and filename
-    const sp1Count = (req.url.match(/SP1/g) || []).length
-    assert.strictEqual(sp1Count, 2, `SP1 should appear twice in URL, found ${sp1Count}: ${req.url}`)
-    if (req.method === 'HEAD') { res.end(); return }                 // probe
-    res.end(payload(32, 3))
-  })
-
-  const ds = toDownloadSource(setting, root)
-  ds.base = srv.base
-  const outcome = await fetchSource(ds, () => {})
-
-  assert.strictEqual(outcome, 'downloaded')
-  const dir = srcDir(root, setting)
-  const files = fs.readdirSync(dir).filter(f => f.endsWith('.grb2'))
-  assert.strictEqual(files.length, 3)                                // 3 groups × 1 package
-  assert.ok(latestCompleteStamp(dir) !== null, 'marker written')
-  await srv.close()
-})
-
-// ── ICON-EU smoke test (bz2 decompress + concat per step) ───────────────────
-
-test('icon-eu: decompresses bz2 fragments and concatenates per step', async () => {
-  const root = path.join(tmpdir, 'icon-run')
-  const setting = { model: 'icon-eu', hours: 0 }                     // step f000 only
-  // Real bzip2 streams so the wasm decompressor path is exercised end-to-end.
-  // loadBz2() pre-feeds the wasm binary, dodging the package's Windows path
-  // resolution bug — the very path under test.
-  const bz2 = await loadBz2()
-  const gribA = payload(64, 11)
-  const gribB = payload(64, 23)
-  const compA = Buffer.from(bz2.compress(gribA, 5, gribA.length + 1024))
-  const compB = Buffer.from(bz2.compress(gribB, 5, gribB.length + 1024))
-
-  const srv = await startServer((req, res) => {
-    if (req.method === 'HEAD') { res.end(); return }                 // probe
-    res.end(req.url.includes('t_2m') ? compA : compB)
-  })
-
-  const ds = toDownloadSource(setting, root)
-  ds.variables = ['t_2m', 'u_10m']                                  // 2 vars
-  ds.base = srv.base
-  const outcome = await fetchSource(ds, () => {})
-
-  assert.strictEqual(outcome, 'downloaded')
-  const dir = srcDir(root, setting)
-  const files = fs.readdirSync(dir).filter(f => f.endsWith('.grb2'))
-  assert.strictEqual(files.length, 1)
-  const out = fs.readFileSync(path.join(dir, files[0]))
-  assert.strictEqual(out.length, gribA.length + gribB.length)
-  assert.ok(out.equals(Buffer.concat([gribA, gribB])), 'concatenated GRIB matches')
-  assert.ok(latestCompleteStamp(dir) !== null, 'marker written')
-  await srv.close()
-})
-
-// ── up-to-date path: existing marker with matching fingerprint ───────────────
-
-test('gfs: reports up-to-date when the latest marker matches the settings', async () => {
-  const root = path.join(tmpdir, 'gfs-uptodate')
-  const setting = { model: 'gfs', resolution: '0p25', hours: 6 }
-  const dir = srcDir(root, setting)
-  fs.mkdirSync(dir, { recursive: true })
-  const srv = await startServer((req, res) => { res.end(payload(16)) })
-
-  const fp = fetchFingerprint(setting, { latMin: 35, lonMin: -6, latMax: 45, lonMax: 17 })
-  // Write markers for every recent 6h cycle stamp (newest-first) so the
-  // fetcher's newest candidate — computed with its own Date.now() — matches
-  // a written marker and reports up-to-date instead of downloading.
-  const now = new Date(Date.now() - 3.5 * 3_600_000)
-  now.setUTCMinutes(0, 0, 0)
-  const cycleH = Math.floor(now.getUTCHours() / 6) * 6
-  for (let i = 0; i < 4; i++) {
-    const t = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), cycleH, 0, 0))
-    t.setUTCHours(cycleH - 6 * i)
-    const stamp = `${t.getUTCFullYear()}${String(t.getUTCMonth() + 1).padStart(2, '0')}${String(t.getUTCDate()).padStart(2, '0')}T${String(t.getUTCHours()).padStart(2, '0')}`
-    fs.writeFileSync(path.join(dir, `.run-${stamp}.complete`), JSON.stringify({ params: fp }))
-  }
-
-  const ds = toDownloadSource(setting, root, { latMin: 35, lonMin: -6, latMax: 45, lonMax: 17 })
-  ds.base = srv.base
-  const outcome = await fetchSource(ds, () => {})
-
-  assert.strictEqual(outcome, 'up-to-date')
-  assert.strictEqual(srv.log.length, 0, 'no HTTP calls for an up-to-date run')
-  await srv.close()
-})
-
-// ── unavailable path: probe fails for every candidate ────────────────────────
-
-test('gfs: reports unavailable when no run is published yet', async () => {
-  const root = path.join(tmpdir, 'gfs-unavail')
-  const setting = { model: 'gfs', resolution: '0p25', hours: 6 }
-  const srv = await startServer((req, res) => { res.statusCode = 404; res.end() })
-
-  const ds = toDownloadSource(setting, root, { latMin: 35, lonMin: -6, latMax: 45, lonMax: 17 })
-  ds.base = srv.base
-  const outcome = await fetchSource(ds, () => {})
-
-  assert.strictEqual(outcome, 'unavailable')
-  await srv.close()
-})
-
-// ── failed path: a step download fails ───────────────────────────────────────
-
-test('gfs: reports failed when a step download returns 500', async () => {
-  const root = path.join(tmpdir, 'gfs-fail')
-  const setting = { model: 'gfs', resolution: '0p25', hours: 6 }
-  const srv = await startServer((req, res) => {
-    if (req.url.endsWith('.idx')) { res.end('idx\n'); return }
-    res.statusCode = 500
-    res.end()
-  })
-
-  const ds = toDownloadSource(setting, root, { latMin: 35, lonMin: -6, latMax: 45, lonMax: 17 })
-  ds.base = srv.base
-  const outcome = await fetchSource(ds, () => {})
-
-  assert.strictEqual(outcome, 'failed')
-  assert.strictEqual(latestCompleteStamp(srcDir(root, setting)), null, 'no marker for a failed run')
-  await srv.close()
-})
-
-// ── cleanup / archive rotation ──────────────────────────────────────────────
-
-test('cleanup archives older runs when archiveRuns > 0 and purges leftovers', async () => {
-  const root = path.join(tmpdir, 'cleanup')
-  const setting = { model: 'gfs', resolution: '0p25', hours: 0, archiveRuns: 2 }
-  const dir = srcDir(root, setting)
-  fs.mkdirSync(dir, { recursive: true })
-  // Two complete runs + one leftover of an interrupted run (all older than
-  // whatever the fetcher will download next, so they get archived/purged).
-  fs.writeFileSync(path.join(dir, '.run-20260101T00.complete'), '{"params":1}')
-  fs.writeFileSync(path.join(dir, '.run-20260101T06.complete'), '{"params":1}')
-  fs.writeFileSync(path.join(dir, 'gfs-0p25__20260101T00__f000.grb2'), payload(8))
-  fs.writeFileSync(path.join(dir, 'gfs-0p25__20260101T06__f000.grb2'), payload(8))
-  fs.writeFileSync(path.join(dir, 'gfs-0p25__20260101T03__f000.grb2'), payload(8)) // leftover, no marker
-
-  const srv = await startServer((req, res) => {
-    if (req.url.endsWith('.idx')) { res.end('idx\n'); return }
-    res.end(payload(16))
-  })
-  const ds = toDownloadSource(setting, root, { latMin: 35, lonMin: -6, latMax: 45, lonMax: 17 })
-  ds.base = srv.base
-  await fetchSource(ds, () => {})
-  await srv.close()
-
-  const files = fs.readdirSync(dir)
-  assert.ok(files.some(f => f.startsWith('.run-')), 'a marker exists')
-  assert.ok(!files.includes('gfs-0p25__20260101T03__f000.grb2'), 'leftover purged')
-  const archive = path.join(dir, 'archive')
-  assert.ok(fs.existsSync(archive), 'archive dir created')
-  assert.ok(fs.readdirSync(archive).some(f => f.includes('20260101T00')), 'older run archived')
-})
-
-test('cleanup deletes older runs when archiveRuns is 0', async () => {
-  const root = path.join(tmpdir, 'cleanup-nodarchive')
-  const setting = { model: 'gfs', resolution: '0p25', hours: 0, archiveRuns: 0 }
-  const dir = srcDir(root, setting)
-  fs.mkdirSync(dir, { recursive: true })
-  fs.writeFileSync(path.join(dir, '.run-20260101T00.complete'), '{"params":1}')
-  fs.writeFileSync(path.join(dir, 'gfs-0p25__20260101T00__f000.grb2'), payload(8))
-
-  const srv = await startServer((req, res) => {
-    if (req.url.endsWith('.idx')) { res.end('idx\n'); return }
-    res.end(payload(16))
-  })
-  const ds = toDownloadSource(setting, root, { latMin: 35, lonMin: -6, latMax: 45, lonMax: 17 })
-  ds.base = srv.base
-  await fetchSource(ds, () => {})
-  await srv.close()
-
-  const files = fs.readdirSync(dir)
-  assert.ok(!files.includes('gfs-0p25__20260101T00__f000.grb2'), 'older run deleted (no archive)')
-  assert.ok(!fs.existsSync(path.join(dir, 'archive')), 'no archive dir when archiveRuns=0')
-})
-
-// ── cancellation: aborting the run cancels the in-flight download ───────────
-
-test('gfs: aborting the signal cancels the in-flight download without retries', async () => {
-  const root = path.join(tmpdir, 'gfs-abort')
-  const setting = { model: 'gfs', resolution: '0p25', hours: 0 }   // single step f000
-  // The GET response emits one chunk, then stalls forever. A download that
-  // ignores the abort signal would never finish on its own.
-  let responseClosed = false
-  const srv = await startServer((req, res) => {
-    if (req.url.endsWith('.idx')) { res.end('idx\n'); return }       // probe
+test('direct read yields data before upstream EOF and applies downstream backpressure', async t => {
+  let finish
+  const first = grib(1024 * 1024)
+  const upstream = await server(t, (_req, res) => {
     res.writeHead(200)
-    res.write(payload(4096))
-    res.on('close', () => { responseClosed = true })
+    res.write(first.subarray(0, 4096))
+    finish = () => res.end(first.subarray(4096))
   })
-
-  const ds = toDownloadSource(setting, root, { latMin: 35, lonMin: -6, latMax: 45, lonMax: 17 })
-  ds.base = srv.base
   const controller = new AbortController()
-  const log = []
-
-  // Guard: fail the test instead of hanging if the abort does not propagate.
-  let settled = false
-  const done = Promise.race([
-    sleep(10_000).then(() => ' hung — abort did not propagate'),
-    fetchSource(ds, (m) => log.push(m), controller.signal).then((o) => { settled = true; return ` ${o}` }),
-  ])
-  await waitFor(() => srv.log.some(e => e.method === 'GET'))        // download started
-  controller.abort(new Error('test cancel'))
-  const outcome = await done
-
-  assert.ok(settled, `fetchSource resolved promptly:${outcome}`)
-  assert.strictEqual(outcome.trim(), 'failed')
-  assert.ok(log.some(m => m.includes('failed')), 'failure is logged')
-  // No retry after the caller aborted — the aborted GET is the last request.
-  assert.strictEqual(srv.log.filter(e => e.method === 'GET').length, 1)
-  // The stalled connection was actively torn down by the client.
-  assert.ok(await waitFor(() => responseClosed), 'server saw the aborted connection close')
-  const dir = srcDir(root, setting)
-  assert.strictEqual(fs.readdirSync(dir).filter(f => f.endsWith('.part')).length, 0, 'no .part leftover')
-  assert.strictEqual(latestCompleteStamp(dir), null, 'no marker written')
-  await srv.close()
+  t.after(() => controller.abort())
+  const reader = readAsset({ id: 'asset', urls: [upstream.base] }, controller.signal)
+  const chunk = await reader.next()
+  assert.ok(!chunk.done && chunk.value.length >= 16, 'consumer receives chunks while response is open')
+  finish()
+  assert.deepEqual(Buffer.concat([chunk.value, await collect(reader)]), first)
 })
 
-// ── backpressure: a slow disk write paces the network read ─────────────────
+test('ICON-EU decompresses one variable at a time and concatenates directly into an asset', async t => {
+  const bz2 = await loadBz2(), a = grib(64, 11), b = grib(80, 23)
+  const compA = Buffer.from(bz2.compress(a, 5, a.length + 1024)), compB = Buffer.from(bz2.compress(b, 5, b.length + 1024))
+  const upstream = await server(t, (req, res) => { if (req.method === 'HEAD') return res.end(); res.end(req.url.includes('t_2m') ? compA : compB) })
+  const source = toDownloadSource({ model: 'icon-eu', hours: 0 })
+  source.variables = ['t_2m', 'u_10m']; source.base = upstream.base
+  const plan = planRun(source, run)
+  assert.equal(plan.assets.length, 1); assert.equal(plan.assets[0].urls.length, 2)
+  assert.equal(await runAvailable(plan), true)
+  assert.deepEqual(await collect(readAsset(plan.assets[0], new AbortController().signal)), Buffer.concat([a,b]))
+})
 
-test('gfs: honours write-stream backpressure instead of buffering the body', async () => {
-  const root = path.join(tmpdir, 'gfs-backpressure')
-  const setting = { model: 'gfs', resolution: '0p25', hours: 0 }     // single step f000
-  const chunk = payload(4096, 5)
-  const total = 256 * 1024                                           // 64 chunks
-  // Server-side pump with its own backpressure handling.
-  const srv = await startServer((req, res) => {
-    if (req.url.endsWith('.idx')) { res.end('idx\n'); return }
-    res.writeHead(200)
-    let sent = 0
-    const pump = () => {
-      while (sent < total) {
-        sent += chunk.length
-        if (!res.write(chunk)) { res.once('drain', pump); return }
-      }
-      res.end()
-    }
-    pump()
+test('transport-level upstream truncation propagates and a 200 HTML body is rejected', async t => {
+  const upstream = await server(t, (req, res) => {
+    if (req.url === '/truncated') { res.writeHead(200, { 'Content-Length': 128 }); res.write(grib().subarray(0, 20)); return setImmediate(() => res.destroy()) }
+    res.end('<html>upstream service unavailable</html>')
   })
+  for (const suffix of ['/truncated', '/html']) await assert.rejects(collect(readAsset({ id: 'asset', urls: [upstream.base + suffix] }, new AbortController().signal)))
+})
 
-  // Replace the .part WriteStream with a slow one (2 ms per write, tiny
-  // high-water mark) so write() returns false immediately. If the downloader
-  // ignores backpressure, writes pile up ahead of 'drain' events and the
-  // whole body would be buffered in the stream's internal queue.
-  const events = []
-  const realCreateWriteStream = fs.createWriteStream
-  fs.createWriteStream = (p) => {
-    fs.writeFileSync(p, Buffer.alloc(0))
-    const slow = new Writable({
-      highWaterMark: 16,
-      write(buf, _enc, cb) {
-        fs.appendFileSync(p, buf)                                    // real .part data
-        setTimeout(cb, 2)
-      },
-    })
-    const origWrite = slow.write.bind(slow)
-    slow.write = (buf, ...rest) => {
-      const ok = origWrite(buf, ...rest)
-      events.push(ok ? 'write' : 'write-false')
-      return ok
-    }
-    slow.on('drain', () => events.push('drain'))
-    return slow
-  }
+test('missing upstream runs remain unavailable and cancellation is never swallowed', async t => {
+  const upstream = await server(t, (_req, res) => { res.writeHead(404); res.end() })
+  assert.equal(await runAvailable({ probe: upstream.base }), false)
+  const controller = new AbortController(); controller.abort(new Error('cancelled'))
+  await assert.rejects(runAvailable({ probe: upstream.base }, controller.signal), /cancelled/)
+})
 
-  try {
-    const ds = toDownloadSource(setting, root, { latMin: 35, lonMin: -6, latMax: 45, lonMax: 17 })
-    ds.base = srv.base
-    const outcome = await fetchSource(ds, () => {})
-    assert.strictEqual(outcome, 'downloaded')
-  } finally {
-    fs.createWriteStream = realCreateWriteStream
-    await srv.close()
-  }
+test('an upstream server error is reported rather than pretending no run exists', async t => {
+  const upstream = await server(t, (_req, res) => { res.writeHead(503); res.end() })
+  await assert.rejects(runAvailable({ probe: upstream.base }), /503/)
+})
 
-  assert.ok(events.includes('write-false'), 'backpressure actually occurred')
-  for (let i = 0; i < events.length; i++) {
-    if (events[i] !== 'write-false') continue
-    const next = events[i + 1]
-    assert.ok(next === 'drain' || next === undefined,
-      `write() returning false must be followed by drain, got ${next}`)
+test('GRIB framing accepts split headers, split footers and multiple messages', () => {
+  const bytes = Buffer.concat([grib(65), grib(129)])
+  for (const step of [1, 3, 16, 64, 4096]) {
+    const validator = new GribStreamValidator()
+    for (let n = 0; n < bytes.length; n += step) validator.push(bytes.subarray(n, n + step))
+    validator.finish()
   }
-  // Throttling must not corrupt the download: full payload, no leftovers.
-  const dir = srcDir(root, setting)
-  const files = fs.readdirSync(dir).filter(f => f.endsWith('.grb2'))
-  assert.strictEqual(files.length, 1)
-  const expected = Buffer.alloc(total)
-  for (let off = 0; off < total; off += chunk.length) chunk.copy(expected, off)
-  assert.ok(expected.equals(fs.readFileSync(path.join(dir, files[0]))), 'file matches the served payload')
-  assert.ok(latestCompleteStamp(dir) !== null, 'marker written')
+})
+
+test('GRIB framing rejects empty, truncated, trailing, invalid-length and invalid-footer content', () => {
+  const badLength = grib(); badLength.writeBigUInt64BE(19n, 8)
+  const badFooter = grib(); badFooter.write('oops', badFooter.length - 4)
+  for (const bytes of [Buffer.alloc(0), grib().subarray(0, 70), Buffer.concat([grib(), Buffer.from('trailing')]), badLength, badFooter]) {
+    assert.throws(() => { const validator = new GribStreamValidator(); validator.push(bytes); validator.finish() })
+  }
 })
