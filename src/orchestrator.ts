@@ -34,7 +34,8 @@ export class Orchestrator {
     private gribsRoot: string,    // local path where source subdirs live
     private log: (msg: string) => void,
     private onChange: () => void, // notify status updates
-    private bbox?: Bbox
+    private bbox?: Bbox,
+    private opencpnExportRoot?: string
   ) {
     for (const s of sources) {
       this.states.set(sourceDirName(s), {
@@ -161,7 +162,7 @@ export class Orchestrator {
     this.onChange()
     this.log(`${name}: starting download`)
 
-    const ds = toDownloadSource(source, this.gribsRoot, this.bbox)
+    const ds = toDownloadSource(source, this.gribsRoot, this.bbox, this.opencpnExportRoot)
     const onProgress = (line: string) => {
       st.lastLog.push(line)
       if (st.lastLog.length > LOG_TAIL) st.lastLog.shift()

@@ -9,6 +9,7 @@ export interface SourceSetting {
   hours?: number        // forecast duration to download (capped per model)
   archiveRuns?: number  // past runs kept in <source>/archive/ (0 = none, no upper limit)
   autoDownload?: boolean // default true: include this source in automatic checks
+  includeWaves?: boolean // GFS 0.25 only: add GFS-Wave fields and create an OpenCPN run bundle
   enabled?: boolean      // legacy: false migrates to autoDownload false
 }
 
@@ -30,6 +31,7 @@ export type InternetState = 'online' | 'offline' | 'metered' | 'captive' | 'unkn
 // Infrastructure settings — managed in the SignalK plugin config panel.
 export interface PluginSettings {
   gribsRoot?: string                 // local path where source subdirs live
+  opencpnExportRoot?: string         // separate root for complete-run OpenCPN GRIB2 bundles
   checkIntervalMinutes?: number      // optional override of every model's probe interval
   meteredIntervalMultiplier?: number // auto waits stretch by this factor when metered
 }

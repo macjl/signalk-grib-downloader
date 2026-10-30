@@ -143,6 +143,155 @@ test('gfs: downloads one file per step, writes a marker, reports downloaded', as
   await srv.close()
 })
 
+test('gfs waves: combines every step and atomically publishes a complete OpenCPN run', async () => {
+  const root = path.join(tmpdir, 'gfs-wave-run')
+  const exportRoot = path.join(tmpdir, 'opencpn-exports')
+  const setting = { model: 'gfs', resolution: '0p25', hours: 6, includeWaves: true }
+  const atmosPayload = Buffer.from('ATMOSPHERE')
+  const wavePayload = Buffer.from('WAVES')
+  const srv = await startServer((req, res) => {
+    if (req.method === 'HEAD') { res.end('idx\n'); return }
+    res.end(req.url.includes('filter_gfswave.pl') ? wavePayload : atmosPayload)
+  })
+
+  const ds = toDownloadSource(
+    setting,
+    root,
+    { latMin: 11, lonMin: -62, latMax: 13, lonMax: -60 },
+    exportRoot
+  )
+  ds.base = srv.base
+  const outcome = await fetchSource(ds, () => {})
+
+  assert.strictEqual(outcome, 'downloaded')
+  const dir = srcDir(root, setting)
+  const stepFiles = fs.readdirSync(dir).filter(f => f.endsWith('.grb2')).sort()
+  assert.strictEqual(stepFiles.length, 3)
+  const expectedStep = Buffer.concat([atmosPayload, wavePayload])
+  for (const file of stepFiles) {
+    assert.ok(fs.readFileSync(path.join(dir, file)).equals(expectedStep), `${file} contains atmosphere then waves`)
+  }
+  assert.strictEqual(fs.readdirSync(dir).filter(f => /\.(atmos|wave|part)$/.test(f)).length, 0, 'no component or partial files remain')
+  const exportDir = path.join(exportRoot, 'gfs-0p25')
+  const bundles = fs.readdirSync(exportDir).filter(f => f.endsWith('__complete.grb2'))
+  assert.strictEqual(bundles.length, 1)
+  assert.ok(fs.readFileSync(path.join(exportDir, bundles[0])).equals(Buffer.concat([expectedStep, expectedStep, expectedStep])))
+  assert.strictEqual(fs.readdirSync(exportDir).filter(f => f.endsWith('.part')).length, 0, 'bundle is atomically published')
+  assert.ok(srv.log.some(e => e.method === 'HEAD' && e.url.includes('/wave/gridded/')), 'wave publication is probed')
+  const waveRequests = srv.log.filter(e => e.method === 'GET' && e.url.includes('filter_gfswave.pl'))
+  assert.strictEqual(waveRequests.length, 3)
+  assert.ok(waveRequests.every(e => e.url.includes('var_HTSGW=on') && e.url.includes('var_WVDIR=on') && e.url.includes('var_WVPER=on')))
+  assert.ok(waveRequests.every(e => e.url.includes('leftlon=-62') && e.url.includes('toplat=13')), 'wave request uses the same bbox')
+  assert.ok(latestCompleteStamp(dir) !== null, 'marker is written only after bundle publication')
+
+  const bundlePath = path.join(exportDir, bundles[0])
+  fs.unlinkSync(bundlePath)
+  const getCount = srv.log.filter(e => e.method === 'GET').length
+  const recoveryLog = []
+  assert.strictEqual(await fetchSource(ds, line => recoveryLog.push(line)), 'downloaded')
+  assert.ok(recoveryLog.some(line => line.includes('bundle missing')), 'missing export is detected')
+  assert.ok(fs.existsSync(bundlePath), 'missing export is rebuilt from completed step files')
+  assert.strictEqual(srv.log.filter(e => e.method === 'GET').length, getCount, 'rebuild does not redownload completed steps')
+  await srv.close()
+})
+
+test('gfs waves: rejects resolutions that cannot share the 0.25 degree wave grid', async () => {
+  const root = path.join(tmpdir, 'gfs-wave-wrong-resolution')
+  const setting = { model: 'gfs', resolution: '0p50', hours: 6, includeWaves: true }
+  const ds = toDownloadSource(setting, root, undefined, path.join(tmpdir, 'exports-wrong-resolution'))
+  const logs = []
+  const outcome = await fetchSource(ds, line => logs.push(line))
+  assert.strictEqual(outcome, 'failed')
+  assert.ok(logs.some(line => line.includes('requires GFS 0p25')))
+  assert.strictEqual(latestCompleteStamp(srcDir(root, setting)), null)
+})
+
+test('gfs waves: rejects an export directory that overlaps the provider source', async () => {
+  const root = path.join(tmpdir, 'gfs-wave-overlap')
+  const setting = { model: 'gfs', resolution: '0p25', hours: 6, includeWaves: true }
+  const ds = toDownloadSource(setting, root, undefined, root)
+  const logs = []
+  const outcome = await fetchSource(ds, line => logs.push(line))
+  assert.strictEqual(outcome, 'failed')
+  assert.ok(logs.some(line => line.includes('must be separate')))
+  assert.strictEqual(latestCompleteStamp(srcDir(root, setting)), null)
+})
+
+test('gfs waves: failed same-cycle replacement preserves the previous complete run', async () => {
+  const root = path.join(tmpdir, 'gfs-wave-safe-replacement')
+  const exportRoot = path.join(tmpdir, 'gfs-wave-safe-replacement-export')
+  const plainSetting = { model: 'gfs', resolution: '0p25', hours: 0 }
+  const waveSetting = { ...plainSetting, includeWaves: true }
+  let failWave = false
+  const atmosPayload = Buffer.from('OLD-ATMOSPHERE')
+  const wavePayload = Buffer.from('NEW-WAVES')
+  const srv = await startServer((req, res) => {
+    if (req.method === 'HEAD') { res.end('idx\n'); return }
+    if (req.url.includes('filter_gfswave.pl')) {
+      if (failWave) { res.statusCode = 500; res.end(); return }
+      res.end(wavePayload)
+      return
+    }
+    res.end(atmosPayload)
+  })
+
+  const plain = toDownloadSource(plainSetting, root, { latMin: 11, lonMin: -62, latMax: 13, lonMax: -60 })
+  plain.base = srv.base
+  assert.strictEqual(await fetchSource(plain, () => {}), 'downloaded')
+  const dir = srcDir(root, plainSetting)
+  const stamp = latestCompleteStamp(dir)
+  assert.ok(stamp)
+  const oldStep = path.join(dir, `gfs-0p25__${stamp}__f000.grb2`)
+  const oldMarker = path.join(dir, `.run-${stamp}.complete`)
+  const oldStepBytes = fs.readFileSync(oldStep)
+  const oldMarkerBytes = fs.readFileSync(oldMarker)
+
+  const waves = toDownloadSource(
+    waveSetting,
+    root,
+    { latMin: 11, lonMin: -62, latMax: 13, lonMax: -60 },
+    exportRoot
+  )
+  waves.base = srv.base
+  failWave = true
+  assert.strictEqual(await fetchSource(waves, () => {}), 'failed')
+  assert.ok(fs.readFileSync(oldStep).equals(oldStepBytes), 'old step survives failed replacement byte-for-byte')
+  assert.ok(fs.readFileSync(oldMarker).equals(oldMarkerBytes), 'old completion marker survives failed replacement')
+  assert.strictEqual(latestCompleteStamp(dir), stamp)
+
+  failWave = false
+  assert.strictEqual(await fetchSource(waves, () => {}), 'downloaded')
+  assert.ok(fs.readFileSync(oldStep).equals(Buffer.concat([atmosPayload, wavePayload])), 'successful replacement publishes combined step')
+  assert.ok(JSON.parse(fs.readFileSync(oldMarker, 'utf8')).params.wave_variables.includes('HTSGW'))
+  assert.ok(fs.existsSync(path.join(exportRoot, 'gfs-0p25', `gfs-0p25__${stamp}__complete.grb2`)))
+  assert.strictEqual(fs.readdirSync(dir).filter(file => file.includes('replacement-')).length, 0, 'staging and backup directories are removed')
+
+  const combinedStepBytes = fs.readFileSync(oldStep)
+  const waveMarkerBytes = fs.readFileSync(oldMarker)
+  const changedArea = toDownloadSource(
+    waveSetting,
+    root,
+    { latMin: 10, lonMin: -63, latMax: 14, lonMax: -59 },
+    exportRoot
+  )
+  changedArea.base = srv.base
+  const realRenameSync = fs.renameSync
+  fs.renameSync = (from, to) => {
+    if (String(from).includes('.replacement-staging-') && String(from).endsWith('.grb2') && String(to).endsWith('.grb2')) {
+      throw new Error('simulated commit failure')
+    }
+    return realRenameSync(from, to)
+  }
+  try {
+    assert.strictEqual(await fetchSource(changedArea, () => {}), 'failed')
+  } finally {
+    fs.renameSync = realRenameSync
+  }
+  assert.ok(fs.readFileSync(oldStep).equals(combinedStepBytes), 'commit failure restores the previous combined step')
+  assert.ok(fs.readFileSync(oldMarker).equals(waveMarkerBytes), 'commit failure restores the previous marker')
+  await srv.close()
+})
+
 // The fingerprint drives the up-to-date check: a run fetched before the 850 mb
 // level joined the defaults carries a marker without variables/levels and must
 // re-fetch rather than report up-to-date.
@@ -280,9 +429,14 @@ test('gfs: reports failed when a step download returns 500', async () => {
 
   const ds = toDownloadSource(setting, root, { latMin: 35, lonMin: -6, latMax: 45, lonMax: 17 })
   ds.base = srv.base
-  const outcome = await fetchSource(ds, () => {})
+  const log = []
+  const outcome = await fetchSource(ds, line => log.push(line))
 
   assert.strictEqual(outcome, 'failed')
+  assert.ok(log.some(line => line.includes('step f000 attempt 1/3 failed: Error: HTTP 500 (retrying in 2s)')))
+  assert.ok(log.some(line => line.includes('step f000 attempt 2/3 failed: Error: HTTP 500 (retrying in 4s)')))
+  assert.ok(log.some(line => line.includes('step f000 attempt 3/3 failed: Error: HTTP 500 (no retries left)')))
+  assert.ok(log.some(line => line.includes('failed at step f000 — aborting')))
   assert.strictEqual(latestCompleteStamp(srcDir(root, setting)), null, 'no marker for a failed run')
   await srv.close()
 })

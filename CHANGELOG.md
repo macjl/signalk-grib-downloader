@@ -2,6 +2,30 @@
 
 All notable changes to this project will be documented in this file.
 
+## Unreleased
+
+### Added
+- Optional GFS-Wave integration for GFS 0.25 sources. `HTSGW`, `WVDIR`, and
+  `WVPER` are fetched for the same cycle, forecast steps, and bounding box and
+  appended to the normal per-step GRIB2 files.
+- Atomic complete-run GRIB2 exports for OpenCPN under a separately configurable
+  export root. Missing exports are rebuilt from completed step files, and
+  retention follows the source's archive count.
+- Webapp checkbox and download-volume estimate for the opt-in wave/export mode.
+- Transactional same-cycle GFS replacement: changed fetch parameters are built
+  in a hidden staging directory, then committed with a rollback backup so a
+  failed download or file switch leaves the previous complete run usable.
+
+### Safety
+- Existing sources remain atmosphere-only unless explicitly enabled.
+- The run marker is not published until atmosphere, wave, and export outputs
+  are complete. GFS resolutions other than 0.25 degree and an export directory
+  equal to the provider source directory are rejected.
+
+### Changed
+- Failed HTTP download attempts now report their step/component, attempt count,
+  concrete error, and retry delay in the webapp download log.
+
 ## [0.3.0] - 2026-10-20
 
 ### Added

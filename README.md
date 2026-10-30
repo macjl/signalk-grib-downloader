@@ -103,7 +103,8 @@ not in the plugin config panel:
 - **Download area** drawn on a map (draggable rectangle corners) — applied to
   GFS, the only model with server-side subsetting
 - **Sources**: model, resolution, forecast duration on a slider showing the
-  model maximum, past-runs archive count, enable/disable
+  model maximum, past-runs archive count, enable/disable. GFS 0.25 sources can
+  optionally add GFS-Wave data and publish an OpenCPN run bundle.
 - **Volume estimation** per source and per run, following the area and
   duration live
 - **Status**: per-source badges (up to date / downloading / awaiting
@@ -113,7 +114,54 @@ not in the plugin config panel:
 
 Settings are stored in the plugin's data directory (`settings.json`), written
 only through the webapp — the admin config panel only holds infrastructure
-(the GRIB root directory).
+(the GRIB root directory and the separate OpenCPN export root).
+
+## GFS-Wave and OpenCPN export
+
+For a **GFS 0.25** source, enable **Waves + OpenCPN export** in the webapp to:
+
+1. download `HTSGW`, `WVDIR`, and `WVPER` from the matching GFS-Wave cycle,
+   forecast hour, bounding box, and 0.25-degree grid;
+2. append those messages to each normal atmospheric step file; and
+3. publish all completed steps, in forecast-hour order, as one GRIB2 file:
+   `<OpenCPN export root>/gfs-0p25/gfs-0p25__<run>__complete.grb2`.
+
+The export root defaults to `~/.signalk/gribs-opencpn` and is configurable in
+the Signal K plugin settings. It must stay separate from the normal GRIB root:
+the weather provider should scan only the normal root, not the complete-run
+exports. The downloader rejects an export path that resolves to the provider's
+source directory.
+
+Both the per-step file and the complete-run export are published atomically.
+The run marker is written only after atmosphere, waves, and the OpenCPN bundle
+all succeed. Existing configurations remain atmosphere-only until the option
+is enabled. If a completed run's export is removed, the next check rebuilds it
+from the existing step files without downloading those steps again.
+
+### Test and acceptance boundary
+
+The downloader's automated and live acceptance tests end when a complete-run
+GRIB2 file has been created and validated. Acceptance requires that:
+
+- all requested forecast steps were downloaded and the completion marker was
+  published only after the last successful step;
+- every combined step contains the requested atmospheric and wave messages;
+- the complete-run file was published atomically in forecast-hour order;
+- the result is recognised as GRIB edition 2 and contains the expected fields,
+  forecast times, geographic coverage, and run timestamp; and
+- a failed or interrupted run leaves the previous complete data usable.
+
+Loading, displaying, and using that file in OpenCPN or its Weather Routing
+plugin are downstream manual integration tests. They are useful release
+checks, but they are not part of the downloader's automated acceptance scope
+and do not block completion of a downloader test run.
+
+When enabling waves or otherwise changing GFS fetch parameters for an already
+downloaded model cycle, the replacement is built in a hidden staging directory.
+The old step files and marker remain active until the new steps and optional
+OpenCPN bundle are complete. The commit keeps a temporary backup and restores
+the previous run if switching files fails; an incomplete rollback retains that
+backup for manual recovery instead of deleting it.
 
 ## Data lifecycle
 
@@ -125,6 +173,8 @@ only through the webapp — the admin config panel only holds infrastructure
   upper limit). Leftovers of interrupted runs are purged.
 - Old data is **never deleted while offline**: cleanup only happens when a
   newer run has been fully downloaded.
+- OpenCPN exports follow the source's archive count: the current bundle plus
+  the configured number of past bundles are retained in the export directory.
 
 ## Requirements
 

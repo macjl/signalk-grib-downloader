@@ -148,6 +148,7 @@ export function nextPublishAt(model: ModelId, now: Date = new Date(Date.now()), 
 // re-fetches affected runs instead of leaving them silently stale.
 export const GFS_FETCH_VARS = ['UGRD', 'VGRD', 'GUST', 'TMP', 'PRMSL', 'RH', 'APCP', 'TCDC']
 export const GFS_FETCH_LEVELS = ['10_m_above_ground', '2_m_above_ground', '850_mb', 'surface', 'mean_sea_level', 'entire_atmosphere']
+export const GFS_WAVE_VARS = ['HTSGW', 'WVDIR', 'WVPER']
 
 export function downloaderSourceConfig(s: SourceSetting, dataRoot: string, bbox?: Bbox) {
   const model = s.model
@@ -165,6 +166,7 @@ export function downloaderSourceConfig(s: SourceSetting, dataRoot: string, bbox?
     entry.steps = { from: 0, to: hours, by: 3 }
     entry.variables = GFS_FETCH_VARS
     entry.levels = GFS_FETCH_LEVELS
+    if (s.includeWaves === true) entry.wave_variables = GFS_WAVE_VARS
     if (bbox) entry.bbox = [bbox.latMin, bbox.lonMin, bbox.latMax, bbox.lonMax]
   } else if (model === 'icon-eu') {
     entry.steps = { from: 0, to: hours, by: 3 }
