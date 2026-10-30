@@ -12,7 +12,7 @@ assert.ok(root && path.isAbsolute(root), 'Set SIGNALK_NODE_CONFIG_DIR to the abs
 const name = 'signalk-grib-downloader'
 const installed = path.join(root, 'node_modules', name)
 const { CataloguePublisher } = require(path.join(installed, 'dist/catalogue'))
-assert.equal(require(path.join(installed, 'package.json')).version, '0.4.0-beta.3')
+assert.equal(require(path.join(installed, 'package.json')).version, '0.4.0')
 const endpoint = 'http://127.0.0.1:3000', api = '/plugins/signalk-forecast-dataset-provider'
 const tokenFile = path.join(root, 'plugin-config-data', name, 'catalogue-token')
 const token = fs.readFileSync(tokenFile, 'utf8').trim()
@@ -88,7 +88,7 @@ async function main() {
   assert.deepEqual(Object.keys(await get('/datasets')).sort(), initial)
   assert.deepEqual(Object.keys(await get('/publications')).sort(), initialStages)
   assert.deepEqual(configs(), beforeConfigs)
-  console.log(JSON.stringify({ result: 'PASS', version: '0.4.0-beta.3', streamedRealGrib: true, assets: 2,
+  console.log(JSON.stringify({ result: 'PASS', version: '0.4.0', streamedRealGrib: true, assets: 2,
     unknownTotalWhileReceiving: true, incompleteDatasetHidden: true, retainedCompletedAsset: true,
     resumedOnlyMissingAsset: true, originalsMatch: true, noIntermediateGrib: true,
     preexistingDatasetsPreserved: initial.length, configurationsPreserved: Object.keys(beforeConfigs).length,

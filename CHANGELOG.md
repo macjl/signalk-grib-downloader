@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.4.0] - 2026-10-30
+
+- First stable catalogue-based downloader, including direct streaming,
+  asset-level restart recovery and automatic readwrite access requests.
+- Breaking upgrade from 0.3.x: publish only to Forecast Dataset Provider 0.1.0;
+  update GRIB Weather Provider to 0.7.0 in the same maintenance window. Existing
+  local GRIB files are preserved but not imported automatically.
+- Document installation, access approvals, verification and rollback in
+  docs/upgrading.md. The complete weather chain requires Node 24+.
+- Failed replacement acquisitions retain previously committed forecasts (#15).
+
 ## [0.4.0-beta.3] - 2026-10-21
 
 - Request catalogue access automatically through Signal K Access Requests when
