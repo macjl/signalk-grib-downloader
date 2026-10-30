@@ -4,7 +4,7 @@ import { createRequire } from 'module'
 import { Readable } from 'stream'
 import { pipeline } from 'stream/promises'
 import { Bbox, ModelId, SourceSetting } from './types'
-import { candidateRuns, downloaderSourceConfig, fetchFingerprint, fingerprintsEqual, runStamp, sourceDirName, GFS_FETCH_VARS, GFS_FETCH_LEVELS } from './scheduler'
+import { candidateRuns, downloaderSourceConfig, fetchFingerprint, fingerprintsEqual, runStamp, sourceDirName, GFS_FETCH_VARS, GFS_FETCH_LEVELS, GFS_WAVE_VARS } from './scheduler'
 
 // Native in-process GRIB downloader — a TypeScript port of the previous
 // containerised Python job (grib-downloader/downloader.py). No container
@@ -29,6 +29,8 @@ export interface DownloadSource {
   packages?: string[]
   groups?: string[]
   archiveRuns?: number
+  includeWaves?: boolean
+  exportDirectory?: string
   /** Override the upstream base URL (testing / proxying). When set, the
    *  fetcher uses `<base>/...` instead of the model's hardcoded distribution URL. */
   base?: string
@@ -223,6 +225,124 @@ function cleanupOldRuns(directory: string, archiveRuns: number, log: (m: string)
 // ── GFS (NOMADS grib_filter) ─────────────────────────────────────────────────
 
 const GFS_PRODUCTS: Record<string, string> = { '0p25': 'pgrb2.0p25', '0p50': 'pgrb2full.0p50', '1p00': 'pgrb2.1p00' }
+async function concatenateFilesAtomic(inputs: string[], dest: string): Promise<void> {
+  const part = dest + '.part'
+  try { fs.unlinkSync(part) } catch { /* may not exist */ }
+  try {
+    for (let i = 0; i < inputs.length; i++) {
+      await pipeline(
+        fs.createReadStream(inputs[i]),
+        fs.createWriteStream(part, { flags: i === 0 ? 'w' : 'a' })
+      )
+    }
+    if (fs.statSync(part).size === 0) throw new Error('empty concatenated output')
+    fs.renameSync(part, dest)
+  } catch (e) {
+    try { fs.unlinkSync(part) } catch { /* may not exist */ }
+    throw e
+  }
+}
+
+function cleanupOpenCpnExports(directory: string, name: string, archiveRuns: number, log: (m: string) => void): void {
+  let files: string[]
+  try { files = fs.readdirSync(directory) } catch { return }
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const pattern = new RegExp(`^${escaped}__(\\d{8}T\\d{2})__complete\\.grb2$`)
+  const runs = files
+    .map(file => ({ file, stamp: pattern.exec(file)?.[1] }))
+    .filter((entry): entry is { file: string; stamp: string } => !!entry.stamp)
+    .sort((a, b) => b.stamp.localeCompare(a.stamp))
+  const keep = Math.max(1, archiveRuns + 1)
+  for (const old of runs.slice(keep)) {
+    try {
+      fs.unlinkSync(path.join(directory, old.file))
+      log(`${name}: removed old OpenCPN export ${old.file}`)
+    } catch (e) {
+      log(`${name}: cannot remove old OpenCPN export ${old.file}: ${e}`)
+    }
+  }
+}
+
+function runFiles(directory: string, stamp: string): string[] {
+  try {
+    return fs.readdirSync(directory).filter(file =>
+      file.includes(`__${stamp}__`) || file === `.run-${stamp}.complete`
+    )
+  } catch {
+    return []
+  }
+}
+
+// Replace a completed same-cycle GFS run only after its full replacement and
+// OpenCPN bundle have been staged. Every old file is moved to a hidden backup
+// first; any commit failure restores it before the error is returned.
+function commitStagedGfsRun(
+  directory: string,
+  stagingDirectory: string,
+  stamp: string,
+  fingerprint: unknown,
+  stagedBundle?: string,
+  finalBundle?: string
+): void {
+  const backupDirectory = path.join(directory, `.replacement-backup-${stamp}`)
+  const bundleBackup = finalBundle ? finalBundle + '.replacement-backup' : undefined
+  fs.rmSync(backupDirectory, { recursive: true, force: true })
+  fs.mkdirSync(backupDirectory, { recursive: true })
+  let bundlePublished = false
+  let oldBundleBackedUp = false
+  try {
+    for (const file of runFiles(directory, stamp)) {
+      fs.renameSync(path.join(directory, file), path.join(backupDirectory, file))
+    }
+    for (const file of fs.readdirSync(stagingDirectory)) {
+      if (file.endsWith('.grb2')) fs.renameSync(path.join(stagingDirectory, file), path.join(directory, file))
+    }
+    if (stagedBundle && finalBundle) {
+      if (fs.existsSync(finalBundle)) {
+        try { fs.unlinkSync(bundleBackup!) } catch { /* may not exist */ }
+        fs.renameSync(finalBundle, bundleBackup!)
+        oldBundleBackedUp = true
+      }
+      fs.renameSync(stagedBundle, finalBundle)
+      bundlePublished = true
+    }
+    writeMarker(directory, stamp, fingerprint)
+    // The replacement is committed once the new marker exists. Cleanup must
+    // not turn a successful commit into a rollback after backups are removed.
+    try { fs.rmSync(backupDirectory, { recursive: true, force: true }) } catch { /* non-fatal leftover */ }
+    if (oldBundleBackedUp) {
+      try { fs.unlinkSync(bundleBackup!) } catch { /* non-fatal leftover */ }
+    }
+    try { fs.rmSync(stagingDirectory, { recursive: true, force: true }) } catch { /* non-fatal leftover */ }
+  } catch (e) {
+    for (const file of runFiles(directory, stamp)) {
+      try { fs.unlinkSync(path.join(directory, file)) } catch { /* ignore */ }
+    }
+    let restoreError: unknown = null
+    try {
+      for (const file of fs.readdirSync(backupDirectory)) {
+        try {
+          fs.renameSync(path.join(backupDirectory, file), path.join(directory, file))
+        } catch (err) {
+          restoreError = restoreError ?? err
+        }
+      }
+    } catch (err) { restoreError = restoreError ?? err }
+    if (bundlePublished && finalBundle) {
+      try { fs.unlinkSync(finalBundle) } catch { /* ignore */ }
+    }
+    if (oldBundleBackedUp && bundleBackup && finalBundle) {
+      try { fs.renameSync(bundleBackup, finalBundle) } catch (err) { restoreError = restoreError ?? err }
+    }
+    // Never recursively remove a backup that could still contain an original
+    // file after an incomplete rollback.
+    try { fs.rmdirSync(backupDirectory) } catch { /* keep non-empty backup for recovery */ }
+    if (restoreError) {
+      throw new Error(`${e}; rollback incomplete (backup retained at ${backupDirectory}): ${restoreError}`)
+    }
+    throw e
+  }
+}
 
 async function gfsFetch(src: DownloadSource, log: (m: string) => void, signal?: AbortSignal): Promise<Outcome> {
   const res = src.resolution ?? '0p25'
@@ -235,23 +355,52 @@ async function gfsFetch(src: DownloadSource, log: (m: string) => void, signal?: 
   const prod = GFS_PRODUCTS[res] ?? `pgrb2.${res}`
   const fingerprint = src.fingerprint
 
+  if (src.includeWaves && res !== '0p25') {
+    log(`${name}: GFS-Wave requires GFS 0p25 resolution`)
+    return 'failed'
+  }
+  if (src.includeWaves && !src.exportDirectory) {
+    log(`${name}: GFS-Wave requires an OpenCPN export directory`)
+    return 'failed'
+  }
+  if (src.includeWaves && path.resolve(src.exportDirectory!) === path.resolve(directory)) {
+    log(`${name}: OpenCPN export directory must be separate from the provider source directory`)
+    return 'failed'
+  }
+
   for (const run of candidateRuns(src.model)) {
     const stamp = runStamp(run)
     if (signal?.aborted) { log(`${name}: aborted — cancelling run search`); return 'failed' }
     let paramsChanged = false
     const latest = latestCompleteStamp(directory)
     if (latest !== null && latest >= stamp) {
-      if (fingerprintsEqual(readMarkerParams(directory, latest), fingerprint)) return 'up-to-date'
+      if (fingerprintsEqual(readMarkerParams(directory, latest), fingerprint)) {
+        const bundle = src.exportDirectory
+          ? path.join(src.exportDirectory, `${name}__${latest}__complete.grb2`)
+          : null
+        if (!src.includeWaves || (bundle && fs.existsSync(bundle) && fs.statSync(bundle).size > 0)) return 'up-to-date'
+        log(`${name}: OpenCPN bundle missing — rebuilding run ${latest}`)
+      }
       if (latest > stamp) continue
-      paramsChanged = true
+      else if (!fingerprintsEqual(readMarkerParams(directory, latest), fingerprint)) paramsChanged = true
     }
     const date = stamp.slice(0, 8)
     const hh = stamp.slice(9, 11)
     const nomads = src.base ?? 'https://nomads.ncep.noaa.gov'
     const probe = `${nomads}/pub/data/nccf/com/gfs/prod/gfs.${date}/${hh}/atmos/gfs.t${hh}z.${prod}.f${String(steps[steps.length - 1]).padStart(3, '0')}.idx`
     if (!(await httpOk(probe, signal))) { log(`${name}: run ${stamp} not published yet (probe failed)`); continue }
+    if (src.includeWaves) {
+      const waveProbe = `${nomads}/pub/data/nccf/com/gfs/prod/gfs.${date}/${hh}/wave/gridded/gfswave.t${hh}z.global.0p25.f${String(steps[steps.length - 1]).padStart(3, '0')}.grib2.idx`
+      if (!(await httpOk(waveProbe, signal))) { log(`${name}: GFS-Wave run ${stamp} not published yet (probe failed)`); continue }
+    }
 
-    if (paramsChanged) { log(`${name}: fetch parameters changed — re-fetching run ${stamp}`); wipeRun(directory, stamp) }
+    const stagingDirectory = path.join(directory, `.replacement-staging-${stamp}`)
+    const outputDirectory = paramsChanged ? stagingDirectory : directory
+    if (paramsChanged) {
+      log(`${name}: fetch parameters changed — staging replacement run ${stamp}`)
+      fs.rmSync(stagingDirectory, { recursive: true, force: true })
+      fs.mkdirSync(stagingDirectory, { recursive: true })
+    }
 
     log(`${name}: downloading run ${stamp} (${steps.length} steps)`)
     const params = variables.map(v => `var_${v}=on`).concat(levels.map(l => `lev_${l}=on`))
@@ -260,12 +409,67 @@ async function gfsFetch(src: DownloadSource, log: (m: string) => void, signal?: 
       params.push('subregion=', `leftlon=${lon0}`, `rightlon=${lon1}`, `bottomlat=${lat0}`, `toplat=${lat1}`)
     }
     for (const step of steps) {
-      const dest = path.join(directory, `${name}__${stamp}__f${String(step).padStart(3, '0')}.grb2`)
+      const dest = path.join(outputDirectory, `${name}__${stamp}__f${String(step).padStart(3, '0')}.grb2`)
       if (fs.existsSync(dest)) continue
-      const url = `${nomads}/cgi-bin/filter_gfs_${res}.pl?dir=%2Fgfs.${date}%2F${hh}%2Fatmos&file=gfs.t${hh}z.${prod}.f${String(step).padStart(3, '0')}&` + params.join('&')
-      if (!(await download(url, dest, signal))) { log(`${name}: run ${stamp} failed at step f${String(step).padStart(3, '0')} — aborting`); return 'failed' }
+      const fff = String(step).padStart(3, '0')
+      const url = `${nomads}/cgi-bin/filter_gfs_${res}.pl?dir=%2Fgfs.${date}%2F${hh}%2Fatmos&file=gfs.t${hh}z.${prod}.f${fff}&` + params.join('&')
+      if (!src.includeWaves) {
+        if (!(await download(url, dest, signal))) { log(`${name}: run ${stamp} failed at step f${fff} — aborting`); return 'failed' }
+        continue
+      }
+
+      const atmos = dest + '.atmos'
+      const wave = dest + '.wave'
+      if (!fs.existsSync(atmos) && !(await download(url, atmos, signal))) {
+        log(`${name}: run ${stamp} atmosphere failed at step f${fff} — aborting`)
+        return 'failed'
+      }
+      const waveParams = GFS_WAVE_VARS.map(v => `var_${v}=on`)
+        .concat(['lev_surface=on'])
+      if (bbox) {
+        const [lat0, lon0, lat1, lon1] = bbox
+        waveParams.push('subregion=', `leftlon=${lon0}`, `rightlon=${lon1}`, `bottomlat=${lat0}`, `toplat=${lat1}`)
+      }
+      const waveUrl = `${nomads}/cgi-bin/filter_gfswave.pl?dir=%2Fgfs.${date}%2F${hh}%2Fwave%2Fgridded&file=gfswave.t${hh}z.global.0p25.f${fff}.grib2&` + waveParams.join('&')
+      if (!fs.existsSync(wave) && !(await download(waveUrl, wave, signal))) {
+        log(`${name}: run ${stamp} GFS-Wave failed at step f${fff} — aborting`)
+        return 'failed'
+      }
+      try {
+        await concatenateFilesAtomic([atmos, wave], dest)
+        fs.unlinkSync(atmos)
+        fs.unlinkSync(wave)
+      } catch (e) {
+        log(`${name}: run ${stamp} cannot combine step f${fff}: ${e} — aborting`)
+        return 'failed'
+      }
     }
-    writeMarker(directory, stamp, fingerprint)
+    let stagedBundle: string | undefined
+    let finalBundle: string | undefined
+    if (src.includeWaves) {
+      const exportDir = src.exportDirectory!
+      fs.mkdirSync(exportDir, { recursive: true })
+      finalBundle = path.join(exportDir, `${name}__${stamp}__complete.grb2`)
+      stagedBundle = paramsChanged ? finalBundle + '.replacement-staged' : finalBundle
+      const stepFiles = steps.map(step => path.join(outputDirectory, `${name}__${stamp}__f${String(step).padStart(3, '0')}.grb2`))
+      try {
+        await concatenateFilesAtomic(stepFiles, stagedBundle)
+      } catch (e) {
+        log(`${name}: run ${stamp} cannot publish OpenCPN bundle: ${e} — aborting`)
+        return 'failed'
+      }
+    }
+    if (paramsChanged) {
+      try {
+        commitStagedGfsRun(directory, stagingDirectory, stamp, fingerprint, stagedBundle, finalBundle)
+      } catch (e) {
+        log(`${name}: run ${stamp} replacement commit failed: ${e} — previous run restored`)
+        return 'failed'
+      }
+    } else {
+      writeMarker(directory, stamp, fingerprint)
+    }
+    if (src.includeWaves) cleanupOpenCpnExports(src.exportDirectory!, name, src.archiveRuns ?? 0, log)
     cleanupOldRuns(directory, src.archiveRuns ?? 0, log, name)
     log(`${name}: run ${stamp} complete`)
     return 'downloaded'
@@ -477,7 +681,7 @@ const FETCHERS: Record<ModelId, (s: DownloadSource, log: (m: string) => void, si
 
 // Build the on-disk DownloadSource for a SourceSetting, resolving the
 // directory under the local gribsRoot (no container path remapping).
-export function toDownloadSource(s: SourceSetting, gribsRoot: string, bbox?: Bbox): DownloadSource {
+export function toDownloadSource(s: SourceSetting, gribsRoot: string, bbox?: Bbox, opencpnExportRoot?: string): DownloadSource {
   const cfg = downloaderSourceConfig(s, gribsRoot, bbox) as Record<string, unknown>
   return {
     name: cfg.name as string,
@@ -491,6 +695,10 @@ export function toDownloadSource(s: SourceSetting, gribsRoot: string, bbox?: Bbo
     packages: cfg.packages as string[] | undefined,
     groups: cfg.groups as string[] | undefined,
     archiveRuns: (cfg.archive_runs as number | undefined) ?? 0,
+    includeWaves: Array.isArray(cfg.wave_variables),
+    exportDirectory: Array.isArray(cfg.wave_variables) && opencpnExportRoot
+      ? path.join(opencpnExportRoot, cfg.name as string)
+      : undefined,
     // Canonical fingerprint — the same shape the orchestrator compares run
     // markers against, so a run is up to date iff its marker matches.
     fingerprint: fetchFingerprint(s, bbox),

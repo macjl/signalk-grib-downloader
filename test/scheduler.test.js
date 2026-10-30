@@ -74,6 +74,13 @@ test('gfs source config: steps, bbox, resolution, derived directory', () => {
   assert.strictEqual(c.directory, '/data/gfs-0p25')
 })
 
+test('GFS-Wave opt-in is part of the fetch fingerprint', () => {
+  const plain = downloaderSourceConfig({ model: 'gfs', resolution: '0p25', hours: 24 }, '/data')
+  const waves = downloaderSourceConfig({ model: 'gfs', resolution: '0p25', hours: 24, includeWaves: true }, '/data')
+  assert.strictEqual(plain.wave_variables, undefined)
+  assert.deepStrictEqual(waves.wave_variables, ['HTSGW', 'WVDIR', 'WVPER'])
+})
+
 test('hours are capped at the model maximum', () => {
   const c = downloaderSourceConfig({ model: 'icon-eu', hours: 999 }, '/data')
   assert.deepStrictEqual(c.steps, { from: 0, to: MODEL_MAX_HOURS['icon-eu'], by: 3 })

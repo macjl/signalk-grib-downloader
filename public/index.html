@@ -163,6 +163,7 @@ const I18N = {
     lastAttempt: 'dernière tentative', noAttempt: 'aucune tentative depuis le démarrage', logTitle: 'Journal du dernier téléchargement',
     maxLbl: 'max', totalVol: 'Volume estimé par run :', perRun: '/ run',
     archivesLbl: 'archives', archivesTitle: 'Runs précédents conservés dans <source>/archive/ (0 = aucun)',
+    wavesLbl: 'Vagues + export OpenCPN', wavesTitle: 'GFS 0.25 uniquement : ajoute HTSGW, WVDIR et WVPER et crée un fichier GRIB2 complet par run',
     confirmDeleteData: n => `Supprimer aussi les données téléchargées de « ${n} » (gribs, archives) ?\nElles seront effacées à l'enregistrement.`,
     loginRequired: 'Connexion requise — <a href="/admin/#/login" style="color:#7fc4e3">connectez-vous à SignalK</a> puis rechargez cette page.',
   },
@@ -191,6 +192,7 @@ const I18N = {
     lastAttempt: 'last attempt', noAttempt: 'no attempt since startup', logTitle: 'Last download log',
     maxLbl: 'max', totalVol: 'Estimated volume per run:', perRun: '/ run',
     archivesLbl: 'archives', archivesTitle: 'Past runs kept in <source>/archive/ (0 = none)',
+    wavesLbl: 'Waves + OpenCPN export', wavesTitle: 'GFS 0.25 only: add HTSGW, WVDIR and WVPER and create one complete-run GRIB2 file',
     confirmDeleteData: n => `Also delete the downloaded data of "${n}" (gribs, archives)?\nDeleted when you save.`,
     loginRequired: 'Login required — <a href="/admin/#/login" style="color:#7fc4e3">log in to SignalK</a> and reload this page.',
   },
@@ -218,7 +220,8 @@ function estimateMB(s) {
     // ≈21 B per grid point per step: 12 messages per step since the 850 mb
     // level joined the fetch (was 8 → 15 B), later steps carry a few extra
     // accumulation-bucket messages.
-    return pts * 21 * (Math.floor(hours / 3) + 1) / 1048576
+    const bytesPerPoint = s.includeWaves ? 26 : 21
+    return pts * bytesPerPoint * (Math.floor(hours / 3) + 1) / 1048576
   }
   if (s.model === 'icon-eu') return (Math.floor(hours / 3) + 1) * 13.8
   if (s.model === 'arome')   return hours * (s.resolution === '001' ? 53 : 8.6)
@@ -417,6 +420,11 @@ function renderSources() {
           <input type="number" data-f="archiveRuns" min="0" step="1" value="${s.archiveRuns ?? 0}"
                  style="width:52px;display:inline-block">
         </span>
+        <label style="font-size:12px;color:#9fb0c5;white-space:nowrap" title="${t.wavesTitle}">
+          <input type="checkbox" data-f="includeWaves" ${s.includeWaves === true ? 'checked' : ''}
+                 ${s.model === 'gfs' && (s.resolution || '0p25') === '0p25' ? '' : 'disabled'}>
+          ${t.wavesLbl}
+        </label>
       </div>
       <div class="src-status" style="padding-left:24px">${sourceStatusLine(s)}</div>
       <div class="src-details"></div>`
@@ -441,12 +449,14 @@ function renderSources() {
       }
       el.addEventListener('change', () => {
         if (f === 'autoDownload') s.autoDownload = el.checked
+        else if (f === 'includeWaves') s.includeWaves = el.checked
         else if (f === 'archiveRuns') s.archiveRuns = Math.max(0, parseInt(el.value, 10) || 0)
         else s[f] = el.value
         if (f === 'model') {
           s.resolution = (MODELS[s.model]?.resolutions ?? [])[0]
           s.hours = MODELS[s.model]?.maxHours
         }
+        if (s.model !== 'gfs' || s.resolution !== '0p25') s.includeWaves = false
         renderSources()
         markDirty()
       })

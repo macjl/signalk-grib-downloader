@@ -64,6 +64,14 @@ const buildSchema = (defaultRoot: string, defaultInterval: number, defaultMultip
         '"~" is expanded.',
       default: defaultRoot,
     },
+    opencpnExportRoot: {
+      type: 'string',
+      title: 'OpenCPN GRIB2 export directory',
+      description:
+        'Complete GFS plus GFS-Wave run files are written below this separate root. ' +
+        'Do not point the weather provider at this directory. "~" is expanded.',
+      default: '~/.signalk/gribs-opencpn',
+    },
   },
 })
 
@@ -85,6 +93,7 @@ module.exports = (server: ServerAPI): Plugin => {
 
   const DEFAULT_ROOT = '~/.signalk/gribs'
   const gribsRoot = () => expandHome(infra.gribsRoot || DEFAULT_ROOT)
+  const opencpnExportRoot = () => expandHome(infra.opencpnExportRoot || '~/.signalk/gribs-opencpn')
 
   const settingsPath = () => path.join(server.getDataDirPath(), 'settings.json')
 
@@ -271,7 +280,8 @@ module.exports = (server: ServerAPI): Plugin => {
       gribsRoot(),
       (msg: string) => server.debug(msg),
       updateStatus,
-      settings.bbox
+      settings.bbox,
+      opencpnExportRoot()
     )
 
     if (sources.some(s => s.autoDownload !== false)) {
@@ -289,6 +299,7 @@ module.exports = (server: ServerAPI): Plugin => {
     start: (options: PluginSettings & AppSettings) => {
       infra = {
         gribsRoot: options?.gribsRoot,
+        opencpnExportRoot: options?.opencpnExportRoot,
         checkIntervalMinutes: validInterval(options?.checkIntervalMinutes),
         meteredIntervalMultiplier: validMultiplier(options?.meteredIntervalMultiplier),
       }
@@ -349,6 +360,10 @@ module.exports = (server: ServerAPI): Plugin => {
         if ((next.sources ?? []).some(s =>
             s.archiveRuns !== undefined && (!Number.isFinite(s.archiveRuns) || s.archiveRuns < 0))) {
           return res.status(400).json({ error: 'archiveRuns must be a number ≥ 0' })
+        }
+        if ((next.sources ?? []).some(s =>
+            s.includeWaves === true && (s.model !== 'gfs' || (s.resolution ?? '0p25') !== '0p25'))) {
+          return res.status(400).json({ error: 'GFS-Wave export requires a GFS 0p25 source' })
         }
         try {
           saveSettings(next)
