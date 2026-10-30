@@ -1,4 +1,6 @@
 'use strict'
+
+// Regressions for Signal K's shared HTTP 401 authentication/permission response.
 const { test } = require('node:test')
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
@@ -8,6 +10,7 @@ const http = require('node:http')
 const { randomUUID, createHash } = require('node:crypto')
 const { CatalogueAccess } = require('../dist/catalogue-access')
 const pkg = require('../package.json')
+
 const permissions = pkg.name === 'signalk-grib-downloader' ? 'readwrite' : 'readonly'
 const waitFor = async fn => {
   for (let i = 0; i < 400; i++) { if (fn()) return; await new Promise(resolve => setTimeout(resolve, 10)) }
@@ -16,10 +19,16 @@ const waitFor = async fn => {
 async function fixture(t) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'catalogue-access-'))
   const requests = [], polls = [], id = randomUUID(), secret = 'secret-token-do-not-expose'
-  const f = { directory, id, secret, requests, polls, catalogueRequests: [], approved: false, denied: false, pollError: false, missing: false, redirected: false, noToken: false, held: false }
+  const f = { directory, id, secret, requests, polls, catalogueRequests: [], tokenChecks: [], tokenValid: undefined, checkError: false, checkHeld: false, approved: false, denied: false, pollError: false, missing: false, redirected: false, noToken: false, held: false }
   const server = http.createServer(async (req, res) => {
     let body = ''; for await (const chunk of req) body += chunk
     res.setHeader('Content-Type', 'application/json')
+    if (req.url === '/prefix/loginStatus') {
+      f.tokenChecks.push(req.headers.authorization)
+      if (f.checkHeld) { f.releaseCheck = () => res.end(JSON.stringify({ status: 'notLoggedIn', authenticationRequired: true })); return }
+      if (f.checkError) { res.statusCode = 503; return res.end(f.secret) }
+      return res.end(JSON.stringify(f.loginResponse ?? { status: (f.tokenValid ?? f.approved) ? 'loggedIn' : 'notLoggedIn', authenticationRequired: true }))
+    }
     if (req.method === 'POST' && req.url === '/prefix/signalk/v1/access/requests') {
       requests.push({ body: JSON.parse(body), auth: req.headers.authorization })
       if (f.redirected) { res.writeHead(302, { Location: '/steal' }); return res.end() }
@@ -35,7 +44,7 @@ async function fixture(t) {
         ...(f.denied ? { accessRequest: { permission: 'DENIED' } } : {}) }))
     }
     f.catalogueRequests.push({ url: req.url, auth: req.headers.authorization })
-    res.statusCode = 404; res.end('{}')
+    res.statusCode = 401; res.end('{}')
   })
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
   const options = { endpoint: `http://127.0.0.1:${server.address().port}/prefix`, tokenFile: path.join(directory, 'catalogue-token'), dataDir: directory,
@@ -202,8 +211,10 @@ test('a rejected automatically issued token requests approval again without dele
   const f = await fixture(t), access = f.manager(); f.approved = true; access.start()
   await waitFor(() => access.status().state === 'ready')
   f.approved = false; access.rejected(f.secret)
-  assert.equal(fs.existsSync(f.options.tokenFile), false)
   await waitFor(() => f.requests.length === 2)
+  assert.equal(fs.existsSync(f.options.tokenFile), false)
+  assert.equal(f.tokenChecks[0], 'Bearer ' + f.secret)
+  assert.equal(access.status().diagnostics.renewals, 1)
   assert.equal(access.status().state, 'pending')
   f.secret = 'renewed-token'; f.approved = true
   await waitFor(() => access.status().state === 'ready')
@@ -236,4 +247,119 @@ test('an approval in flight cannot overwrite a token configured manually in the 
   await waitFor(() => access.status().state === 'ready')
   assert.equal(access.token(), 'manually-configured-during-approval')
   assert.equal(fs.readFileSync(f.options.tokenFile, 'utf8'), 'manually-configured-during-approval\n')
+})
+
+test('catalogue 401 with an authenticated token never deletes it or asks for another approval', async t => {
+  const f = await fixture(t), access = f.manager()
+  f.approved = true; f.tokenValid = true; access.start()
+  await waitFor(() => access.status().state === 'ready')
+  const options = { directory: path.join(f.directory, 'mirror'), cacheRoot: path.join(f.directory, 'cache'), url: f.options.endpoint,
+    tokenFile: f.options.tokenFile, tokenReader: () => access.token(), onUnauthorized: token => access.rejected(token) }
+  let query
+  if (permissions === 'readwrite') {
+    const { CataloguePublisher } = require('../dist/catalogue')
+    const client = new CataloguePublisher(options.url, options.tokenFile, f.directory, options.tokenReader, options.onUnauthorized)
+    query = () => client.check()
+  } else {
+    const { CatalogueClient } = require('../dist/catalogue')
+    const client = new CatalogueClient(options, () => {})
+    query = () => client.refresh(new AbortController().signal)
+  }
+  for (let n = 0; n < 3; n++) {
+    await assert.rejects(query(), /401/)
+    await waitFor(() => access.status().diagnostics.tokenChecks >= n + 1 && access.status().diagnostics.lastIssue?.code === 'CATALOGUE_DENIED_TOKEN_VALID')
+  }
+  assert.equal(f.requests.length, 1)
+  assert.equal(access.status().state, 'ready')
+  assert.equal(access.status().diagnostics.renewals, 0)
+  assert.equal(fs.readFileSync(f.options.tokenFile, 'utf8'), f.secret + '\n')
+  assert.ok(!JSON.stringify(access.status()).includes(f.secret))
+  assert.ok(!JSON.stringify(access.status()).includes(f.id))
+  assert.ok(!JSON.stringify(access.status()).includes(f.options.endpoint))
+})
+
+test('unavailable token validation preserves the credential and retries without another approval', async t => {
+  const f = await fixture(t)
+  let ready = 0
+  const access = f.manager({ onReady: () => ready++ })
+  f.approved = true; access.start()
+  await waitFor(() => access.status().state === 'ready')
+  f.checkError = true
+  access.rejected(f.secret)
+  await waitFor(() => access.status().state === 'error')
+  assert.equal(access.status().diagnostics.lastIssue.phase, 'tokenCheck')
+  assert.equal(access.status().diagnostics.lastIssue.httpStatus, 503)
+  assert.equal(fs.readFileSync(f.options.tokenFile, 'utf8'), f.secret + '\n')
+  assert.equal(f.requests.length, 1)
+  f.checkError = false; f.tokenValid = true
+  await waitFor(() => access.status().diagnostics.lastIssue?.code === 'CATALOGUE_DENIED_TOKEN_VALID')
+  assert.equal(access.status().state, 'ready')
+  assert.equal(f.requests.length, 1)
+  assert.equal(ready, 2, 'resume the caller once after validation becomes available')
+})
+
+test('a rotation or stop during invalid-token validation cannot remove a credential', async t => {
+  for (const action of ['rotate', 'stop']) {
+    const f = await fixture(t), access = f.manager()
+    f.approved = true; access.start()
+    await waitFor(() => access.status().state === 'ready')
+    f.checkHeld = true; access.rejected(f.secret)
+    await waitFor(() => f.releaseCheck)
+    if (action === 'rotate') fs.writeFileSync(f.options.tokenFile, 'rotated-manual-token\n')
+    else await access.stop()
+    f.releaseCheck()
+    await new Promise(resolve => setTimeout(resolve, 25))
+    assert.equal(fs.readFileSync(f.options.tokenFile, 'utf8'), action === 'rotate' ? 'rotated-manual-token\n' : f.secret + '\n')
+    assert.equal(f.requests.length, 1)
+  }
+})
+
+test('simultaneous catalogue rejections share one validation and one renewal request', async t => {
+  const f = await fixture(t), access = f.manager()
+  f.approved = true; access.start()
+  await waitFor(() => access.status().state === 'ready')
+  f.approved = false; f.checkHeld = true
+  for (let n = 0; n < 10; n++) access.rejected(f.secret)
+  await waitFor(() => f.releaseCheck)
+  assert.equal(f.tokenChecks.length, 1)
+  f.releaseCheck()
+  await waitFor(() => f.requests.length === 2)
+  assert.equal(access.status().diagnostics.renewals, 1)
+})
+
+test('redacted diagnostics distinguish failed approval persistence without exposing identifiers', async t => {
+  const f = await fixture(t)
+  const access = f.manager(), originalWrite = fs.writeFileSync
+  fs.writeFileSync = (file, ...args) => {
+    if (String(file).startsWith(f.options.tokenFile + '.')) throw Object.assign(new Error(f.secret + f.options.endpoint), { code: 'EACCES' })
+    return originalWrite(file, ...args)
+  }
+  try {
+    f.approved = true; access.start()
+    await waitFor(() => access.status().state === 'error')
+    const diagnostic = access.status().diagnostics.lastIssue
+    assert.equal(diagnostic.phase, 'storage')
+    assert.equal(diagnostic.code, 'TOKEN_WRITE_FAILED')
+    assert.equal(diagnostic.fsCode, 'EACCES')
+    assert.ok(access.status().diagnostics.approvalResponses >= 1)
+    assert.equal(access.status().diagnostics.tokenWrites, 0)
+    assert.equal(f.requests.length, 1)
+    const status = JSON.stringify(access.status())
+    for (const value of [f.secret, f.id, f.options.endpoint, f.options.tokenFile]) assert.ok(!status.includes(value))
+  } finally { await access.stop(); fs.writeFileSync = originalWrite }
+})
+
+test('an inconclusive login response cannot discard the credential or request approval', async t => {
+  const f = await fixture(t), access = f.manager()
+  f.approved = true; access.start()
+  await waitFor(() => access.status().state === 'ready')
+  f.loginResponse = { status: 'notLoggedIn' } // Not the explicit authenticated-server response.
+  access.rejected(f.secret)
+  await waitFor(() => access.status().state === 'error')
+  assert.equal(access.status().diagnostics.lastIssue.code, 'TOKEN_CHECK_INCONCLUSIVE')
+  assert.equal(fs.readFileSync(f.options.tokenFile, 'utf8'), f.secret + '\n')
+  assert.equal(f.requests.length, 1)
+  f.loginResponse = { status: 'loggedIn', authenticationRequired: true }
+  await waitFor(() => access.status().state === 'ready')
+  assert.equal(f.requests.length, 1)
 })

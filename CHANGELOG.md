@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.1] - 2026-10-31
+
+- Preserve automatically issued tokens when catalogue HTTP 401 is a permission
+  refusal: confirm authentication through Signal K loginStatus before renewal.
+- Serialize authorization checks, retain credentials on ambiguous/failed checks,
+  and preserve token rotation/stop safeguards in both GRIB plugins (#20).
+- Add redacted lifecycle diagnostics and a standalone read-only collector for
+  installed versions, provider availability, token-file access and authentication.
+
 ## [0.5.0] - 2026-10-30
 
 - Add independent GFS-Wave 0.25-degree sources selecting HTSGW, WVDIR and WVPER
