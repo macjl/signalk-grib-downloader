@@ -54,14 +54,14 @@ const makeRouter = () => {
     post: (p, h) => { routes[`POST ${p}`] = h },
     delete: (p, h) => { routes[`DELETE ${p}`] = h },
   }
-  return { router, call: (method, p) => {
+  return { router, call: (method, p, request = {}) => {
     let payload
     const res = {
       status: () => res,
       json: (v) => { payload = v },
     }
-    routes[`${method} ${p}`]({}, res)
-    return payload
+    const result = routes[`${method} ${p}`](request, res)
+    return result?.then ? result.then(() => payload) : payload
   } }
 }
 
@@ -169,4 +169,21 @@ test('no automatic download starts behind a captive portal', async () => {
   } finally {
     t.stop()
   }
+})
+
+test('settings accept independent manual GFS and GFS-Wave sources and reject unsupported wave resolution', async t => {
+  const dataDir = tmpDir(), server = makeServer(dataDir, { seed: 'offline' })
+  const plugin = makePlugin(server), { router, call } = makeRouter()
+  t.after(async () => { await plugin.stop(); fs.rmSync(dataDir, { recursive: true, force: true }) })
+  plugin.registerWithRouter(router)
+  plugin.start({ sources: [] })
+  const sources = [{ model: 'gfs', autoDownload: false }, { model: 'gfs-wave', hours: 6, autoDownload: false }]
+  assert.deepStrictEqual(call('PUT', '/settings', { body: { sources, bbox: BBOX } }), { ok: true })
+  assert.deepStrictEqual(call('GET', '/status').sources.map(s => s.name), ['gfs-0p25', 'gfs-wave-0p25'])
+  assert.strictEqual(call('GET', '/status').nextAutoTickAt, null)
+  assert.match(call('PUT', '/settings', { body: { sources: [{ model: 'gfs-wave', resolution: '0p50' }] } }).error, /only 0p25/)
+  assert.deepStrictEqual(call('GET', '/settings').sources, sources)
+  call('PUT', '/settings', { body: { sources: [sources[0]], bbox: BBOX } })
+  // Deletion of a removed source must still parse its hyphenated model ID.
+  assert.deepStrictEqual(await call('DELETE', '/source-data/:name', { params: { name: 'gfs-wave-0p25' } }), { ok: true })
 })

@@ -72,7 +72,7 @@ const buildSchema = (defaultInterval: number, defaultMultiplier: number) => ({
 
 function parseSourceName(name: string): SourceSetting | undefined {
   if (name === 'icon-eu') return { model: 'icon-eu' }
-  const match = /^(gfs|arome|arpege)-([A-Za-z0-9]+)$/.exec(name)
+  const match = /^(gfs-wave|gfs|arome|arpege)-([A-Za-z0-9]+)$/.exec(name)
   return match ? { model: match[1] as SourceSetting['model'], resolution: match[2] } : undefined
 }
 
@@ -376,9 +376,12 @@ module.exports = (server: ServerAPI): Plugin => {
           return res.status(400).json({ error: 'invalid settings' })
         }
         const next = normalizeSettings(nextRaw)
-        const valid = ['gfs', 'arome', 'arpege', 'icon-eu']
+        const valid = ['gfs', 'gfs-wave', 'arome', 'arpege', 'icon-eu']
         if ((next.sources ?? []).some(s => !valid.includes(s.model))) {
           return res.status(400).json({ error: `model must be one of: ${valid.join(', ')}` })
+        }
+        if ((next.sources ?? []).some(s => s.model === 'gfs-wave' && s.resolution && s.resolution !== '0p25')) {
+          return res.status(400).json({ error: 'GFS-Wave supports only 0p25 resolution' })
         }
         const names = (next.sources ?? []).map(s => sourceDirName(s))
         if (names.some(name => !/^[A-Za-z0-9_-]+$/.test(name))) return res.status(400).json({ error: 'invalid source name' })

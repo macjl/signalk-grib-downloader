@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.0] - 2026-10-30
+
+- Add independent GFS-Wave 0.25-degree sources selecting HTSGW, WVDIR and WVPER
+  from NOAA's wave GRIB filter, with area subsetting and three-hour forecast steps.
+- Stream wave acquisitions into separate immutable catalogue datasets, using
+  existing asset-level recovery, authentication and source-specific retention.
+- Add GFS-Wave to webapp selection, status, settings validation and source deletion.
+- Use NOAA URL/parameter selections documented by haipule in PR #19. No OpenCPN
+  export or Weather API wave decoder is included.
+- Promote the sandbox-tested 0.5.0-alpha.1 implementation after maintainer
+  validation, with existing sources unchanged and no automatic wave downloads
+  enabled by the upgrade.
+
 ## [0.4.0] - 2026-10-30
 
 - First stable catalogue-based downloader, including direct streaming,

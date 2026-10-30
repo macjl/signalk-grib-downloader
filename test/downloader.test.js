@@ -25,6 +25,24 @@ test('GFS plans stable asset IDs, the last-step probe, subsetting and 850 hPa fi
   assert.match(plan.assets[0].urls[0], /lev_850_mb=on/)
   assert.match(plan.assets[0].urls[0], /filter_gfs_0p25/)
 })
+
+test('GFS-Wave plans independent wave assets, surface selectors and the wave last-step probe', () => {
+  const source = toDownloadSource({ model: 'gfs-wave', hours: 6 }, { latMin: 35, lonMin: -6, latMax: 45, lonMax: 17 })
+  const plan = planRun(source, run)
+  assert.equal(source.name, 'gfs-wave-0p25')
+  assert.equal(plan.assets.length, 3)
+  assert.equal(plan.probe, 'https://nomads.ncep.noaa.gov/pub/data/nccf/com/gfs/prod/gfs.20261021/06/wave/gridded/gfswave.t06z.global.0p25.f006.grib2.idx')
+  assert.equal(plan.assets[0].id, 'gfs-wave-0p25__20261021T06__f000_grb2')
+  const url = new URL(plan.assets[1].urls[0])
+  assert.equal(url.pathname, '/cgi-bin/filter_gfswave.pl')
+  assert.deepEqual(Object.fromEntries(url.searchParams), {
+    dir: '/gfs.20261021/06/wave/gridded', file: 'gfswave.t06z.global.0p25.f003.grib2',
+    var_HTSGW: 'on', var_WVDIR: 'on', var_WVPER: 'on', lev_surface: 'on',
+    subregion: '', leftlon: '-6', rightlon: '17', bottomlat: '35', toplat: '45',
+  })
+  assert.throws(() => toDownloadSource({ model: 'gfs-wave', resolution: '0p50' }), /only 0p25/)
+  assert.throws(() => planRun({ ...source, resolution: '0p50' }, run), /only 0p25/)
+})
 for (const [model, resolution] of [['arome', '0025'], ['arpege', '01']]) {
   test(`${model} plans all selected SP1 groups with no unexpanded URL placeholder`, () => {
     const source = toDownloadSource({ model, resolution, hours: 18 })

@@ -1,10 +1,10 @@
-export type ModelId = 'gfs' | 'arome' | 'arpege' | 'icon-eu'
+export type ModelId = 'gfs' | 'gfs-wave' | 'arome' | 'arpege' | 'icon-eu'
 
 // Stable source identity: <model>[-<resolution>] (e.g. "gfs-0p25", "icon-eu").
 // All original bytes and archived acquisitions are owned by the catalogue.
 export interface SourceSetting {
   model: ModelId
-  resolution?: string   // gfs: 0p25|0p50|1p00 ; arome: 0025|001 ; arpege: 01|025
+  resolution?: string   // gfs: 0p25|0p50|1p00 ; gfs-wave: 0p25 ; arome: 0025|001 ; arpege: 01|025
   hours?: number        // forecast duration to download (capped per model)
   archiveRuns?: number  // past acquisitions retained in the catalogue (0 = none, no upper limit)
   autoDownload?: boolean // default true: include this source in automatic checks
@@ -40,7 +40,7 @@ export interface PluginSettings {
 export interface AppSettings {
   mode?: 'auto' | 'manual'       // legacy global mode
   checkIntervalMinutes?: number  // legacy: now managed in PluginSettings
-  bbox?: Bbox                 // applied to models with server-side subsetting (GFS)
+  bbox?: Bbox                 // applied to models with server-side subsetting (GFS and GFS-Wave)
   sources?: SourceSetting[]
 }
 

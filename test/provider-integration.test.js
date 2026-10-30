@@ -123,3 +123,35 @@ test('actual provider: lost commit response recovers the measured content withou
   assert.equal(f.upstream.calls.length, 2)
   assert.deepEqual(await f.get('/publications'), {})
 })
+
+test('actual provider: wave retries, publication and retention never replace atmospheric acquisitions', integration, async t => {
+  let broken = true
+  const bytes = grib(128)
+  const f = await setup(t, { handler: (req, res) => {
+    if (broken && req.url.includes('filter_gfswave') && req.url.includes('f003')) {
+      res.writeHead(200); res.write(bytes.subarray(0, 20)); return setImmediate(() => res.destroy())
+    }
+    res.end(bytes)
+  } })
+  const atmospheric = await f.publish()
+  const source = { model: 'gfs-wave', hours: 3, archiveRuns: 0 }
+  const descriptor = toDownloadSource(source); descriptor.base = f.upstream.base
+  const plan = planRun(descriptor, new Date('2026-10-21T00:00:00Z'))
+  const publish = () => f.publisher().publish(source, plan, descriptor.fingerprint, () => {})
+  await assert.rejects(publish())
+  assert.deepEqual(Object.keys(await f.get('/datasets')), [atmospheric.datasetId])
+  broken = false
+  const waves = await publish()
+  assert.notEqual(waves.datasetId, atmospheric.datasetId)
+  const detail = await f.get('/datasets/' + waves.datasetId)
+  assert.equal(detail.model, 'GFS-WAVE')
+  assert.equal(detail.requested.source, 'gfs-wave-0p25')
+  assert.equal(detail.assets.length, 2)
+  assert.ok(detail.assets.every(a => a.size === bytes.length && a.sha256 === hash(bytes)))
+  assert.equal(f.upstream.calls.filter(c => c.url.includes('filter_gfswave') && c.url.includes('f000')).length, 1)
+  const next = await f.publisher().publish(source, planRun(descriptor, new Date('2026-10-21T06:00:00Z')), descriptor.fingerprint, () => {})
+  assert.deepEqual(Object.keys(await f.get('/datasets')).sort(), [atmospheric.datasetId, next.datasetId].sort())
+  await f.publisher().removeSource(source)
+  assert.deepEqual(Object.keys(await f.get('/datasets')), [atmospheric.datasetId])
+  assert.deepEqual(fs.readdirSync(f.data).sort(), ['catalogue-publications', 'token'])
+})

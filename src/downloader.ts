@@ -2,7 +2,7 @@ import * as fs from 'node:fs'
 import * as path from 'node:path'
 import { createRequire } from 'node:module'
 import { Bbox, ModelId, SourceSetting } from './types'
-import { downloaderSourceConfig, fetchFingerprint, runStamp, GFS_FETCH_VARS, GFS_FETCH_LEVELS } from './scheduler'
+import { downloaderSourceConfig, fetchFingerprint, runStamp, GFS_FETCH_VARS, GFS_FETCH_LEVELS, GFS_WAVE_VARS } from './scheduler'
 import { GribStreamValidator } from './grib-stream'
 
 export type Outcome = 'downloaded' | 'up-to-date' | 'unavailable' | 'failed'
@@ -58,6 +58,24 @@ export function planRun(src: DownloadSource, run: Date): RunPlan {
   const asset = (suffix: string, urls: string[], compression?: 'bzip2'): RemoteAsset => ({
     id: `${src.name}__${stamp}__${suffix}_grb2`, urls, ...(compression ? { compression } : {}),
   })
+  if (src.model === 'gfs-wave') {
+    if ((src.resolution ?? '0p25') !== '0p25') throw new Error('GFS-Wave supports only 0p25 resolution')
+    const steps = stepsList(src.steps ?? { from: 0, to: 24, by: 3 })
+    if (!steps.length) throw new Error('No forecast steps configured')
+    const base = src.base ?? 'https://nomads.ncep.noaa.gov', date = stamp.slice(0, 8)
+    const file = (step: number) => `gfswave.t${hh}z.global.0p25.f${String(step).padStart(3, '0')}.grib2`
+    const params = (src.variables ?? GFS_WAVE_VARS).map(v => `var_${v}=on`).concat(['lev_surface=on'])
+    if (src.bbox) {
+      const [lat0, lon0, lat1, lon1] = src.bbox
+      params.push('subregion=', `leftlon=${lon0}`, `rightlon=${lon1}`, `bottomlat=${lat0}`, `toplat=${lat1}`)
+    }
+    return { stamp,
+      probe: `${base}/pub/data/nccf/com/gfs/prod/gfs.${date}/${hh}/wave/gridded/${file(steps[steps.length - 1])}.idx`,
+      assets: steps.map(step => asset(`f${String(step).padStart(3, '0')}`, [
+        `${base}/cgi-bin/filter_gfswave.pl?dir=%2Fgfs.${date}%2F${hh}%2Fwave%2Fgridded&file=${file(step)}&${params.join('&')}`,
+      ])),
+    }
+  }
   if (src.model === 'gfs') {
     const resolution = src.resolution ?? '0p25', product = GFS_PRODUCTS[resolution]
     if (!product) throw new Error('Unsupported GFS resolution')
