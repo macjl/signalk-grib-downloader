@@ -22,6 +22,10 @@ All notable changes to this project will be documented in this file.
   are complete. GFS resolutions other than 0.25 degree and an export directory
   equal to the provider source directory are rejected.
 
+### Changed
+- Failed HTTP download attempts now report their step/component, attempt count,
+  concrete error, and retry delay in the webapp download log.
+
 ## [0.3.0] - 2026-10-20
 
 ### Added

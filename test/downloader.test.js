@@ -429,9 +429,14 @@ test('gfs: reports failed when a step download returns 500', async () => {
 
   const ds = toDownloadSource(setting, root, { latMin: 35, lonMin: -6, latMax: 45, lonMax: 17 })
   ds.base = srv.base
-  const outcome = await fetchSource(ds, () => {})
+  const log = []
+  const outcome = await fetchSource(ds, line => log.push(line))
 
   assert.strictEqual(outcome, 'failed')
+  assert.ok(log.some(line => line.includes('step f000 attempt 1/3 failed: Error: HTTP 500 (retrying in 2s)')))
+  assert.ok(log.some(line => line.includes('step f000 attempt 2/3 failed: Error: HTTP 500 (retrying in 4s)')))
+  assert.ok(log.some(line => line.includes('step f000 attempt 3/3 failed: Error: HTTP 500 (no retries left)')))
+  assert.ok(log.some(line => line.includes('failed at step f000 — aborting')))
   assert.strictEqual(latestCompleteStamp(srcDir(root, setting)), null, 'no marker for a failed run')
   await srv.close()
 })

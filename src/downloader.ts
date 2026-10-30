@@ -74,7 +74,14 @@ async function httpOk(url: string, signal?: AbortSignal): Promise<boolean> {
 // Retries with linear backoff; an empty body is a failure. The body is piped
 // to disk (network read paced by file-write backpressure) instead of being
 // buffered in memory. A caller-initiated abort is not retried.
-async function download(url: string, dest: string, signal?: AbortSignal): Promise<boolean> {
+type DownloadFailureLogger = (attempt: number, totalAttempts: number, error: unknown, retryInMs: number | null) => void
+
+async function download(
+  url: string,
+  dest: string,
+  signal?: AbortSignal,
+  onFailure?: DownloadFailureLogger
+): Promise<boolean> {
   const part = dest + '.part'
   for (let attempt = 1; attempt <= RETRIES; attempt++) {
     let out: fs.WriteStream | null = null
@@ -88,10 +95,14 @@ async function download(url: string, dest: string, signal?: AbortSignal): Promis
       if (stat.size === 0) throw new Error('empty download')
       fs.renameSync(part, dest)
       return true
-    } catch {
+    } catch (err) {
       if (out) { try { out.destroy() } catch { /* ignore */ } }
+      const retryInMs = !signal?.aborted && attempt < RETRIES
+        ? HTTP_BACKOFF_BASE_MS * attempt
+        : null
+      onFailure?.(attempt, RETRIES, err, retryInMs)
       if (signal?.aborted) break            // run aborted — do not retry
-      if (attempt < RETRIES) await sleep(HTTP_BACKOFF_BASE_MS * attempt)
+      if (retryInMs !== null) await sleep(retryInMs)
     }
   }
   try { fs.unlinkSync(part) } catch { /* may not exist */ }
@@ -106,6 +117,17 @@ async function fetchBuffer(url: string, signal?: AbortSignal): Promise<Buffer> {
 }
 
 function sleep(ms: number): Promise<void> { return new Promise(r => setTimeout(r, ms)) }
+
+function logDownloadFailure(
+  log: (message: string) => void,
+  context: string
+): DownloadFailureLogger {
+  return (attempt, totalAttempts, error, retryInMs) => {
+    const detail = error instanceof Error ? `${error.name}: ${error.message}` : String(error)
+    const next = retryInMs === null ? 'no retries left' : `retrying in ${retryInMs / 1000}s`
+    log(`${context} attempt ${attempt}/${totalAttempts} failed: ${detail} (${next})`)
+  }
+}
 
 // ── Run / cycle / marker helpers ─────────────────────────────────────────────
 
@@ -414,13 +436,21 @@ async function gfsFetch(src: DownloadSource, log: (m: string) => void, signal?: 
       const fff = String(step).padStart(3, '0')
       const url = `${nomads}/cgi-bin/filter_gfs_${res}.pl?dir=%2Fgfs.${date}%2F${hh}%2Fatmos&file=gfs.t${hh}z.${prod}.f${fff}&` + params.join('&')
       if (!src.includeWaves) {
-        if (!(await download(url, dest, signal))) { log(`${name}: run ${stamp} failed at step f${fff} — aborting`); return 'failed' }
+        if (!(await download(url, dest, signal, logDownloadFailure(log, `${name}: run ${stamp} step f${fff}`)))) {
+          log(`${name}: run ${stamp} failed at step f${fff} — aborting`)
+          return 'failed'
+        }
         continue
       }
 
       const atmos = dest + '.atmos'
       const wave = dest + '.wave'
-      if (!fs.existsSync(atmos) && !(await download(url, atmos, signal))) {
+      if (!fs.existsSync(atmos) && !(await download(
+        url,
+        atmos,
+        signal,
+        logDownloadFailure(log, `${name}: run ${stamp} atmosphere f${fff}`)
+      ))) {
         log(`${name}: run ${stamp} atmosphere failed at step f${fff} — aborting`)
         return 'failed'
       }
@@ -431,7 +461,12 @@ async function gfsFetch(src: DownloadSource, log: (m: string) => void, signal?: 
         waveParams.push('subregion=', `leftlon=${lon0}`, `rightlon=${lon1}`, `bottomlat=${lat0}`, `toplat=${lat1}`)
       }
       const waveUrl = `${nomads}/cgi-bin/filter_gfswave.pl?dir=%2Fgfs.${date}%2F${hh}%2Fwave%2Fgridded&file=gfswave.t${hh}z.global.0p25.f${fff}.grib2&` + waveParams.join('&')
-      if (!fs.existsSync(wave) && !(await download(waveUrl, wave, signal))) {
+      if (!fs.existsSync(wave) && !(await download(
+        waveUrl,
+        wave,
+        signal,
+        logDownloadFailure(log, `${name}: run ${stamp} GFS-Wave f${fff}`)
+      ))) {
         log(`${name}: run ${stamp} GFS-Wave failed at step f${fff} — aborting`)
         return 'failed'
       }
@@ -527,7 +562,10 @@ async function mfFetch(src: DownloadSource, log: (m: string) => void, signal?: A
         const dest = path.join(directory, `${name}__${stamp}__${p}_${g}.grb2`)
         if (fs.existsSync(dest)) continue
         const url = mfUrl(mfBase, spec.template, d, p, g)
-        if (!(await download(url, dest, signal))) { log(`${name}: run ${stamp} failed at ${p}/${g} — aborting`); return 'failed' }
+        if (!(await download(url, dest, signal, logDownloadFailure(log, `${name}: run ${stamp} ${p}/${g}`)))) {
+          log(`${name}: run ${stamp} failed at ${p}/${g} — aborting`)
+          return 'failed'
+        }
       }
     }
     writeMarker(directory, stamp, fingerprint)
