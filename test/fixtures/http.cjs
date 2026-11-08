@@ -74,6 +74,12 @@ async function fixture(t, options = {}) {
     }
     if (kind === 'datasets') {
       if (!datasets.has(id)) return json(404, { code: 'DATASET_NOT_FOUND' })
+      const parts = req.url.replace(API + '/', '').split('/')
+      if (action === 'versions' && parts[4] === 'assets') {
+        const dataset = datasets.get(id), bytes = bodies.get(parts[5])
+        if (parts[3] !== dataset.version || !dataset.assets.some(a => a.id === parts[5]) || !bytes) return json(404, {})
+        res.writeHead(200, { 'Content-Length': bytes.length }); return res.end(bytes)
+      }
       if (req.method === 'DELETE') {
         if (flags.conflict) return json(409, { code: 'DATASET_BUSY' })
         datasets.delete(id); res.writeHead(204); return res.end()
@@ -87,7 +93,7 @@ async function fixture(t, options = {}) {
   const descriptor = toDownloadSource(source, options.bbox)
   descriptor.base = upstream.base
   const plan = (date = candidateRuns(source.model)[0]) => planRun(descriptor, date)
-  const publisher = () => new CataloguePublisher(provider.base, tokenFile, root)
+  const publisher = legacyExport => new CataloguePublisher(provider.base, tokenFile, root, undefined, undefined, legacyExport)
   return { root, tokenFile, source, provider, upstream, bytes, descriptor, plan, publisher, flags, staged, datasets, bodies, declarations }
 }
 async function waitFor(check) {

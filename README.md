@@ -17,8 +17,9 @@ approval, existing-file handling and verification.
 Each configured source streams its selected model run directly into a staged
 multi-asset publication in Forecast Dataset Provider. GFS, GFS-Wave and Météo-France bodies
 are forwarded with backpressure; ICON-EU fragments are decompressed in memory,
-one variable at a time, and streamed into one asset per timestep. The downloader
-writes no GRIB, partial file, completion marker or local archive.
+one variable at a time, and streamed into one asset per timestep. During the
+transition, legacy export is enabled by default and writes verified filesystem
+copies of completed acquisitions. It can be explicitly disabled.
 
 The provider measures each asset's actual length and SHA-256 during reception.
 Only an explicit commit after all upstream streams complete makes the dataset
@@ -193,13 +194,68 @@ there. Configure a separate token file when switching catalogue servers.
 
 For repeated requests, see [redacted access diagnostics](docs/catalogue-access-diagnostics.md).
 
-The provider owns all acquisition bytes, including unfinished publications and
-archives. The downloader retains only settings and a private publication journal.
-Old `gribsRoot` options are ignored; existing directories are left untouched.
+The provider owns acquisition originals, including unfinished publications and
+archives. The downloader retains settings and a private publication journal,
+plus independent filesystem copies while legacy export is enabled. An existing
+`gribsRoot` value is reused; an explicit `legacyExportEnabled: false` is respected.
 Committed journals from beta.1 are reused without reading old files or markers,
 so already published acquisitions do not need an upstream download. Unpublished
 legacy files are not imported automatically; the next eligible acquisition is
 streamed from its upstream source.
+
+## Optional historical GRIB export
+
+To support consumers that read the former shared directory, **Export
+legacy GRIB files** (`legacyExportEnabled`) is enabled by default during the
+transition. In Signal K Plugin Config, set
+**Legacy GRIB export directory** (`gribsRoot`). The default root is
+`~/.signalk/gribs`, expanded for the Signal K server user. Other roots must be
+absolute paths. Existing `gribsRoot` values are reused on upgrade. Set
+`legacyExportEnabled: false` to opt out once the filesystem bridge is no longer
+needed. No automatic end date or silent opt-out is applied to this transition.
+
+After a catalogue acquisition commits, the plugin retrieves its immutable
+original assets from the provider, verifies their exact size and SHA-256, and
+publishes the historical layout, for example:
+
+```text
+gribs/
+  gfs-0p25/
+    gfs-0p25__20261108T00__f000.grb2
+    gfs-0p25__20261108T00__f003.grb2
+    .run-20261108T00.complete
+    archive/
+```
+
+GFS, GFS-Wave and ICON use one file per timestep; Météo-France retains the old
+package/group names. Completion markers keep the old JSON format `{ "params":
+... }`. Files are staged and checked before promotion, and the marker is written
+last. Consumers must continue using completion markers to select usable runs;
+the directory is not a transactional snapshot for concurrent readers.
+
+The newest exported run stays in the source directory. `archiveRuns` also keeps
+that many previous completed exports under `archive/`; zero keeps none. Cleanup
+recognizes only completion markers and matching files for that source, and
+leaves unrelated filenames alone. Use a directory reserved for these outputs.
+
+On the next automatic source check, or a manual download trigger, enabling
+export also copies the latest already acquired run without downloading that run
+again from the weather service. On restart, matching exported files are verified
+and reused. Damaged or missing copies can be rebuilt from the catalogue. Export
+failures are reported separately in the source status/webapp and retried on the
+normal source probe interval; they do not invalidate committed datasets. Manual
+sources need a manual trigger for export or retry.
+
+These are independent copies: **each GRIB is stored in the provider and in the
+export directory, approximately doubling GRIB disk usage for the same retained
+runs**. The config panel explains this cost, and the webapp displays a warning
+while export is enabled. Other caches and temporary staging use additional
+space. Export also requires a provider-to-export transfer (including network
+traffic if the catalogue is remote). The
+Forecast Dataset Provider and catalogue authorization remain required. This
+option provides a compatibility bridge, not standalone acquisition without a
+catalogue. Deleting catalogue acquisitions does not delete existing exported
+files; removing those copies remains an explicit filesystem operation.
 
 An unavailable provider or invalid token reports an error before any upstream
 body is opened. The next automatic check or manual trigger retries the acquisition.
@@ -235,7 +291,9 @@ Automatic work still obeys offline, captive and metered-connection settings.
   deletion. Provider conflicts defer cleanup until another publication.
 - Deleting source data in the webapp deletes its recorded catalogue acquisitions
   and staging publications. Removing only the source configuration leaves them
-  intact. Old filesystem directories are never scanned or removed automatically.
+  intact. Filesystem exports are managed while enabled, through
+  their historical layout and archive retention; catalogue deletion leaves them
+  intact.
   Settings changes and deletion are blocked while a transfer runs. Plugin stop
   aborts both HTTP sides and waits for the active transfer.
 

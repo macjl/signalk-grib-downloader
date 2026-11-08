@@ -96,6 +96,7 @@ export class Orchestrator {
         lastOutcome: st.lastOutcome,
         lastFinishedAt: st.lastFinishedAt,
         lastLog: st.lastLog,
+        legacyExport: this.catalogue.legacyExportStatus?.(s),
       }
     })
   }
@@ -113,7 +114,7 @@ export class Orchestrator {
 
   private needsProbe(source: SourceSetting): boolean {
     const last = this.lastRunStamp(source)
-    return last === null || last < probeRunStamp(source.model) || !this.paramsOk(source, last) || !this.published(source, last)
+    return last === null || last < probeRunStamp(source.model) || !this.paramsOk(source, last) || !this.published(source, last) || !!this.catalogue.exportPending?.(source)
   }
 
   // Per-source probe cadence is anchored to the last attempt, so another
@@ -172,6 +173,7 @@ export class Orchestrator {
       await this.catalogue.check(controller.signal)
       const previous = this.catalogue.latest(source)
       if (previous) await this.catalogue.verify(source, previous.stamp, previous.params, controller.signal)
+      await this.catalogue.exportLatest?.(source, onProgress, controller.signal)
       let outcome: Outcome = 'unavailable'
       const pending = this.catalogue.pendingStamp(source, ds.fingerprint)
       if (pending) {
@@ -191,6 +193,7 @@ export class Orchestrator {
         outcome = 'downloaded'
         break
       }
+      if (outcome === 'downloaded') await this.catalogue.exportLatest?.(source, onProgress, controller.signal)
       st.lastOutcome = outcome
       this.log(`${name}: download finished (${outcome})`)
       return true

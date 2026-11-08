@@ -86,11 +86,11 @@ const startPlugin = ({ seed, prepare } = {}) => {
   const plugin = makePlugin(server)
   const { router, call } = makeRouter()
   plugin.registerWithRouter(router)
-  plugin.start({})
+  plugin.start({ legacyExportEnabled: false })
   return { plugin, server, call, gribsRoot, dataDir, stop: () => plugin.stop() }
 }
 
-test('retired shared-directory settings cannot select a local-only downloader', async t => {
+test('default legacy export does not treat historical files as a standalone acquisition source', async t => {
   const dataDir = tmpDir(), retiredRoot = tmpDir()
   t.after(() => fs.rmSync(dataDir, { recursive: true, force: true }))
   t.after(() => fs.rmSync(retiredRoot, { recursive: true, force: true }))
@@ -101,7 +101,8 @@ test('retired shared-directory settings cannot select a local-only downloader', 
   const { router, call } = makeRouter()
   plugin.registerWithRouter(router)
   t.after(() => plugin.stop())
-  assert.strictEqual(plugin.schema().properties.gribsRoot, undefined)
+  assert.strictEqual(plugin.schema().properties.legacyExportEnabled.default, true)
+  assert.strictEqual(plugin.schema().properties.gribsRoot.default, '~/.signalk/gribs')
   plugin.start({ gribsRoot: retiredRoot, inputMode: 'local' })
   assert.strictEqual(call('GET', '/status').sources[0].lastRun, null,
     'retired filesystem completion markers are never read')

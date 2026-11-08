@@ -40,11 +40,11 @@ async function setup(t, options = {}) {
   const source = { model: 'gfs', hours: 3 }
   const descriptor = toDownloadSource(source); descriptor.base = upstream.base
   const plan = planRun(descriptor, new Date('2026-10-21T00:00:00Z'))
-  const publisher = () => new CataloguePublisher(provider.base, tokenFile, data)
+  const publisher = legacyExport => new CataloguePublisher(provider.base, tokenFile, data, undefined, undefined, legacyExport)
   const publish = (signal) => publisher().publish(source, plan, descriptor.fingerprint, () => {}, signal)
   const get = async route => { const response = await fetch(provider.base + API + route, { headers: { Authorization: 'Bearer integration-token' } }); assert.equal(response.status, 200); return response.json() }
   t.after(() => fs.rmSync(root, { recursive: true, force: true }))
-  return { root, data, publisher, publish, get, plan, upstream, loseCommit: () => { loseCommit = true } }
+  return { root, data, source, publisher, publish, get, plan, upstream, loseCommit: () => { loseCommit = true } }
 }
 
 test('actual provider: interrupted second asset preserves the first and resumes to one committed dataset', integration, async t => {
@@ -154,4 +154,23 @@ test('actual provider: wave retries, publication and retention never replace atm
   await f.publisher().removeSource(source)
   assert.deepEqual(Object.keys(await f.get('/datasets')), [atmospheric.datasetId])
   assert.deepEqual(fs.readdirSync(f.data).sort(), ['catalogue-publications', 'token'])
+})
+
+test('actual provider: legacy export reads immutable committed originals and writes the historical marker without upstream downloads', integration, async t => {
+  const { LegacyGribExporter, legacyFilename } = require('../dist/legacy-export')
+  const f = await setup(t), ref = await f.publish()
+  const root = path.join(f.root, 'legacy-gribs'), exporter = new LegacyGribExporter(root)
+  const publisher = f.publisher(exporter), upstream = f.upstream.calls.length
+  await publisher.exportLatest(f.source, () => {})
+  assert.equal(exporter.status('gfs-0p25').state, 'complete')
+  const detail = await f.get('/datasets/' + ref.datasetId)
+  for (const asset of detail.assets) {
+    const file = path.join(root, 'gfs-0p25', legacyFilename('gfs-0p25', f.plan.stamp, asset.id))
+    const bytes = fs.readFileSync(file)
+    assert.equal(bytes.length, asset.size)
+    assert.equal(hash(bytes), asset.sha256)
+  }
+  const marker = JSON.parse(fs.readFileSync(path.join(root, 'gfs-0p25', `.run-${f.plan.stamp}.complete`)))
+  assert.deepEqual(marker, { params: detail.requested.parameters })
+  assert.equal(f.upstream.calls.length, upstream)
 })

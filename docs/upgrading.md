@@ -34,6 +34,13 @@ together: Downloader 0.4.x publishes only to the catalogue, and Weather Provider
    Old shared GRIB files are left untouched and **are not imported automatically**.
    Until a complete acquisition is published and decoded, its Weather API source
    has no catalogue forecasts. Consider the download cost on metered connections.
+   During the transition, the historical export defaults to enabled in Plugin
+   Config (`legacyExportEnabled`, `gribsRoot`). Existing roots are reused and an
+   explicit `legacyExportEnabled: false` opts out. It restores the former source
+   directories, GRIB names and completion markers from committed datasets;
+   see [export configuration and retention](../README.md#optional-historical-grib-export).
+   The provider and access approval are still required. This bridge does not
+   import old files or provide standalone downloads without the catalogue.
 6. In Browser, check that acquisition progress becomes a complete dataset. Check
    the Weather Provider's status and a Weather API point request inside its actual
    forecast area and time range. Existing source-based Weather API provider IDs

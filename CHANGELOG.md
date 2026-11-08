@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.6.0] - 2026-11-08
+
+- Add a configurable historical GRIB filesystem export (`legacyExportEnabled` and
+  `gribsRoot`) from completed catalogue acquisitions, retaining legacy filenames,
+  `{ params }` completion markers and per-source archive retention (#24).
+- Enable the bridge by default during the transition, reuse existing
+  `gribsRoot` settings and respect an explicit `legacyExportEnabled: false`.
+- Warn in Plugin Config and the webapp that provider plus export copies
+  approximately double GRIB disk usage while export is enabled.
+- Stream and verify copies before publishing completion markers, preserve
+  working output on failed replacements and expose export errors separately.
+- Backfill already committed runs and retry failed exports without reacquiring
+  those forecasts upstream. Catalogue publication remains mandatory.
+
 ## [0.5.1] - 2026-10-31
 
 - Preserve automatically issued tokens when catalogue HTTP 401 is a permission
