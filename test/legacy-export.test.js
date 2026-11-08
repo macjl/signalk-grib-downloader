@@ -226,6 +226,7 @@ test('legacy export defaults to enabled and backfills an already-current catalog
   let status
   const res = { status: () => res, json: value => { status = value } }
   routes['get /status']({}, res)
+  assert.equal(status.legacyExportEnabled, true)
   assert.equal(status.sources[0].legacyExport.state, 'complete')
   assert.equal(status.sources[0].legacyExport.directory, path.join(root, 'gfs-0p25'))
   assert.equal(f.upstream.calls.length, upstream)
@@ -278,6 +279,7 @@ test('explicitly disabling the transition export is respected and leaves the tar
   let status
   const res = { status: () => res, json: value => { status = value } }
   routes['get /status']({}, res)
+  assert.equal(status.legacyExportEnabled, false)
   assert.equal(status.sources[0].legacyExport, undefined)
   assert.equal(fs.existsSync(root), false)
   assert.equal(f.provider.calls.length, before)

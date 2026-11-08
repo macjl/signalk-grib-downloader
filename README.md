@@ -246,8 +246,12 @@ failures are reported separately in the source status/webapp and retried on the
 normal source probe interval; they do not invalidate committed datasets. Manual
 sources need a manual trigger for export or retry.
 
-These are independent copies, with additional disk usage and a provider-to-
-export transfer (including network traffic if the catalogue is remote). The
+These are independent copies: **each GRIB is stored in the provider and in the
+export directory, approximately doubling GRIB disk usage for the same retained
+runs**. The config panel explains this cost, and the webapp displays a warning
+while export is enabled. Other caches and temporary staging use additional
+space. Export also requires a provider-to-export transfer (including network
+traffic if the catalogue is remote). The
 Forecast Dataset Provider and catalogue authorization remain required. This
 option provides a compatibility bridge, not standalone acquisition without a
 catalogue. Deleting catalogue acquisitions does not delete existing exported

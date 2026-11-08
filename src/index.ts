@@ -70,7 +70,7 @@ const buildSchema = (defaultInterval: number, defaultMultiplier: number) => ({
     },
     legacyExportEnabled: {
       type: 'boolean', title: 'Export legacy GRIB files', default: true,
-      description: 'Enabled by default during the transition for older filesystem consumers, with historical filenames and .complete markers. Disable explicitly when no longer needed. The catalogue is still required.',
+      description: 'Enabled by default during the transition. While enabled, GRIB files are stored twice: in Forecast Dataset Provider and in the export directory, approximately doubling GRIB disk usage. Uncheck to disable when no longer needed. The catalogue is still required.',
     },
     gribsRoot: {
       type: 'string', title: 'Legacy GRIB export directory', default: '~/.signalk/gribs',
@@ -367,6 +367,7 @@ module.exports = (server: ServerAPI): Plugin => {
         res.json({
           catalogueUrl: catalogue.endpoint,
           catalogueAccess: access?.status(),
+          legacyExportEnabled: infra.legacyExportEnabled === true,
           checkIntervalMinutes: intervalMinutes(),
           internetState,
           nextAutoTickAt: nextTickAtMs === null ? null : new Date(nextTickAtMs).toISOString(),

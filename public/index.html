@@ -89,6 +89,7 @@
     <h1>⚓ <span data-i18n="title">GRIB Downloader</span></h1>
     <div id="login-banner" class="card" style="display:none; border-color:#e3c47f; color:#e3c47f;"></div>
     <div id="runtime-banner" class="card alert"></div>
+    <div id="legacy-export-warning" class="card" role="status" style="display:none; border-color:#e3c47f; color:#e3c47f;"></div>
 
     <div class="card">
       <div class="mode-row">
@@ -157,6 +158,7 @@ const I18N = {
     saveError: 'Erreur : ', downloadAll: 'Tout télécharger', download: '⬇',
     stUpToDate: 'à jour', stStale: 'en retard', stRunning: 'téléchargement…', stError: 'erreur',
     stExportError: 'erreur export', stExporting: 'export fichiers…', stExportPending: 'export en attente', legacyExport: 'Export historique',
+    legacyStorageWarning: 'Export historique actif : les GRIB sont stockés deux fois, dans le Forecast Dataset Provider et dans le répertoire d’export. Leur occupation disque est donc environ doublée.',
     stWaiting: 'attente publication', stLate: 'publication en retard', stConfigChanged: 'config modifiée',
     stPublishing: 'publication au catalogue', stPublished: 'Catalogue', stManual: 'manuel', stNoData: 'aucune donnée',
     runtimeErrorTitle: 'Téléchargement automatique indisponible',
@@ -189,6 +191,7 @@ const I18N = {
     saveError: 'Error: ', downloadAll: 'Download all', download: '⬇',
     stUpToDate: 'up to date', stStale: 'behind', stRunning: 'downloading…', stError: 'error',
     stExportError: 'export error', stExporting: 'exporting files…', stExportPending: 'export pending', legacyExport: 'Legacy export',
+    legacyStorageWarning: 'Legacy export is enabled: GRIB files are stored twice, in Forecast Dataset Provider and in the export directory. Their disk usage is therefore approximately doubled.',
     stWaiting: 'awaiting publication', stLate: 'publication late', stConfigChanged: 'settings changed',
     stPublishing: 'catalogue publication pending', stPublished: 'Catalogue', stManual: 'manual', stNoData: 'no data',
     runtimeErrorTitle: 'Automatic downloads unavailable',
@@ -253,6 +256,7 @@ let config = { bbox: { latMin: 35, lonMin: -6, latMax: 45, lonMax: 17 }, sources
 let statusBySource = {}
 let schedulerError = null
 let internetState = 'unknown'
+let legacyExportEnabled = false
 let nextAutoTickAt = null
 let expanded = new Set()
 let pendingDataDeletions = new Set()
@@ -283,6 +287,12 @@ function renderRuntimeBanner() {
   }
   banner.innerHTML = `<b>${t.runtimeErrorTitle}</b><br>${escapeHtml(schedulerError)}`
   banner.style.display = 'block'
+}
+
+function renderLegacyExportWarning() {
+  const banner = document.getElementById('legacy-export-warning')
+  banner.textContent = legacyExportEnabled ? t.legacyStorageWarning : ''
+  banner.style.display = legacyExportEnabled ? 'block' : 'none'
 }
 
 // ── Map with editable bbox ───────────────────────────────────────────────────
@@ -583,6 +593,7 @@ function fillDetails(card, name) {
 // survives the polling cycle.
 function updateStatusUI() {
   renderRuntimeBanner()
+  renderLegacyExportWarning()
   const list = document.getElementById('src-list')
   for (const s of config.sources) {
     const name = dirName(s)
@@ -606,6 +617,7 @@ async function pollStatus() {
       return
     }
     const data = await r.json()
+    legacyExportEnabled = data.legacyExportEnabled === true
     schedulerError = data.schedulerError || null
     if (data.catalogueAccess?.state === 'pending') schedulerError = t.cataloguePending
     else if (data.catalogueAccess?.state === 'denied') schedulerError = t.catalogueDenied
