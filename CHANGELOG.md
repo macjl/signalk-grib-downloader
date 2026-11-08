@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [0.6.0] - 2026-11-08
 
 - Add a configurable historical GRIB filesystem export (`legacyExportEnabled` and
   `gribsRoot`) from completed catalogue acquisitions, retaining legacy filenames,
