@@ -7,6 +7,7 @@ import { Readable } from 'node:stream'
 import { SourceSetting } from './types'
 import { fingerprintsEqual, sourceDirName } from './scheduler'
 import { readAsset, RunPlan, RemoteAsset } from './downloader'
+import { LegacyGribExporter, LegacyExportStatus } from './legacy-export'
 
 const API = '/plugins/signalk-forecast-dataset-provider'
 const PRODUCER = 'signalk-grib-downloader'
@@ -35,7 +36,7 @@ const missing = (error: unknown, code: string) => error instanceof CatalogueHttp
 
 export class CataloguePublisher {
   readonly endpoint: string
-  constructor(endpoint: string, private tokenFile: string, private dataDir: string, private tokenReader?: () => string, private onUnauthorized?: (token: string) => void) {
+  constructor(endpoint: string, private tokenFile: string, private dataDir: string, private tokenReader?: () => string, private onUnauthorized?: (token: string) => void, private legacyExport?: LegacyGribExporter) {
     const url = new URL(endpoint)
     if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) throw new Error('Catalogue URL must be HTTP(S), without credentials, query or fragment')
     if (url.protocol === 'http:' && !['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)) throw new Error('Use HTTPS for a remote catalogue server')
@@ -82,9 +83,10 @@ export class CataloguePublisher {
     const record = this.read(source).records.find(r => r.stamp === stamp && r.version && fingerprintsEqual(r.params, params))
     return record?.version && record.datasetId ? { datasetId: record.datasetId, version: record.version, href: `/signalk/v2/api/resources/forecastDatasets/${record.datasetId}` } : null
   }
-  private async request(route: string, method: string, signal?: AbortSignal, json?: unknown, stream?: Readable): Promise<any> {
+  private async response(route: string, method: string, signal?: AbortSignal, json?: unknown, stream?: Readable): Promise<Response> {
     const token = this.tokenReader ? this.tokenReader() : this.tokenFile ? fs.readFileSync(this.tokenFile, 'utf8').trim() : ''
     const headers: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {}
+    headers['Accept-Encoding'] = 'identity'
     if (json !== undefined) headers['Content-Type'] = 'application/json'
     if (stream) headers['Content-Type'] = 'application/octet-stream'
     const response = await fetch(this.endpoint + API + route, {
@@ -98,7 +100,54 @@ export class CataloguePublisher {
       try { const body = await response.json() as { code?: unknown }; if (typeof body.code === 'string' && /^[A-Z_]+$/.test(body.code)) code = body.code } catch { /* generic proxy/plugin error */ }
       throw new CatalogueHttpError(response.status, code)
     }
+    return response
+  }
+  private async request(route: string, method: string, signal?: AbortSignal, json?: unknown, stream?: Readable): Promise<any> {
+    const response = await this.response(route, method, signal, json, stream)
     return response.status === 204 ? undefined : response.json()
+  }
+  legacyExportStatus(source: SourceSetting): LegacyExportStatus | undefined {
+    return this.legacyExport?.status(sourceDirName(source))
+  }
+  exportPending(source: SourceSetting): boolean {
+    if (!this.legacyExport) return false
+    const latest = this.latest(source)
+    if (!latest) return false
+    const reference = this.reference(source, latest.stamp, latest.params)
+    return !!reference && !this.legacyExport.matches(sourceDirName(source), latest.stamp, reference.version, Math.floor(source.archiveRuns ?? 0))
+  }
+  async exportLatest(source: SourceSetting, log: (message: string) => void, signal?: AbortSignal): Promise<void> {
+    if (!this.legacyExport) return
+    const latest = this.latest(source)
+    if (!latest) return
+    const record = this.read(source).records.find(r => r.stamp === latest.stamp && r.version && fingerprintsEqual(r.params, latest.params))!
+    const active = signal ?? new AbortController().signal
+    try {
+      if (!record.datasetId || !UUID.test(record.datasetId)) throw new Error('Invalid catalogue identity for legacy export')
+      await this.legacyExport.export({
+        source: sourceDirName(source), stamp: record.stamp, datasetId: record.datasetId!, version: record.version!, params: record.params,
+        archiveRuns: Math.floor(source.archiveRuns ?? 0),
+        assets: record.assets.map(asset => {
+          const receipt = this.expected(record, asset.id)
+          if (!receipt) throw new Error('Cannot export a catalogue asset without its size and SHA-256 receipt')
+          return receipt
+        }),
+      }, async asset => {
+        const response = await this.response(`/datasets/${record.datasetId}/versions/${record.version}/assets/${asset.id}`, 'GET', active)
+        const length = response.headers.get('content-length')
+        if (response.status !== 200 || !response.body || response.headers.get('content-encoding') || (length !== null && Number(length) !== asset.size)) {
+          await response.body?.cancel()
+          throw new Error('Unexpected catalogue representation for legacy export')
+        }
+        return Readable.fromWeb(response.body as any)
+      }, active)
+      log(`legacy export: ${sourceDirName(source)} ${record.stamp} complete`)
+    } catch (error) {
+      this.legacyExport.failed(sourceDirName(source), error)
+      active.throwIfAborted()
+      // Filesystem failure must not invalidate a successfully committed dataset.
+      log(`legacy export failed: ${error}`)
+    }
   }
   async check(signal?: AbortSignal): Promise<void> {
     const status = await this.request('/status', 'GET', signal)

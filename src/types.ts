@@ -1,7 +1,7 @@
 export type ModelId = 'gfs' | 'gfs-wave' | 'arome' | 'arpege' | 'icon-eu'
 
 // Stable source identity: <model>[-<resolution>] (e.g. "gfs-0p25", "icon-eu").
-// All original bytes and archived acquisitions are owned by the catalogue.
+// The catalogue owns originals; optional legacy filesystem exports are copies.
 export interface SourceSetting {
   model: ModelId
   resolution?: string   // gfs: 0p25|0p50|1p00 ; gfs-wave: 0p25 ; arome: 0025|001 ; arpege: 01|025
@@ -30,6 +30,8 @@ export type InternetState = 'online' | 'offline' | 'metered' | 'captive' | 'unkn
 export interface PluginSettings {
   catalogueUrl?: string             // Signal K server URL, default loopback:3000
   catalogueTokenFile?: string       // readwrite bearer token; never exposed via settings/status
+  legacyExportEnabled?: boolean     // opt-in bridge for historical file consumers
+  gribsRoot?: string                // export root only; catalogue remains authoritative
   checkIntervalMinutes?: number      // optional override of every model's probe interval
   meteredIntervalMultiplier?: number // auto waits stretch by this factor when metered
 }
@@ -45,6 +47,7 @@ export interface AppSettings {
 }
 
 export interface SourceStatus {
+  legacyExport?: import('./legacy-export').LegacyExportStatus
   name: string
   model: ModelId
   autoDownload: boolean

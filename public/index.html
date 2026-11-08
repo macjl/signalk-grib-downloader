@@ -156,6 +156,7 @@ const I18N = {
     save: 'Enregistrer', saved: 'Enregistré ✓', dirty: 'Modifications non enregistrées',
     saveError: 'Erreur : ', downloadAll: 'Tout télécharger', download: '⬇',
     stUpToDate: 'à jour', stStale: 'en retard', stRunning: 'téléchargement…', stError: 'erreur',
+    stExportError: 'erreur export', stExporting: 'export fichiers…', stExportPending: 'export en attente', legacyExport: 'Export historique',
     stWaiting: 'attente publication', stLate: 'publication en retard', stConfigChanged: 'config modifiée',
     stPublishing: 'publication au catalogue', stPublished: 'Catalogue', stManual: 'manuel', stNoData: 'aucune donnée',
     runtimeErrorTitle: 'Téléchargement automatique indisponible',
@@ -165,7 +166,7 @@ const I18N = {
     lastAttempt: 'dernière tentative', noAttempt: 'aucune tentative depuis le démarrage', logTitle: 'Journal du dernier téléchargement',
     maxLbl: 'max', totalVol: 'Volume estimé par run :', perRun: '/ run',
     volumeUnknown: 'estimation indisponible',
-    archivesLbl: 'archives', archivesTitle: 'Acquisitions précédentes conservées dans le catalogue (0 = aucune)',
+    archivesLbl: 'archives', archivesTitle: 'Acquisitions précédentes conservées dans le catalogue et, si activé, dans l’export historique (0 = aucune)',
     confirmDeleteData: n => `Supprimer aussi les données téléchargées de « ${n} » (acquisitions et archives du catalogue) ?\nElles seront effacées à l'enregistrement.`,
     loginRequired: 'Connexion requise — <a href="/admin/#/login" style="color:#7fc4e3">connectez-vous à SignalK</a> puis rechargez cette page.',
   },
@@ -187,6 +188,7 @@ const I18N = {
     save: 'Save', saved: 'Saved ✓', dirty: 'Unsaved changes',
     saveError: 'Error: ', downloadAll: 'Download all', download: '⬇',
     stUpToDate: 'up to date', stStale: 'behind', stRunning: 'downloading…', stError: 'error',
+    stExportError: 'export error', stExporting: 'exporting files…', stExportPending: 'export pending', legacyExport: 'Legacy export',
     stWaiting: 'awaiting publication', stLate: 'publication late', stConfigChanged: 'settings changed',
     stPublishing: 'catalogue publication pending', stPublished: 'Catalogue', stManual: 'manual', stNoData: 'no data',
     runtimeErrorTitle: 'Automatic downloads unavailable',
@@ -196,7 +198,7 @@ const I18N = {
     lastAttempt: 'last attempt', noAttempt: 'no attempt since startup', logTitle: 'Last download log',
     maxLbl: 'max', totalVol: 'Estimated volume per run:', perRun: '/ run',
     volumeUnknown: 'estimate unavailable',
-    archivesLbl: 'archives', archivesTitle: 'Previous acquisitions kept in the catalogue (0 = none)',
+    archivesLbl: 'archives', archivesTitle: 'Previous acquisitions kept in the catalogue and, when enabled, the legacy export (0 = none)',
     confirmDeleteData: n => `Also delete the downloaded data of "${n}" (catalogue acquisitions and archives)?\nDeleted when you save.`,
     loginRequired: 'Login required — <a href="/admin/#/login" style="color:#7fc4e3">log in to SignalK</a> and reload this page.',
   },
@@ -364,6 +366,9 @@ function sourceStateBadge(s) {
   if (!st) return ''
   if (st.running) return `<span class="badge run">${t.stRunning}</span>`
   if (st.lastError) return `<span class="badge err" title="${st.lastError.replace(/"/g, '&quot;')}">${t.stError}</span>`
+  if (st.legacyExport?.lastError) return `<span class="badge err" title="${escapeHtml(st.legacyExport.lastError)}">${t.stExportError}</span>`
+  if (st.legacyExport?.state === 'exporting') return `<span class="badge run">${t.stExporting}</span>`
+  if (st.catalogue && st.legacyExport?.state === 'pending') return `<span class="badge wait">${t.stExportPending}</span>`
   if (st.publicationPending) return `<span class="badge wait">${t.stPublishing}</span>`
   if (s.autoDownload === false) return `<span class="badge off">${t.stManual}</span>`
   if (st.configStale) return `<span class="badge stale">${t.stConfigChanged}</span>`
@@ -564,11 +569,13 @@ function fillDetails(card, name) {
     ? `${t.lastAttempt} : ${new Date(st.lastFinishedAt).toLocaleString()}`
     : (st.running ? '' : t.noAttempt)
   const err = st.lastError
-    ? `<div style="color:#e37f8a;font-size:12px;margin-top:4px">⚠ ${st.lastError}</div>` : ''
+    ? `<div style="color:#e37f8a;font-size:12px;margin-top:4px">⚠ ${escapeHtml(st.lastError)}</div>` : ''
+  const exportInfo = st.legacyExport
+    ? `<div style="font-size:12px;margin-top:4px">${t.legacyExport}: ${escapeHtml(st.legacyExport.directory)}${st.legacyExport.lastError ? `<br>⚠ ${escapeHtml(st.legacyExport.lastError)}` : ''}</div>` : ''
   const logHtml = st.lastLog?.length
     ? `<div class="log">${st.lastLog.map(l => l.replace(/</g, '&lt;')).join('\n')}</div>`
     : ''
-  slot.innerHTML = `<div style="font-size:11px;color:#9fb0c5;padding-left:24px;margin-top:4px">${t.logTitle} — ${when}</div>${err}${logHtml}`
+  slot.innerHTML = `<div style="font-size:11px;color:#9fb0c5;padding-left:24px;margin-top:4px">${t.logTitle} — ${when}</div>${err}${exportInfo}${logHtml}`
 }
 
 // Refresh only the dynamic parts of each card — badges, status line,

@@ -5,6 +5,7 @@ import { Path, Plugin, ServerAPI } from '@signalk/server-api'
 import { Orchestrator, ProbeTiming } from './orchestrator'
 import { CataloguePublisher } from './catalogue'
 import { CatalogueAccess } from './catalogue-access'
+import { LegacyGribExporter } from './legacy-export'
 import { sourceDirName } from './scheduler'
 import { AppSettings, InternetState, PluginSettings, SourceSetting } from './types'
 
@@ -66,6 +67,14 @@ const buildSchema = (defaultInterval: number, defaultMultiplier: number) => ({
       type: 'string', title: 'Catalogue token file',
       description: 'Token file, default <plugin data directory>/catalogue-token. When missing, approve the automatic readwrite request in Signal K Security > Access Requests. File contents are never returned by the webapp.',
       default: '',
+    },
+    legacyExportEnabled: {
+      type: 'boolean', title: 'Export legacy GRIB files', default: false,
+      description: 'Export committed catalogue acquisitions for older filesystem consumers, with historical filenames and .complete markers. The catalogue is still required.',
+    },
+    gribsRoot: {
+      type: 'string', title: 'Legacy GRIB export directory', default: '~/.signalk/gribs',
+      description: 'Used only when legacy export is enabled. Each source has its own directory; archiveRuns also controls local historical archives.',
     },
   },
 })
@@ -306,12 +315,15 @@ module.exports = (server: ServerAPI): Plugin => {
       infra = {
         catalogueUrl: options?.catalogueUrl,
         catalogueTokenFile: options?.catalogueTokenFile,
+        legacyExportEnabled: options?.legacyExportEnabled === true,
+        gribsRoot: options?.gribsRoot,
         checkIntervalMinutes: validInterval(options?.checkIntervalMinutes),
         meteredIntervalMultiplier: validMultiplier(options?.meteredIntervalMultiplier),
       }
       const tokenFile = expandHome(infra.catalogueTokenFile || path.join(server.getDataDirPath(), 'catalogue-token'))
       if (!path.isAbsolute(tokenFile)) throw new Error('Catalogue token file must be absolute')
-      catalogue = new CataloguePublisher(infra.catalogueUrl || 'http://127.0.0.1:3000', tokenFile, server.getDataDirPath(), () => authorizer.token(), token => authorizer.rejected(token))
+      const legacyExport = infra.legacyExportEnabled ? new LegacyGribExporter(expandHome(infra.gribsRoot || '~/.signalk/gribs')) : undefined
+      catalogue = new CataloguePublisher(infra.catalogueUrl || 'http://127.0.0.1:3000', tokenFile, server.getDataDirPath(), () => authorizer.token(), token => authorizer.rejected(token), legacyExport)
       const authorizer = new CatalogueAccess({
         endpoint: catalogue.endpoint, tokenFile, dataDir: server.getDataDirPath(),
         pluginId: PLUGIN_ID, permissions: 'readwrite', onChange: updateStatus,
