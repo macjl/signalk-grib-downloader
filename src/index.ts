@@ -69,8 +69,8 @@ const buildSchema = (defaultInterval: number, defaultMultiplier: number) => ({
       default: '',
     },
     legacyExportEnabled: {
-      type: 'boolean', title: 'Export legacy GRIB files', default: false,
-      description: 'Export committed catalogue acquisitions for older filesystem consumers, with historical filenames and .complete markers. The catalogue is still required.',
+      type: 'boolean', title: 'Export legacy GRIB files', default: true,
+      description: 'Enabled by default during the transition for older filesystem consumers, with historical filenames and .complete markers. Disable explicitly when no longer needed. The catalogue is still required.',
     },
     gribsRoot: {
       type: 'string', title: 'Legacy GRIB export directory', default: '~/.signalk/gribs',
@@ -315,7 +315,7 @@ module.exports = (server: ServerAPI): Plugin => {
       infra = {
         catalogueUrl: options?.catalogueUrl,
         catalogueTokenFile: options?.catalogueTokenFile,
-        legacyExportEnabled: options?.legacyExportEnabled === true,
+        legacyExportEnabled: options?.legacyExportEnabled !== false,
         gribsRoot: options?.gribsRoot,
         checkIntervalMinutes: validInterval(options?.checkIntervalMinutes),
         meteredIntervalMultiplier: validMultiplier(options?.meteredIntervalMultiplier),

@@ -4,9 +4,11 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
-- Add an opt-in historical GRIB filesystem export (`legacyExportEnabled` and
+- Add a configurable historical GRIB filesystem export (`legacyExportEnabled` and
   `gribsRoot`) from completed catalogue acquisitions, retaining legacy filenames,
   `{ params }` completion markers and per-source archive retention (#24).
+- Enable the bridge by default during the transition, reuse existing
+  `gribsRoot` settings and respect an explicit `legacyExportEnabled: false`.
 - Stream and verify copies before publishing completion markers, preserve
   working output on failed replacements and expose export errors separately.
 - Backfill already committed runs and retry failed exports without reacquiring

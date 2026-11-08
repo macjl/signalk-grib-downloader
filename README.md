@@ -17,9 +17,9 @@ approval, existing-file handling and verification.
 Each configured source streams its selected model run directly into a staged
 multi-asset publication in Forecast Dataset Provider. GFS, GFS-Wave and Météo-France bodies
 are forwarded with backpressure; ICON-EU fragments are decompressed in memory,
-one variable at a time, and streamed into one asset per timestep. By default the
-downloader keeps only its journal. An optional legacy export writes verified
-copies of completed catalogue acquisitions for filesystem consumers.
+one variable at a time, and streamed into one asset per timestep. During the
+transition, legacy export is enabled by default and writes verified filesystem
+copies of completed acquisitions. It can be explicitly disabled.
 
 The provider measures each asset's actual length and SHA-256 during reception.
 Only an explicit commit after all upstream streams complete makes the dataset
@@ -196,8 +196,8 @@ For repeated requests, see [redacted access diagnostics](docs/catalogue-access-d
 
 The provider owns acquisition originals, including unfinished publications and
 archives. The downloader retains settings and a private publication journal,
-plus independent filesystem copies only when legacy export is explicitly enabled.
-An existing `gribsRoot` setting alone does not enable export.
+plus independent filesystem copies while legacy export is enabled. An existing
+`gribsRoot` value is reused; an explicit `legacyExportEnabled: false` is respected.
 Committed journals from beta.1 are reused without reading old files or markers,
 so already published acquisitions do not need an upstream download. Unpublished
 legacy files are not imported automatically; the next eligible acquisition is
@@ -205,12 +205,14 @@ streamed from its upstream source.
 
 ## Optional historical GRIB export
 
-To support consumers that read the former shared directory, enable **Export
-legacy GRIB files** (`legacyExportEnabled`) in Signal K Plugin Config and set
+To support consumers that read the former shared directory, **Export
+legacy GRIB files** (`legacyExportEnabled`) is enabled by default during the
+transition. In Signal K Plugin Config, set
 **Legacy GRIB export directory** (`gribsRoot`). The default root is
 `~/.signalk/gribs`, expanded for the Signal K server user. Other roots must be
-absolute paths. Export is **off by default**, including after an upgrade with an
-old `gribsRoot` value.
+absolute paths. Existing `gribsRoot` values are reused on upgrade. Set
+`legacyExportEnabled: false` to opt out once the filesystem bridge is no longer
+needed. No automatic end date or silent opt-out is applied to this transition.
 
 After a catalogue acquisition commits, the plugin retrieves its immutable
 original assets from the provider, verifies their exact size and SHA-256, and
@@ -285,7 +287,7 @@ Automatic work still obeys offline, captive and metered-connection settings.
   deletion. Provider conflicts defer cleanup until another publication.
 - Deleting source data in the webapp deletes its recorded catalogue acquisitions
   and staging publications. Removing only the source configuration leaves them
-  intact. Filesystem exports are managed only when explicitly enabled, through
+  intact. Filesystem exports are managed while enabled, through
   their historical layout and archive retention; catalogue deletion leaves them
   intact.
   Settings changes and deletion are blocked while a transfer runs. Plugin stop

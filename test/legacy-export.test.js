@@ -206,7 +206,7 @@ test('an export disk failure is reported separately and can be retried without d
   await orch.stop()
 })
 
-test('plugin configuration enables legacy backfill for an already-current catalogue run', async t => {
+test('legacy export defaults to enabled and backfills an already-current catalogue run', async t => {
   const bbox = { latMin: 35, lonMin: -6, latMax: 45, lonMax: 17 }
   const f = await fixture(t, { bbox }), publisher = f.publisher()
   const plan = f.plan()
@@ -219,7 +219,7 @@ test('plugin configuration enables legacy backfill for an already-current catalo
   plugin.registerWithRouter(router)
   t.after(() => plugin.stop())
   const upstream = f.upstream.calls.length
-  plugin.start({ catalogueUrl: f.provider.base, catalogueTokenFile: f.tokenFile, legacyExportEnabled: true, gribsRoot: root, sources: [f.source], bbox })
+  plugin.start({ catalogueUrl: f.provider.base, catalogueTokenFile: f.tokenFile, gribsRoot: root, sources: [f.source], bbox })
   const marker = path.join(root, 'gfs-0p25', `.run-${plan.stamp}.complete`)
   const { waitFor } = require('./fixtures/http.cjs')
   await waitFor(() => fs.existsSync(marker))
@@ -261,4 +261,25 @@ test('a smaller same-run subset reuses matching files and removes obsolete times
   await f.exporter.export(next, async () => { throw new Error('Existing unchanged file should be reused') }, f.signal)
   assert.equal(fs.existsSync(path.join(f.folder, 'gfs-0p25__20261108T00__f003.grb2')), false)
   assert.deepEqual(JSON.parse(fs.readFileSync(f.marker(first.stamp))), { params: next.params })
+})
+
+test('explicitly disabling the transition export is respected and leaves the target untouched', async t => {
+  const bbox = { latMin: 35, lonMin: -6, latMax: 45, lonMax: 17 }
+  const f = await fixture(t, { bbox }), plan = f.plan()
+  await f.publisher().publish(f.source, plan, f.descriptor.fingerprint, () => {})
+  const root = path.join(f.root, 'disabled-export'), routes = {}
+  const server = { getDataDirPath: () => f.root, getSelfPath: () => 'online', debug: () => {}, setPluginStatus: () => {}, streambundle: { getSelfStream: () => ({ onValue: () => () => {} }) } }
+  const plugin = require('../dist/index')(server), router = {}
+  for (const method of ['get', 'post', 'put', 'delete']) router[method] = (url, handler) => { routes[method + ' ' + url] = handler }
+  plugin.registerWithRouter(router); t.after(() => plugin.stop())
+  const before = f.provider.calls.length
+  plugin.start({ catalogueUrl: f.provider.base, catalogueTokenFile: f.tokenFile, legacyExportEnabled: false, gribsRoot: root, sources: [f.source], bbox })
+  await new Promise(resolve => setTimeout(resolve, 25))
+  let status
+  const res = { status: () => res, json: value => { status = value } }
+  routes['get /status']({}, res)
+  assert.equal(status.sources[0].legacyExport, undefined)
+  assert.equal(fs.existsSync(root), false)
+  assert.equal(f.provider.calls.length, before)
+  await plugin.stop()
 })
