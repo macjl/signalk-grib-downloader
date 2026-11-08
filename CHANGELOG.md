@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.6.1] - 2026-11-08
+
+- Correct the development dependency lock metadata for @js-temporal/polyfill;
+  runtime legacy export behavior is unchanged from 0.6.0.
+
 ## [0.6.0] - 2026-11-08
 
 - Add a configurable historical GRIB filesystem export (`legacyExportEnabled` and
