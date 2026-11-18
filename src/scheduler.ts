@@ -127,6 +127,8 @@ export function defaultResolution(model: ModelId): string | undefined {
 // Stable catalogue source ID: <model>[-<resolution>]. Atmospheric and wave
 // acquisitions keep independent publication journals and retention histories.
 export function sourceDirName(s: SourceSetting): string {
+  if (s.remoteServer)
+    return `signalk-${s.remoteServer}__${s.model}${s.resolution ? '-' + s.resolution : ''}`
   const res = s.resolution || defaultResolution(s.model)
   return res ? `${s.model}-${res}` : s.model
 }

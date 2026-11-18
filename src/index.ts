@@ -7,6 +7,7 @@ import { CataloguePublisher } from './catalogue'
 import { CatalogueAccess } from './catalogue-access'
 import { LegacyGribExporter } from './legacy-export'
 import { sourceDirName } from './scheduler'
+import { RemoteCatalogue, normalizeRemoteUrl, remoteId } from './remote-catalogue'
 import { AppSettings, InternetState, PluginSettings, SourceSetting } from './types'
 
 const PLUGIN_ID = 'signalk-grib-downloader'
@@ -68,6 +69,20 @@ const buildSchema = (defaultInterval: number, defaultMultiplier: number) => ({
       description: 'Token file, default <plugin data directory>/catalogue-token. When missing, approve the automatic readwrite request in Signal K Security > Access Requests. File contents are never returned by the webapp.',
       default: '',
     },
+    remoteServers: {
+      type: 'array',
+      title: 'Remote Signal K sources',
+      items: {
+        type: 'object',
+        required: ['id', 'url'],
+        properties: {
+          id: { type: 'string', title: 'Server identifier', pattern: remoteId.source },
+          url: { type: 'string', title: 'Signal K HTTPS base URL' },
+          tokenFile: { type: 'string', title: 'Remote token file',
+            description: 'Optional separate token. Use read/write to request a crop, read-only for full datasets when there is no crop capability.' },
+        },
+      },
+    },
     legacyExportEnabled: {
       type: 'boolean', title: 'Export legacy GRIB files', default: true,
       description: 'Enabled by default during the transition. While enabled, GRIB files are stored twice: in Forecast Dataset Provider and in the export directory, approximately doubling GRIB disk usage. Uncheck to disable when no longer needed. The catalogue is still required.',
@@ -80,6 +95,8 @@ const buildSchema = (defaultInterval: number, defaultMultiplier: number) => ({
 })
 
 function parseSourceName(name: string): SourceSetting | undefined {
+  const remote = /^signalk-([a-z0-9][a-z0-9-]{0,31})__(gfs-wave|gfs|arome|arpege|icon-eu)(?:-([a-zA-Z0-9]{1,16}))?$/.exec(name)
+  if (remote) return { remoteServer: remote[1], model: remote[2] as SourceSetting['model'], resolution: remote[3] }
   if (name === 'icon-eu') return { model: 'icon-eu' }
   const match = /^(gfs-wave|gfs|arome|arpege)-([A-Za-z0-9]+)$/.exec(name)
   return match ? { model: match[1] as SourceSetting['model'], resolution: match[2] } : undefined
@@ -98,6 +115,7 @@ module.exports = (server: ServerAPI): Plugin => {
   let internetState: InternetState = 'unknown'
   let stopInternetStream: (() => void) | null = null
   let infra: PluginSettings = {}
+  let remotes = new Map<string, RemoteCatalogue>()
   let catalogue: CataloguePublisher
   let access: CatalogueAccess | null = null
   const deleting = new Map<string, AbortController>()
@@ -296,7 +314,8 @@ module.exports = (server: ServerAPI): Plugin => {
       catalogue,
       (msg: string) => server.debug(msg),
       updateStatus,
-      settings.bbox
+      settings.bbox,
+      remotes
     )
 
     if (sources.some(s => s.autoDownload !== false)) {
@@ -322,6 +341,18 @@ module.exports = (server: ServerAPI): Plugin => {
       }
       const tokenFile = expandHome(infra.catalogueTokenFile || path.join(server.getDataDirPath(), 'catalogue-token'))
       if (!path.isAbsolute(tokenFile)) throw new Error('Catalogue token file must be absolute')
+      remotes = new Map()
+      const destination = normalizeRemoteUrl(infra.catalogueUrl || 'http://127.0.0.1:3000')
+      for (const peer of options?.remoteServers ?? []) {
+        if (!peer || typeof peer.id !== 'string' || !remoteId.test(peer.id) || remotes.has(peer.id))
+          throw new Error('Remote Signal K server identifiers must be valid and unique')
+        const remoteToken = peer.tokenFile ? expandHome(peer.tokenFile) : undefined
+        if (remoteToken && (!path.isAbsolute(remoteToken) || path.resolve(remoteToken) === path.resolve(tokenFile)))
+          throw new Error('Configure a separate absolute token file for the remote Signal K source')
+        const remote = new RemoteCatalogue({ ...peer, tokenFile: remoteToken })
+        if (remote.endpoint === destination) throw new Error('Use a different server for the remote source and destination catalogue')
+        remotes.set(peer.id, remote)
+      }
       const legacyExport = infra.legacyExportEnabled ? new LegacyGribExporter(expandHome(infra.gribsRoot || '~/.signalk/gribs')) : undefined
       catalogue = new CataloguePublisher(infra.catalogueUrl || 'http://127.0.0.1:3000', tokenFile, server.getDataDirPath(), () => authorizer.token(), token => authorizer.rejected(token), legacyExport)
       const authorizer = new CatalogueAccess({
@@ -378,7 +409,7 @@ module.exports = (server: ServerAPI): Plugin => {
       // Operational settings, webapp-managed. ('/config' would collide with
       // SignalK's built-in plugin config routes.)
       router.get('/settings', (_req: any, res: any) => {
-        res.json({ ...settings, checkIntervalMinutes: intervalMinutes() })
+        res.json({ ...settings, checkIntervalMinutes: intervalMinutes(), remoteServerIds: [...remotes.keys()] })
       })
 
       router.put('/settings', (req: any, res: any) => {
@@ -388,7 +419,8 @@ module.exports = (server: ServerAPI): Plugin => {
         if (!nextRaw || typeof nextRaw !== 'object' || (nextRaw.sources !== undefined && !Array.isArray(nextRaw.sources))) {
           return res.status(400).json({ error: 'invalid settings' })
         }
-        const next = normalizeSettings(nextRaw)
+        const { sources, bbox, mode, checkIntervalMinutes } = nextRaw
+        const next = normalizeSettings({ sources, bbox: bbox ?? settings.bbox, mode, checkIntervalMinutes })
         const valid = ['gfs', 'gfs-wave', 'arome', 'arpege', 'icon-eu']
         if ((next.sources ?? []).some(s => !valid.includes(s.model))) {
           return res.status(400).json({ error: `model must be one of: ${valid.join(', ')}` })
@@ -396,10 +428,14 @@ module.exports = (server: ServerAPI): Plugin => {
         if ((next.sources ?? []).some(s => s.model === 'gfs-wave' && s.resolution && s.resolution !== '0p25')) {
           return res.status(400).json({ error: 'GFS-Wave supports only 0p25 resolution' })
         }
+        if ((next.sources ?? []).some(s => s.remoteServer && (!remotes.has(s.remoteServer) ||
+            (s.resolution && !/^[a-zA-Z0-9]{1,16}$/.test(s.resolution))))) {
+          return res.status(400).json({ error: 'Choose a configured remote Signal K server and a valid resolution' })
+        }
         const names = (next.sources ?? []).map(s => sourceDirName(s))
         if (names.some(name => !/^[A-Za-z0-9_-]+$/.test(name))) return res.status(400).json({ error: 'invalid source name' })
         if (new Set(names).size !== names.length) {
-          return res.status(400).json({ error: 'duplicate source: each (model, resolution) pair must be unique' })
+          return res.status(400).json({ error: 'duplicate source: each (server, model, resolution) combination must be unique' })
         }
         if ((next.sources ?? []).some(s =>
             s.archiveRuns !== undefined && (!Number.isFinite(s.archiveRuns) || s.archiveRuns < 0))) {

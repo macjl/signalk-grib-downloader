@@ -19,8 +19,21 @@ export interface DownloadSource {
   base?: string // Upstream override for isolated tests/proxies; never contains the catalogue token.
   fingerprint: unknown
 }
-export interface RemoteAsset { id: string; urls: string[]; compression?: 'bzip2' }
-export interface RunPlan { stamp: string; probe: string; assets: RemoteAsset[] }
+export interface RemoteAsset {
+  id: string
+  urls: string[]
+  compression?: 'bzip2'
+  catalogue?: { token?: string; size: number; sha256: string }
+}
+export interface RunPlan {
+  stamp: string
+  probe: string
+  assets: RemoteAsset[]
+  remote?: {
+    metadata: Record<string, unknown>
+    provenance: Record<string, unknown>
+  }
+}
 const UA = 'signalk-grib-downloader/0.4 (direct forecastDatasets producer)'
 const HTTP_TIMEOUT_MS = 60_000
 const MAX_ICON_COMPRESSED_BYTES = 128 * 1024 ** 2
@@ -139,7 +152,9 @@ async function* upstream(asset: RemoteAsset, signal: AbortSignal): AsyncGenerato
     touch()
     let reader: ReadableStreamDefaultReader<Uint8Array> | undefined
     try {
-      const response = await fetch(url, { headers: { 'User-Agent': UA, 'Accept-Encoding': 'identity' }, redirect: 'follow', signal: active })
+      const headers: Record<string, string> = { 'User-Agent': UA, 'Accept-Encoding': 'identity' }
+      if (asset.catalogue?.token) headers.Authorization = 'Bearer ' + asset.catalogue.token
+      const response = await fetch(url, { headers, redirect: asset.catalogue ? 'error' : 'follow', signal: active })
       if (response.status !== 200 || !response.body) {
         await response.body?.cancel()
         throw new Error(`Upstream asset: HTTP ${response.status}`)

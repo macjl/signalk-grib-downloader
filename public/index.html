@@ -169,6 +169,9 @@ const I18N = {
     maxLbl: 'max', totalVol: 'Volume estimé par run :', perRun: '/ run',
     volumeUnknown: 'estimation indisponible',
     archivesLbl: 'archives', archivesTitle: 'Nombre d’acquisitions précédentes sans expiration et, si activé, d’exports historiques (0 = aucune)',
+    upstreamOrigin: 'Serveur d’origine', historicalOrigin: 'Source historique',
+    remoteSelection: 'Zone de la carte si le serveur peut découper, sinon GRIB complet',
+    anyResolution: 'Toute résolution',
     retentionLbl: 'jours', retentionTitle: 'Durée de conservation des nouvelles acquisitions dans le catalogue, après leur publication. 0 utilise le nombre d’archives.',
     confirmDeleteData: n => `Supprimer aussi les données téléchargées de « ${n} » (acquisitions et archives du catalogue) ?\nElles seront effacées à l'enregistrement.`,
     loginRequired: 'Connexion requise — <a href="/admin/#/login" style="color:#7fc4e3">connectez-vous à SignalK</a> puis rechargez cette page.',
@@ -203,6 +206,9 @@ const I18N = {
     maxLbl: 'max', totalVol: 'Estimated volume per run:', perRun: '/ run',
     volumeUnknown: 'estimate unavailable',
     archivesLbl: 'archives', archivesTitle: 'Number of previous datasets without an expiration and, when enabled, legacy exports (0 = none)',
+    upstreamOrigin: 'Source server', historicalOrigin: 'Historical upstream',
+    remoteSelection: 'Map area if the server can crop, otherwise complete GRIB',
+    anyResolution: 'Any resolution',
     retentionLbl: 'days', retentionTitle: 'Catalogue lifetime for new acquisitions after publication. 0 uses the archive count.',
     confirmDeleteData: n => `Also delete the downloaded data of "${n}" (catalogue acquisitions and archives)?\nDeleted when you save.`,
     loginRequired: 'Login required — <a href="/admin/#/login" style="color:#7fc4e3">log in to SignalK</a> and reload this page.',
@@ -224,6 +230,7 @@ const MODELS = {
 // Volume estimation (MB) — constants measured on real downloads.
 // GFS is bbox-subsetted server-side: size ∝ grid points × steps.
 function estimateMB(s) {
+  if (s.remoteServer) return NaN
   const hours = s.hours ?? MODELS[s.model].maxHours
   // No measured wave compression estimate yet; do not show zero or reuse
   // atmospheric sizing. Any total including waves is also unknown.
@@ -369,6 +376,7 @@ function refreshRect(fit) {
 // Directory name derived from model+resolution — the contract with the provider.
 const DEFAULT_RES = { gfs: '0p25', 'gfs-wave': '0p25', arome: '0025', arpege: '01', 'icon-eu': null }
 function dirName(s) {
+  if (s.remoteServer) return `signalk-${s.remoteServer}__${s.model}${s.resolution ? '-' + s.resolution : ''}`
   const res = s.resolution || DEFAULT_RES[s.model]
   return res ? `${s.model}-${res}` : s.model
 }
@@ -425,8 +433,14 @@ function renderSources() {
           <input type="checkbox" ${s.autoDownload !== false ? 'checked' : ''} data-f="autoDownload">
           <span>${t.auto}</span>
         </label>
+        ${(config.remoteServerIds?.length || s.remoteServer) ? `
+        <select data-f="remoteServer" aria-label="${t.upstreamOrigin}">
+          <option value="">${t.historicalOrigin}</option>
+          ${[...new Set([...(config.remoteServerIds ?? []), ...(s.remoteServer ? [s.remoteServer] : [])])].map(id => `<option value="${escapeHtml(id)}" ${id === s.remoteServer ? 'selected' : ''}>${escapeHtml(id)}</option>`).join('')}
+        </select>` : ''}
         <select data-f="model">${Object.keys(MODELS).map(m => `<option value="${m}" ${m === s.model ? 'selected' : ''}>${MODELS[m].label || m}</option>`).join('')}</select>
         <select data-f="resolution" ${resOpts.length === 0 ? 'disabled' : ''}>
+          ${s.remoteServer && resOpts.length ? `<option value="" ${!s.resolution ? 'selected' : ''}>${t.anyResolution}</option>` : ''}
           ${resOpts.map(r => `<option ${r === s.resolution ? 'selected' : ''}>${r}</option>`).join('')}
         </select>
         <code style="font-size:12px;color:#9fb0c5">${name}</code>
@@ -439,12 +453,12 @@ function renderSources() {
         </span>
       </div>
       <div class="src-sub">
-        <input type="range" data-f="hours" min="${model.sliderStep}" max="${model.maxHours}"
+        ${s.remoteServer ? `<span>${t.remoteSelection}</span>` : `<input type="range" data-f="hours" min="${model.sliderStep}" max="${model.maxHours}"
                step="${model.sliderStep}" value="${hours}">
         <span class="hours-label ${hours >= model.maxHours ? 'at-max' : ''}">
           <b data-r="hval">${hours}</b> h <span class="max">/ ${t.maxLbl} ${model.maxHours} h</span>
         </span>
-        <span class="vol" data-r="vol">${fmtEstimate(mb)}</span>
+        <span class="vol" data-r="vol">${fmtEstimate(mb)}</span>`}
         <span style="font-size:12px;color:#9fb0c5;white-space:nowrap" title="${t.archivesTitle}">
           ${t.archivesLbl}
           <input type="number" data-f="archiveRuns" min="0" step="1" value="${s.archiveRuns ?? 0}"
@@ -479,6 +493,10 @@ function renderSources() {
       }
       el.addEventListener('change', () => {
         if (f === 'autoDownload') s.autoDownload = el.checked
+        else if (f === 'remoteServer') {
+          if (el.value) s.remoteServer = el.value
+          else delete s.remoteServer
+        }
         else if (f === 'retentionDays') s.retentionDays = Math.min(365, Math.max(0, parseInt(el.value, 10) || 0))
         else if (f === 'archiveRuns') s.archiveRuns = Math.max(0, parseInt(el.value, 10) || 0)
         else s[f] = el.value

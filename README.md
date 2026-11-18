@@ -203,6 +203,33 @@ so already published acquisitions do not need an upstream download. Unpublished
 legacy files are not imported automatically; the next eligible acquisition is
 streamed from its upstream source.
 
+### Remote Signal K as a download source
+
+Under **Server → Plugin Config → GRIB Downloader → Remote Signal K sources**,
+add a server identifier such as `shore`, its HTTPS base URL, and the path to
+its own application token file if it requires authentication. The destination
+catalogue and its token remain configured separately. Loopback URLs can use
+HTTP for tests. The remote server must provide the Forecast Dataset catalogue
+API. Read-only access is enough to retrieve complete datasets. Cropping
+requires a remote token with read/write access to submit processing jobs.
+
+In the downloader webapp, add a source, choose the named server as **Source
+server**, then select the model and optionally the resolution. For a specific
+resolution, the remote publisher must identify its source or use matching asset
+names. The downloader imports the newest matching complete original. It
+requests the map box when the dataset advertises spatial cropping, and
+otherwise streams all original assets. A missing processor endpoint also falls
+back to the complete dataset. An authentication, processing, or integrity
+error is reported so a failed crop does not unexpectedly trigger a large
+transfer. A remote import uses the forecast times and fields in the source.
+
+For example, shore-sourced AROME is identified as
+`signalk-shore__arome-0025`. Its local dataset records the source server,
+the original version and the downloaded version. Each asset is checked
+against its advertised size and SHA-256 before commit. Changing the map box
+submits a fresh crop when supported. Historical sources keep their existing
+names, scheduling and settings.
+
 ### Catalogue lifetime
 
 Set **days** on a source to give each new catalogue acquisition a lifetime of

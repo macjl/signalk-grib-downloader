@@ -209,9 +209,29 @@ export class CataloguePublisher {
       if (await this.verify(source, plan.stamp, params, signal)) { await this.prune(source, journal, log, signal); return this.reference(source, plan.stamp, params)! }
       return this.publish(source, plan, params, log, signal)
     }
-    const assets: Asset[] = plan.assets.map(a => ({ id: a.id, mediaType: 'application/octet-stream' }))
+    const assets: Asset[] = plan.assets.map(a => ({ id: a.id, mediaType: 'application/octet-stream',
+      ...(a.catalogue ? { size: a.catalogue.size, sha256: a.catalogue.sha256 } : {}) }))
     if (!assets.length || new Set(assets.map(a => a.id)).size !== assets.length) throw new Error('Invalid acquisition asset plan')
-    if (record && (record.assets.length !== assets.length || record.assets.some(a => !assets.some(b => a.id === b.id)))) throw new Error('Resumed acquisition plan differs from the original declaration')
+    if (record && (record.assets.length !== assets.length || record.assets.some(a =>
+      !assets.some(b => a.id === b.id && a.size === b.size && a.sha256 === b.sha256)))) {
+      if (!plan.remote) throw new Error('Resumed acquisition plan differs from the original declaration')
+      // The prior upload may have committed just before a response was lost.
+      if (record.datasetId) {
+        try {
+          const committed = await this.request(`/datasets/${record.datasetId}`, 'GET', signal)
+          this.finish(source, journal, record, committed)
+          await this.prune(source, journal, log, signal)
+          return this.reference(source, plan.stamp, params)!
+        } catch (error) {
+          if (!missing(error, 'DATASET_NOT_FOUND')) throw error
+        }
+      }
+      // A regenerated crop may differ from the staged bytes.
+      await this.abortStaging(record, signal)
+      journal.records = journal.records.filter(entry => entry !== record)
+      this.save(source, journal)
+      record = undefined
+    }
     if (!record) {
       // Persist the identity BEFORE creation: a lost POST response can be
       // recovered through the provider's publication listing without duplicates.
@@ -245,9 +265,9 @@ export class CataloguePublisher {
         stage = await this.request('/publications', 'POST', signal, {
           kind: 'forecast', format: 'grib2', producer: PRODUCER,
           ...((source.retentionDays ?? 0) > 0 ? { expiresInSeconds: source.retentionDays! * 86_400 } : {}),
-          metadata: { name: `${sourceDirName(source)} ${stamp}`, model: source.model.toUpperCase(), run },
+          metadata: { model: source.model.toUpperCase(), run, ...plan.remote?.metadata, name: `${sourceDirName(source)} ${stamp}` },
           requested: { source: sourceDirName(source), parameters: params },
-          provenance: { channel: 'internet', source: sourceDirName(source), run, downloaderAcquisitionId: record.acquisitionId }, assets,
+          provenance: { channel: plan.remote ? 'signalk' : 'internet', source: sourceDirName(source), run, ...plan.remote?.provenance, downloaderAcquisitionId: record.acquisitionId }, assets,
         })
       }
       this.validateStage(source, record, stage)
@@ -282,6 +302,8 @@ export class CataloguePublisher {
       try {
         for await (const chunk of readAsset(asset, active)) { size += chunk.length; hash.update(chunk); yield chunk }
         const received = { id: asset.id, size, sha256: hash.digest('hex'), mediaType: 'application/octet-stream' }
+        if (asset.catalogue && (size !== asset.catalogue.size || received.sha256 !== asset.catalogue.sha256))
+          throw new Error('Remote GRIB bytes do not match the advertised size and SHA-256')
         record.received ??= {}
         record.received[asset.id] = received
         // Persist successful upstream EOF before the provider can acknowledge it.
@@ -295,7 +317,7 @@ export class CataloguePublisher {
     } catch (error) { throw upstreamError ?? error }
     finally { controller.abort(); body.destroy() }
   }
-  private async deleteRecord(record: RecordEntry, signal?: AbortSignal): Promise<void> {
+  private async abortStaging(record: RecordEntry, signal?: AbortSignal): Promise<void> {
     // An interrupted creation may have no publication ID locally yet.
     if (!record.publicationId && !record.version && record.acquisitionId) {
       const stages = (await this.publications(signal)).filter(p => p.declaration?.provenance?.downloaderAcquisitionId === record.acquisitionId && p.declaration?.producer === PRODUCER)
@@ -305,6 +327,9 @@ export class CataloguePublisher {
       try { await this.request(`/publications/${record.publicationId}`, 'DELETE', signal) }
       catch (error) { if (!missing(error, 'PUBLICATION_NOT_FOUND')) throw error }
     }
+  }
+  private async deleteRecord(record: RecordEntry, signal?: AbortSignal): Promise<void> {
+    await this.abortStaging(record, signal)
     if (record.datasetId) {
       try { await this.request(`/datasets/${record.datasetId}`, 'DELETE', signal) }
       catch (error) { if (!missing(error, 'DATASET_NOT_FOUND')) throw error }
