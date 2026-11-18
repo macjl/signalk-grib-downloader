@@ -4,7 +4,7 @@ export type ModelId = 'gfs' | 'gfs-wave' | 'arome' | 'arpege' | 'icon-eu'
 // The catalogue owns originals; optional legacy filesystem exports are copies.
 export interface SourceSetting {
   model: ModelId
-  remoteServer?: string // named Signal K origin; omitted for historical upstreams
+  remoteServer?: string // named Signal K origin; omitted for direct downloads
   remoteModel?: string  // exact model advertised by the remote catalogue
   resolution?: string   // gfs: 0p25|0p50|1p00 ; gfs-wave: 0p25 ; arome: 0025|001 ; arpege: 01|025
   hours?: number        // forecast duration to download (capped per model)

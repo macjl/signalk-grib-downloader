@@ -72,6 +72,7 @@
     .src-card { border-top: 1px solid rgba(255,255,255,0.07); padding: 8px 0 6px; }
     .src-main { display: flex; align-items: center; gap: 8px; }
     .src-main select { width: auto; }
+    .src-origin { font-size: 12px; color: #9fb0c5; }
     .auto-toggle { display: inline-flex; align-items: center; gap: 4px; color: #e8edf4; font-weight: 700; white-space: nowrap; }
     .src-sub { display: flex; align-items: center; gap: 10px; margin-top: 7px; padding-left: 24px; }
     .src-sub input[type="range"] { flex: 1; accent-color: #4d9fff; padding: 0; }
@@ -169,7 +170,7 @@ const I18N = {
     maxLbl: 'max', totalVol: 'Volume estimé par run :', perRun: '/ run',
     volumeUnknown: 'estimation indisponible',
     archivesLbl: 'archives', archivesTitle: 'Nombre d’acquisitions précédentes sans expiration et, si activé, d’exports historiques (0 = aucune)',
-    upstreamOrigin: 'Serveur d’origine', historicalOrigin: 'Source historique',
+    upstreamOrigin: 'Source',
     remoteSelection: 'Zone de la carte si le serveur peut découper, sinon GRIB complet',
     anyResolution: 'Toute résolution',
     chooseRemoteModel: 'Choisir un modèle', remoteLoading: 'Lecture du catalogue…',
@@ -209,7 +210,7 @@ const I18N = {
     maxLbl: 'max', totalVol: 'Estimated volume per run:', perRun: '/ run',
     volumeUnknown: 'estimate unavailable',
     archivesLbl: 'archives', archivesTitle: 'Number of previous datasets without an expiration and, when enabled, legacy exports (0 = none)',
-    upstreamOrigin: 'Source server', historicalOrigin: 'Historical upstream',
+    upstreamOrigin: 'Source',
     remoteSelection: 'Map area if the server can crop, otherwise complete GRIB',
     anyResolution: 'Any resolution',
     chooseRemoteModel: 'Choose a model', remoteLoading: 'Reading catalogue…',
@@ -226,11 +227,11 @@ document.querySelectorAll('[data-i18n]').forEach(el => { el.textContent = t[el.d
 // ── Constants ────────────────────────────────────────────────────────────────
 const API = '/plugins/signalk-grib-downloader'
 const MODELS = {
-  gfs:       { resolutions: ['0p25', '0p50', '1p00'], maxHours: 384, sliderStep: 3 },
-  'gfs-wave': { label: 'GFS-Wave', resolutions: ['0p25'], maxHours: 384, sliderStep: 3 },
-  arome:     { resolutions: ['0025', '001'],          maxHours: 51,  sliderStep: 1 },
-  arpege:    { resolutions: ['01', '025'],            maxHours: 102, sliderStep: 1 },
-  'icon-eu': { resolutions: [],                       maxHours: 120, sliderStep: 3 },
+  gfs:        { provider: 'NOAA (NOMADS)', resolutions: ['0p25', '0p50', '1p00'], maxHours: 384, sliderStep: 3 },
+  'gfs-wave': { provider: 'NOAA (NOMADS)', resolutions: ['0p25'], maxHours: 384, sliderStep: 3, label: 'GFS-Wave' },
+  arome:      { provider: 'Météo-France', resolutions: ['0025', '001'], maxHours: 51, sliderStep: 1 },
+  arpege:     { provider: 'Météo-France', resolutions: ['01', '025'], maxHours: 102, sliderStep: 1 },
+  'icon-eu':  { provider: 'DWD', resolutions: [], maxHours: 120, sliderStep: 3 },
 }
 
 // Volume estimation (MB) — constants measured on real downloads.
@@ -442,6 +443,7 @@ function renderSources() {
   config.sources.forEach((s, idx) => {
     const name = dirName(s)
     const model = MODELS[s.model] || MODELS.gfs
+    const directOrigin = `Direct · ${model.provider}`
     const catalogue = modelCatalogues.get(s.remoteServer)
     const advertised = catalogue?.models ?? []
     const remoteModel = s.remoteModel ?? (sourceNames.has(s) ? s.model.toUpperCase() : '')
@@ -468,9 +470,9 @@ function renderSources() {
         </label>
         ${(config.remoteServerIds?.length || s.remoteServer) ? `
         <select data-f="remoteServer" aria-label="${t.upstreamOrigin}">
-          <option value="">${t.historicalOrigin}</option>
+          <option value="">${directOrigin}</option>
           ${[...new Set([...(config.remoteServerIds ?? []), ...(s.remoteServer ? [s.remoteServer] : [])])].map(id => `<option value="${escapeHtml(id)}" ${id === s.remoteServer ? 'selected' : ''}>${escapeHtml(id)}</option>`).join('')}
-        </select>` : ''}
+        </select>` : `<span class="src-origin">${directOrigin}</span>`}
         ${s.remoteServer ? `<select data-f="remoteModel" aria-label="${t.chooseRemoteModel}" ${catalogue?.loading ? 'disabled' : ''}>
           ${!remoteModel ? `<option value="" selected disabled>${prompt}</option>` : ''}
           ${remoteModel && !available ? `<option selected disabled value="${escapeHtml(remoteModel)}">${escapeHtml(remoteModel)} · ${t.remoteMissing}</option>` : ''}

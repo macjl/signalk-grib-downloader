@@ -232,8 +232,9 @@ For example, shore-sourced AROME is identified as
 the original version and the downloaded version. Custom model names are kept
 as catalogue metadata and displayed in the downloader. Each asset is checked
 against its advertised size and SHA-256 before commit. Changing the map box
-submits a fresh crop when supported. Historical sources keep their existing
-names, scheduling and settings.
+submits a fresh crop when supported. The downloader shows the origin of direct
+sources by model: NOAA (NOMADS) for GFS and GFS-Wave, Météo-France for AROME
+and ARPÈGE, and DWD for ICON-EU.
 
 ### Catalogue lifetime
 
