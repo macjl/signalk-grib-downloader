@@ -137,11 +137,13 @@ function forecastHorizon(dataset: Dataset, operation: ExportOperation): Horizon 
 
 export class RemoteCatalogue {
   readonly endpoint: string
-  constructor(private readonly setting: RemoteServerSetting) {
+  constructor(private readonly setting: RemoteServerSetting, private readonly managedToken?: () => string | undefined) {
     this.endpoint = normalizeRemoteUrl(setting.url)
   }
 
   private token(): string | undefined {
+    const managed = this.managedToken?.()
+    if (managed) return managed
     if (!this.setting.tokenFile) return undefined
     try {
       const token = readFileSync(this.setting.tokenFile, 'utf8').trim()
@@ -248,7 +250,7 @@ export class RemoteCatalogue {
     if (!Array.isArray(status?.operations)) throw new Error('Invalid remote processing status')
     if (status.processing !== 'available' || !status.operations.includes('export'))
       return { area: false, reason: 'processing-unavailable' }
-    if (!this.setting.tokenFile) return { area: false, reason: 'write-required' }
+    if (!this.token()) return { area: false, reason: 'write-required' }
     try {
       const login = await this.request<{ status?: string; userLevel?: string }>('/skServer/loginStatus', signal)
       if (login?.status !== 'loggedIn' || !['readwrite', 'admin'].includes(login.userLevel ?? ''))

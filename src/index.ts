@@ -1,6 +1,7 @@
 import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
+import { createHash } from 'node:crypto'
 import { Path, Plugin, ServerAPI } from '@signalk/server-api'
 import { Orchestrator, ProbeTiming } from './orchestrator'
 import { CataloguePublisher } from './catalogue'
@@ -72,6 +73,7 @@ const buildSchema = (defaultInterval: number, defaultMultiplier: number) => ({
     remoteServers: {
       type: 'array',
       title: 'Remote Signal K sources',
+      description: 'Save the server, then request a read/write token from its row in Plugin Config.',
       items: {
         type: 'object',
         required: ['id', 'url'],
@@ -79,7 +81,7 @@ const buildSchema = (defaultInterval: number, defaultMultiplier: number) => ({
           id: { type: 'string', title: 'Server identifier', pattern: remoteId.source },
           url: { type: 'string', title: 'Signal K HTTPS base URL' },
           tokenFile: { type: 'string', title: 'Remote token file',
-            description: 'Optional separate token. Use read/write to request a crop, read-only for full datasets when there is no crop capability.' },
+            description: 'Optional file for an existing token. An approved token requested from this panel is stored separately and takes precedence.' },
         },
       },
     },
@@ -116,6 +118,7 @@ module.exports = (server: ServerAPI): Plugin => {
   let stopInternetStream: (() => void) | null = null
   let infra: PluginSettings = {}
   let remotes = new Map<string, RemoteCatalogue>()
+  let remoteAccesses = new Map<string, CatalogueAccess>()
   let catalogue: CataloguePublisher
   let access: CatalogueAccess | null = null
   const deleting = new Map<string, AbortController>()
@@ -342,6 +345,7 @@ module.exports = (server: ServerAPI): Plugin => {
       const tokenFile = expandHome(infra.catalogueTokenFile || path.join(server.getDataDirPath(), 'catalogue-token'))
       if (!path.isAbsolute(tokenFile)) throw new Error('Catalogue token file must be absolute')
       remotes = new Map()
+      remoteAccesses = new Map()
       const destination = normalizeRemoteUrl(infra.catalogueUrl || 'http://127.0.0.1:3000')
       for (const peer of options?.remoteServers ?? []) {
         if (!peer || typeof peer.id !== 'string' || !remoteId.test(peer.id) || remotes.has(peer.id))
@@ -349,9 +353,22 @@ module.exports = (server: ServerAPI): Plugin => {
         const remoteToken = peer.tokenFile ? expandHome(peer.tokenFile) : undefined
         if (remoteToken && (!path.isAbsolute(remoteToken) || path.resolve(remoteToken) === path.resolve(tokenFile)))
           throw new Error('Configure a separate absolute token file for the remote Signal K source')
-        const remote = new RemoteCatalogue({ ...peer, tokenFile: remoteToken })
-        if (remote.endpoint === destination) throw new Error('Use a different server for the remote source and destination catalogue')
+        const endpoint = normalizeRemoteUrl(peer.url)
+        if (endpoint === destination) throw new Error('Use a different server for the remote source and destination catalogue')
+        const key = createHash('sha256').update(endpoint).digest('hex')
+        const dataDir = path.join(server.getDataDirPath(), 'remote-access', peer.id + '-' + key)
+        const managedToken = path.join(dataDir, 'token')
+        if (path.resolve(managedToken) === path.resolve(tokenFile))
+          throw new Error('Configure a separate token file for the destination catalogue')
+        const authorizer = new CatalogueAccess({
+          endpoint, tokenFile: managedToken, dataDir,
+          pluginId: PLUGIN_ID, permissions: 'readwrite', manualRequest: true,
+          description: `GRIB Downloader — remote forecast source ${peer.id}`,
+          onReady: () => { orchestrator?.retryAfterAccessApproval(peer.id); updateStatus(); if (orchestrator && !autoPaused()) runTick() },
+        })
+        const remote = new RemoteCatalogue({ ...peer, tokenFile: remoteToken }, () => authorizer.currentToken())
         remotes.set(peer.id, remote)
+        remoteAccesses.set(peer.id, authorizer)
       }
       const legacyExport = infra.legacyExportEnabled ? new LegacyGribExporter(expandHome(infra.gribsRoot || '~/.signalk/gribs')) : undefined
       catalogue = new CataloguePublisher(infra.catalogueUrl || 'http://127.0.0.1:3000', tokenFile, server.getDataDirPath(), () => authorizer.token(), token => authorizer.rejected(token), legacyExport)
@@ -375,14 +392,17 @@ module.exports = (server: ServerAPI): Plugin => {
 
       apply()
       access.start()
+      for (const authorizer of remoteAccesses.values()) authorizer.start()
     },
 
     stop: async () => {
       const active = orchestrator
       orchestrator = null
       const previousAccess = access
+      const previousRemoteAccess = remoteAccesses
       access = null
-      await previousAccess?.stop()
+      remoteAccesses = new Map()
+      await Promise.all([previousAccess?.stop(), ...Array.from(previousRemoteAccess.values(), authorizer => authorizer.stop())])
       stopInternetStream?.()
       stopInternetStream = null
       if (timer) { clearTimeout(timer); timer = null }
@@ -421,6 +441,30 @@ module.exports = (server: ServerAPI): Plugin => {
         } catch (error) {
           res.status(502).json({ error: error instanceof Error ? error.message : 'Remote catalogue unavailable' })
         }
+      })
+
+      router.get('/remote-access', (_req: any, res: any) => {
+        res.set('Cache-Control', 'no-store').json(Array.from(remoteAccesses, ([id, authorizer]) => {
+          const { state, diagnostics } = authorizer.status()
+          let visibleState = state
+          if (state === 'ready') {
+            try { if (!authorizer.currentToken()) visibleState = 'idle' }
+            catch { visibleState = 'error' }
+          }
+          return { id, endpoint: remotes.get(id)!.endpoint, state: visibleState,
+            httpStatus: state === 'error' ? diagnostics.lastIssue?.httpStatus : undefined }
+        }))
+      })
+
+      router.post('/remote-access/:server', (req: any, res: any) => {
+        const peer = remotes.get(req.params.server)
+        const authorizer = remoteAccesses.get(req.params.server)
+        if (!peer || !authorizer) return res.status(404).json({ error: 'Save the remote server configuration first' })
+        if (req.body?.endpoint !== peer.endpoint)
+          return res.status(409).json({ error: 'The saved remote server URL changed' })
+        try { authorizer.request() }
+        catch { return res.status(500).json({ error: 'Cannot read the managed remote token file' }) }
+        res.status(202).json({ state: authorizer.status().state })
       })
 
       router.get('/remote-preview/:server', async (req: any, res: any) => {

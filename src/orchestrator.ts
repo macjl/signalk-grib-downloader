@@ -266,9 +266,11 @@ export class Orchestrator {
   }
 
   // A newly approved credential permits an immediate retry of failed work.
-  retryAfterAccessApproval(): void {
-    for (const state of this.states.values()) {
-      if (state.lastOutcome === 'failed') state.lastProbeAt = null
+  retryAfterAccessApproval(remoteServer?: string): void {
+    for (const source of this.sources) {
+      const state = this.states.get(sourceDirName(source))!
+      if (remoteServer ? source.remoteServer === remoteServer : state.lastOutcome === 'failed')
+        state.lastProbeAt = null
     }
   }
 

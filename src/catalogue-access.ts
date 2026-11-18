@@ -4,11 +4,12 @@ import * as path from 'node:path'
 import { randomUUID, createHash } from 'node:crypto'
 
 type Permission = 'readonly' | 'readwrite'
-type State = 'pending' | 'ready' | 'denied' | 'error'
+type State = 'idle' | 'pending' | 'ready' | 'denied' | 'error'
 interface Pending { endpoint: string; clientId: string; requestId?: string; denied?: boolean; tokenHash?: string }
 interface Options {
   endpoint: string; tokenFile: string; dataDir: string; pluginId: string
   permissions: Permission; onChange?: () => void; onReady?: () => void
+  manualRequest?: boolean; description?: string
   pollMs?: number; retryMs?: number
 }
 const UUID = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i
@@ -49,10 +50,14 @@ export class CatalogueAccess {
         typeof this.pending.endpoint !== 'string' || (this.pending.requestId && !UUID.test(this.pending.requestId)))) throw new Error('Invalid catalogue access request state')
     if (this.pending?.endpoint !== options.endpoint && !fs.existsSync(options.tokenFile)) this.pending = undefined
     this.message = this.waitingMessage()
-    // A deliberate plugin restart permits one new request after an explicit denial.
-    if (this.pending?.denied) { delete this.pending.requestId; delete this.pending.denied }
+    if (options.manualRequest) {
+      this.state = this.pending?.denied ? 'denied' : this.pending && !this.pending.tokenHash ? 'pending' : 'idle'
+    } else if (this.pending?.denied) {
+      // A deliberate plugin restart permits a new request for the destination.
+      this.clearDenial()
+    }
     try {
-      if (this.readToken()) { this.state = 'ready'; this.message = 'Catalogue access authorized' }
+      if (this.currentToken()) { this.state = 'ready'; this.message = 'Catalogue access authorized' }
     } catch { /* start() reports unreadable files or a changed server safely. */ }
   }
   status() { return { state: this.state, permissions: this.options.permissions, message: this.message,
@@ -64,7 +69,7 @@ export class CatalogueAccess {
     this.state = state; this.message = message
     if (changed) this.options.onChange?.()
   }
-  private readToken(): string | undefined {
+  currentToken(): string | undefined {
     if (this.pending && this.pending.endpoint !== this.options.endpoint) throw new Error('Catalogue server changed: configure a separate catalogueTokenFile for the new server')
     try { return fs.readFileSync(this.options.tokenFile, 'utf8').trim() || undefined } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw storageFailure(error, 'TOKEN_READ_FAILED')
@@ -72,7 +77,7 @@ export class CatalogueAccess {
     }
   }
   token(): string {
-    const token = this.readToken()
+    const token = this.currentToken()
     if (token) return token
     if (this.state === 'ready' && !this.controller.signal.aborted) {
       this.change('pending', this.waitingMessage())
@@ -83,7 +88,7 @@ export class CatalogueAccess {
   rejected(token: string) {
     // Only renew tokens issued to this plugin; never remove a manually
     // configured credential or a newer token after a concurrent 401.
-    if (!token || this.controller.signal.aborted || this.readToken() !== token) return
+    if (!token || this.controller.signal.aborted || this.currentToken() !== token) return
     if (!this.pending?.tokenHash || this.pending.tokenHash !== createHash('sha256').update(token).digest('hex')) return
     // Signal K also uses 401 for insufficient route permissions (including an
     // absent/unregistered provider). Confirm authentication before discarding
@@ -95,7 +100,20 @@ export class CatalogueAccess {
   start() {
     if (this.started) return
     this.started = true
+    if (!this.options.manualRequest || this.state === 'pending') this.tick()
+  }
+  request() {
+    if (this.controller.signal.aborted || this.work || this.state === 'pending' || this.currentToken()) return
+    if (this.pending?.tokenHash) this.pending = undefined
+    this.clearDenial()
+    this.change('pending', this.waitingMessage())
     this.tick()
+  }
+  private clearDenial() {
+    if (this.pending?.denied) {
+      delete this.pending.requestId
+      delete this.pending.denied
+    }
   }
   private atomic(file: string, value: string, code = 'STATE_WRITE_FAILED') {
     try {
@@ -148,7 +166,7 @@ export class CatalogueAccess {
     }
     this.controller.signal.throwIfAborted()
     // A rotation or manually configured credential wins over this in-flight check.
-    if (this.readToken() !== token || this.pending?.tokenHash !== createHash('sha256').update(token).digest('hex')) {
+    if (this.currentToken() !== token || this.pending?.tokenHash !== createHash('sha256').update(token).digest('hex')) {
       this.rejectedToken = undefined
       return
     }
@@ -176,7 +194,7 @@ export class CatalogueAccess {
       // A valid token leaves the caller's catalogue error in place.
       if (this.state === 'ready') return
     }
-    if (this.readToken()) {
+    if (this.currentToken()) {
       const firstReady = this.state !== 'ready'
       this.change('ready', 'Catalogue access authorized')
       if (firstReady) this.options.onReady?.()
@@ -189,11 +207,13 @@ export class CatalogueAccess {
     const response = this.pending.requestId
       ? await this.call('/signalk/v1/requests/' + this.pending.requestId)
       : await this.call('/signalk/v1/access/requests', {
-        clientId: this.pending.clientId, description: this.options.pluginId + ' — forecast catalogue', permissions: this.options.permissions,
+        clientId: this.pending.clientId,
+        description: this.options.description ?? this.options.pluginId + ' — forecast catalogue',
+        permissions: this.options.permissions,
       })
     this.controller.signal.throwIfAborted()
     // Respect a credential supplied manually while the approval was in flight.
-    if (this.readToken()) {
+    if (this.currentToken()) {
       this.change('ready', 'Catalogue access authorized')
       this.options.onReady?.()
       return

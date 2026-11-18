@@ -1,5 +1,7 @@
 node_modules/
 dist/
+public/remoteEntry.js
+public/grib-downloader-config.js
 *.js.map
 npm-debug.log*
 .DS_Store
