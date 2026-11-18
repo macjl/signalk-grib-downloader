@@ -7,7 +7,7 @@ import { CataloguePublisher } from './catalogue'
 import { CatalogueAccess } from './catalogue-access'
 import { LegacyGribExporter } from './legacy-export'
 import { sourceDirName } from './scheduler'
-import { RemoteCatalogue, normalizeRemoteUrl, remoteId } from './remote-catalogue'
+import { RemoteCatalogue, normalizeRemoteUrl, remoteId, validRemoteModel } from './remote-catalogue'
 import { AppSettings, InternetState, PluginSettings, SourceSetting } from './types'
 
 const PLUGIN_ID = 'signalk-grib-downloader'
@@ -409,7 +409,18 @@ module.exports = (server: ServerAPI): Plugin => {
       // Operational settings, webapp-managed. ('/config' would collide with
       // SignalK's built-in plugin config routes.)
       router.get('/settings', (_req: any, res: any) => {
-        res.json({ ...settings, checkIntervalMinutes: intervalMinutes(), remoteServerIds: [...remotes.keys()] })
+        res.json({ ...settings, checkIntervalMinutes: intervalMinutes(), remoteServerIds: [...remotes.keys()],
+          sourceNames: (settings.sources ?? []).map(sourceDirName) })
+      })
+
+      router.get('/remote-models/:server', async (req: any, res: any) => {
+        const peer = remotes.get(req.params.server)
+        if (!peer) return res.status(404).json({ error: 'Unknown remote Signal K server' })
+        try {
+          res.json({ models: await peer.models(AbortSignal.timeout(20_000)) })
+        } catch (error) {
+          res.status(502).json({ error: error instanceof Error ? error.message : 'Remote catalogue unavailable' })
+        }
       })
 
       router.put('/settings', (req: any, res: any) => {
@@ -432,6 +443,9 @@ module.exports = (server: ServerAPI): Plugin => {
             (s.resolution && !/^[a-zA-Z0-9]{1,16}$/.test(s.resolution))))) {
           return res.status(400).json({ error: 'Choose a configured remote Signal K server and a valid resolution' })
         }
+        if ((next.sources ?? []).some(s => s.remoteModel !== undefined && (!s.remoteServer || !validRemoteModel(s.remoteModel)))) {
+          return res.status(400).json({ error: 'Choose a valid model advertised by the remote catalogue' })
+        }
         const names = (next.sources ?? []).map(s => sourceDirName(s))
         if (names.some(name => !/^[A-Za-z0-9_-]+$/.test(name))) return res.status(400).json({ error: 'invalid source name' })
         if (new Set(names).size !== names.length) {
@@ -452,7 +466,7 @@ module.exports = (server: ServerAPI): Plugin => {
         }
         settings = next
         apply()
-        res.json({ ok: true })
+        res.json((next.sources ?? []).some(s => s.remoteServer) ? { ok: true, sourceNames: names } : { ok: true })
       })
 
       router.post('/download', (_req: any, res: any) => {
@@ -474,7 +488,8 @@ module.exports = (server: ServerAPI): Plugin => {
         const name = req.params.name
         if (!/^[A-Za-z0-9_-]+$/.test(name)) return res.status(400).json({ error: 'invalid source name' })
         if (orchestrator?.isRunning() || deleting.has(name)) return res.status(409).json({ error: 'Source is busy' })
-        const source = orchestrator?.findSource(name) ?? parseSourceName(name)
+        const remoteJournal = /^signalk-[a-z0-9][a-z0-9-]{0,31}__model-[a-f0-9]{24}(?:-[a-zA-Z0-9]{1,16})?$/.test(name)
+        const source = orchestrator?.findSource(name) ?? parseSourceName(name) ?? (remoteJournal ? name : undefined)
         if (!source) return res.status(400).json({ error: 'invalid source name' })
         const controller = new AbortController()
         deleting.set(name, controller)

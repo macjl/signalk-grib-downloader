@@ -44,12 +44,12 @@ export class CataloguePublisher {
     if (url.protocol === 'http:' && !['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)) throw new Error('Use HTTPS for a remote catalogue server')
     this.endpoint = url.href.replace(/\/$/, '')
   }
-  private file(source: SourceSetting): string {
-    const name = sourceDirName(source)
+  private file(source: SourceSetting | string): string {
+    const name = typeof source === 'string' ? source : sourceDirName(source)
     if (!/^[A-Za-z0-9_-]+$/.test(name)) throw new Error('Invalid source name')
     return path.join(this.dataDir, 'catalogue-publications', `${name}.json`)
   }
-  private read(source: SourceSetting): Journal {
+  private read(source: SourceSetting | string): Journal {
     try {
       const journal = JSON.parse(fs.readFileSync(this.file(source), 'utf8')) as Journal
       if (journal.endpoint !== this.endpoint) throw new Error('Catalogue URL changed: preserve the old publication journal before switching servers')
@@ -59,7 +59,7 @@ export class CataloguePublisher {
       throw error
     }
   }
-  private save(source: SourceSetting, journal: Journal): void {
+  private save(source: SourceSetting | string, journal: Journal): void {
     const file = this.file(source)
     fs.mkdirSync(path.dirname(file), { recursive: true })
     const fd = fs.openSync(file + '.tmp', 'w', 0o600)
@@ -265,7 +265,10 @@ export class CataloguePublisher {
         stage = await this.request('/publications', 'POST', signal, {
           kind: 'forecast', format: 'grib2', producer: PRODUCER,
           ...((source.retentionDays ?? 0) > 0 ? { expiresInSeconds: source.retentionDays! * 86_400 } : {}),
-          metadata: { model: source.model.toUpperCase(), run, ...plan.remote?.metadata, name: `${sourceDirName(source)} ${stamp}` },
+          metadata: { model: source.model.toUpperCase(), run, ...plan.remote?.metadata,
+            name: (source.remoteModel
+              ? `Signal K ${source.remoteServer} · ${source.remoteModel}${source.resolution ? ' ' + source.resolution : ''} · ${stamp}`
+              : `${sourceDirName(source)} ${stamp}`).slice(0, 512) },
           requested: { source: sourceDirName(source), parameters: params },
           provenance: { channel: plan.remote ? 'signalk' : 'internet', source: sourceDirName(source), run, ...plan.remote?.provenance, downloaderAcquisitionId: record.acquisitionId }, assets,
         })
@@ -351,7 +354,7 @@ export class CataloguePublisher {
       this.save(source, journal)
     }
   }
-  async removeSource(source: SourceSetting, signal?: AbortSignal): Promise<void> {
+  async removeSource(source: SourceSetting | string, signal?: AbortSignal): Promise<void> {
     const journal = this.read(source)
     for (const record of [...journal.records]) {
       await this.deleteRecord(record, signal)

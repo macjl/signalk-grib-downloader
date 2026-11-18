@@ -172,6 +172,9 @@ const I18N = {
     upstreamOrigin: 'Serveur d’origine', historicalOrigin: 'Source historique',
     remoteSelection: 'Zone de la carte si le serveur peut découper, sinon GRIB complet',
     anyResolution: 'Toute résolution',
+    chooseRemoteModel: 'Choisir un modèle', remoteLoading: 'Lecture du catalogue…',
+    remoteEmpty: 'Aucun modèle GRIB disponible', remoteFailed: 'Catalogue distant indisponible',
+    remoteMissing: 'modèle configuré, indisponible', refreshModels: 'Actualiser les modèles',
     retentionLbl: 'jours', retentionTitle: 'Durée de conservation des nouvelles acquisitions dans le catalogue, après leur publication. 0 utilise le nombre d’archives.',
     confirmDeleteData: n => `Supprimer aussi les données téléchargées de « ${n} » (acquisitions et archives du catalogue) ?\nElles seront effacées à l'enregistrement.`,
     loginRequired: 'Connexion requise — <a href="/admin/#/login" style="color:#7fc4e3">connectez-vous à SignalK</a> puis rechargez cette page.',
@@ -209,6 +212,9 @@ const I18N = {
     upstreamOrigin: 'Source server', historicalOrigin: 'Historical upstream',
     remoteSelection: 'Map area if the server can crop, otherwise complete GRIB',
     anyResolution: 'Any resolution',
+    chooseRemoteModel: 'Choose a model', remoteLoading: 'Reading catalogue…',
+    remoteEmpty: 'No GRIB models available', remoteFailed: 'Remote catalogue unavailable',
+    remoteMissing: 'configured model, unavailable', refreshModels: 'Refresh models',
     retentionLbl: 'days', retentionTitle: 'Catalogue lifetime for new acquisitions after publication. 0 uses the archive count.',
     confirmDeleteData: n => `Also delete the downloaded data of "${n}" (catalogue acquisitions and archives)?\nDeleted when you save.`,
     loginRequired: 'Login required — <a href="/admin/#/login" style="color:#7fc4e3">log in to SignalK</a> and reload this page.',
@@ -262,6 +268,8 @@ function fmtEstimate(mb) {
 
 // ── State ────────────────────────────────────────────────────────────────────
 let config = { bbox: { latMin: 35, lonMin: -6, latMax: 45, lonMax: 17 }, sources: [] }
+const modelCatalogues = new Map()
+const sourceNames = new WeakMap()
 let statusBySource = {}
 let schedulerError = null
 let internetState = 'unknown'
@@ -376,7 +384,7 @@ function refreshRect(fit) {
 // Directory name derived from model+resolution — the contract with the provider.
 const DEFAULT_RES = { gfs: '0p25', 'gfs-wave': '0p25', arome: '0025', arpege: '01', 'icon-eu': null }
 function dirName(s) {
-  if (s.remoteServer) return `signalk-${s.remoteServer}__${s.model}${s.resolution ? '-' + s.resolution : ''}`
+  if (s.remoteServer) return sourceNames.get(s) ?? ''
   const res = s.resolution || DEFAULT_RES[s.model]
   return res ? `${s.model}-${res}` : s.model
 }
@@ -412,6 +420,21 @@ function sourceStatusLine(s) {
   return line
 }
 
+async function readRemoteModels(id, refresh = false) {
+  if (!id || modelCatalogues.get(id)?.loading || (!refresh && modelCatalogues.has(id))) return
+  modelCatalogues.set(id, { loading: true })
+  renderSources()
+  try {
+    const response = await fetch(`${API}/remote-models/${encodeURIComponent(id)}`, { cache: 'no-store' })
+    const body = await response.json()
+    if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`)
+    modelCatalogues.set(id, { models: body.models })
+  } catch (error) {
+    modelCatalogues.set(id, { error: error.message })
+  }
+  renderSources()
+}
+
 function renderSources() {
   const list = document.getElementById('src-list')
   list.innerHTML = ''
@@ -419,7 +442,17 @@ function renderSources() {
   config.sources.forEach((s, idx) => {
     const name = dirName(s)
     const model = MODELS[s.model] || MODELS.gfs
-    const resOpts = model.resolutions
+    const catalogue = modelCatalogues.get(s.remoteServer)
+    const advertised = catalogue?.models ?? []
+    const remoteModel = s.remoteModel ?? (sourceNames.has(s) ? s.model.toUpperCase() : '')
+    const available = advertised.find(entry => entry.model === remoteModel)
+    const resOpts = s.remoteServer
+      ? [...new Set([...(available?.resolutions ?? []), ...(s.resolution ? [s.resolution] : [])])]
+      : model.resolutions
+    const prompt = catalogue?.loading ? t.remoteLoading
+      : catalogue?.error ? t.remoteFailed
+      : advertised.length ? t.chooseRemoteModel : t.remoteEmpty
+
     const hours = s.hours ?? model.maxHours
     const mb = estimateMB(s)
     totalMB += mb
@@ -438,16 +471,22 @@ function renderSources() {
           <option value="">${t.historicalOrigin}</option>
           ${[...new Set([...(config.remoteServerIds ?? []), ...(s.remoteServer ? [s.remoteServer] : [])])].map(id => `<option value="${escapeHtml(id)}" ${id === s.remoteServer ? 'selected' : ''}>${escapeHtml(id)}</option>`).join('')}
         </select>` : ''}
-        <select data-f="model">${Object.keys(MODELS).map(m => `<option value="${m}" ${m === s.model ? 'selected' : ''}>${MODELS[m].label || m}</option>`).join('')}</select>
+        ${s.remoteServer ? `<select data-f="remoteModel" aria-label="${t.chooseRemoteModel}" ${catalogue?.loading ? 'disabled' : ''}>
+          ${!remoteModel ? `<option value="" selected disabled>${prompt}</option>` : ''}
+          ${remoteModel && !available ? `<option selected disabled value="${escapeHtml(remoteModel)}">${escapeHtml(remoteModel)} · ${t.remoteMissing}</option>` : ''}
+          ${advertised.map(entry => `<option value="${escapeHtml(entry.model)}" ${entry.model === remoteModel ? 'selected' : ''}>${escapeHtml(entry.model)}</option>`).join('')}
+        </select>
+        <button type="button" class="small secondary" data-act="refresh-models" title="${escapeHtml(catalogue?.error || t.refreshModels)}" aria-label="${t.refreshModels}">↻</button>`
+          : `<select data-f="model">${Object.keys(MODELS).map(m => `<option value="${m}" ${m === s.model ? 'selected' : ''}>${MODELS[m].label || m}</option>`).join('')}</select>`}
         <select data-f="resolution" ${resOpts.length === 0 ? 'disabled' : ''}>
           ${s.remoteServer && resOpts.length ? `<option value="" ${!s.resolution ? 'selected' : ''}>${t.anyResolution}</option>` : ''}
-          ${resOpts.map(r => `<option ${r === s.resolution ? 'selected' : ''}>${r}</option>`).join('')}
+          ${resOpts.map(r => `<option ${r === s.resolution ? 'selected' : ''}>${escapeHtml(r)}</option>`).join('')}
         </select>
-        <code style="font-size:12px;color:#9fb0c5">${name}</code>
+        <code style="font-size:12px;color:#9fb0c5">${escapeHtml(name || (s.remoteServer ? s.remoteServer : ''))}</code>
         <span style="flex:1"></span>
         <span class="badge-slot">${sourceStateBadge(s)}</span>
         <span class="row-actions">
-          <button class="small" data-act="dl" title="${t.download}">⬇</button>
+          <button class="small" data-act="dl" title="${t.download}" ${s.remoteServer && !name ? 'disabled' : ''}>⬇</button>
           <button class="small secondary" data-act="more">${expanded.has(name) ? '▾' : '▸'}</button>
           <button class="small danger" data-act="del">✕</button>
         </span>
@@ -494,8 +533,26 @@ function renderSources() {
       el.addEventListener('change', () => {
         if (f === 'autoDownload') s.autoDownload = el.checked
         else if (f === 'remoteServer') {
-          if (el.value) s.remoteServer = el.value
-          else delete s.remoteServer
+          sourceNames.delete(s)
+          delete s.remoteModel
+          if (el.value) {
+            s.remoteServer = el.value
+            delete s.resolution
+            void readRemoteModels(el.value, true)
+          } else {
+            delete s.remoteServer
+            s.resolution = DEFAULT_RES[s.model] ?? undefined
+          }
+        }
+        else if (f === 'remoteModel') {
+          s.remoteModel = el.value
+          delete s.resolution
+          sourceNames.delete(s)
+        }
+        else if (f === 'resolution' && s.remoteServer) {
+          if (!s.remoteModel && sourceNames.has(s)) s.remoteModel = s.model.toUpperCase()
+          s.resolution = el.value || undefined
+          sourceNames.delete(s)
         }
         else if (f === 'retentionDays') s.retentionDays = Math.min(365, Math.max(0, parseInt(el.value, 10) || 0))
         else if (f === 'archiveRuns') s.archiveRuns = Math.max(0, parseInt(el.value, 10) || 0)
@@ -508,6 +565,7 @@ function renderSources() {
         markDirty()
       })
     })
+    card.querySelector('[data-act="refresh-models"]')?.addEventListener('click', () => readRemoteModels(s.remoteServer, true))
     card.querySelector('[data-act="dl"]').addEventListener('click', () => triggerDownload(name))
     card.querySelector('[data-act="more"]').addEventListener('click', (e) => {
       expanded.has(name) ? expanded.delete(name) : expanded.add(name)
@@ -516,7 +574,7 @@ function renderSources() {
     })
     card.querySelector('[data-act="del"]').addEventListener('click', () => {
       if (!confirm(t.confirmDelete)) return
-      if (confirm(t.confirmDeleteData(name))) pendingDataDeletions.add(name)
+      if (name && confirm(t.confirmDeleteData(name))) pendingDataDeletions.add(name)
       config.sources.splice(idx, 1)
       renderSources()
       markDirty()
@@ -570,6 +628,8 @@ async function triggerDownload(name) {
 document.getElementById('btn-save').addEventListener('click', async () => {
   const note = document.getElementById('save-note')
   try {
+    if (config.sources.some(s => s.remoteServer && !s.remoteModel && !sourceNames.has(s)))
+      throw new Error(t.chooseRemoteModel)
     const r = await fetch(`${API}/settings`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
@@ -579,6 +639,10 @@ document.getElementById('btn-save').addEventListener('click', async () => {
       const body = await r.json().catch(() => ({}))
       throw new Error(body.error || `HTTP ${r.status}`)
     }
+    const saved = await r.json()
+    config.sources.forEach((s, index) => {
+      if (saved.sourceNames?.[index]) sourceNames.set(s, saved.sourceNames[index])
+    })
     for (const name of pendingDataDeletions) {
       const deletion = await fetch(`${API}/source-data/${encodeURIComponent(name)}`, { method: 'DELETE' })
       if (!deletion.ok) throw new Error((await deletion.json()).error || `HTTP ${deletion.status}`)
@@ -587,6 +651,7 @@ document.getElementById('btn-save').addEventListener('click', async () => {
     pendingDataDeletions.clear()
     dirty = false
     renderSaveBar()
+    renderSources()
     note.textContent = t.saved
     setTimeout(() => { if (!dirty) note.textContent = '' }, 3000)
   } catch (e) {
@@ -672,6 +737,10 @@ async function loadConfig() {
       ...s,
       autoDownload: s.autoDownload ?? (s.enabled !== false),
     }))
+    config.sources.forEach((s, index) => {
+      if (c.sourceNames?.[index]) sourceNames.set(s, c.sourceNames[index])
+      if (s.remoteServer) void readRemoteModels(s.remoteServer)
+    })
     config.bbox = c.bbox ?? { latMin: 35, lonMin: -6, latMax: 45, lonMax: 17 }
   }
   renderSchedule()

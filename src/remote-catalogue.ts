@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs'
 import { setTimeout as delay } from 'node:timers/promises'
-import { runStamp, sourceDirName } from './scheduler'
+import { remoteModelName, runStamp, sourceDirName } from './scheduler'
 import type { Bbox, RemoteServerSetting, SourceSetting } from './types'
 import type { RunPlan } from './downloader'
 
@@ -20,7 +20,9 @@ interface Asset {
 interface Dataset {
   id: string
   version: string
-  run: string
+  run?: string
+  createdAt?: string
+  name?: string
   kind: string
   state: string
   format: string
@@ -61,9 +63,30 @@ export function normalizeRemoteUrl(value: string): string {
 export const remoteZone = (bbox?: Bbox): Zone | undefined =>
   bbox ? [bbox.lonMin, bbox.latMin, bbox.lonMax, bbox.latMax] : undefined
 
-function usable(dataset: Dataset, source: SourceSetting) {
+export function validRemoteModel(value: unknown): value is string {
+  return typeof value === 'string' && value.length <= 512 && value.trim().length > 0 &&
+    !/[\x00-\x1f\x7f]/.test(value)
+}
+const resolutionCode = /^[a-zA-Z0-9]{1,16}$/
+function reportedResolution(dataset: Dataset): string | undefined {
+  const resolution = dataset.grid?.resolution
+  if (typeof resolution === 'string' && resolutionCode.test(resolution)) return resolution
+  if (dataset.producer === 'signalk-grib-downloader') {
+    const source = dataset.requested?.source ?? (typeof dataset.name === 'string' ? dataset.name.split(' ')[0] : undefined)
+    const prefix = dataset.model.toLowerCase() + '-'
+    if (typeof source === 'string' && source.startsWith(prefix) && resolutionCode.test(source.slice(prefix.length)))
+      return source.slice(prefix.length)
+  }
+}
+function runDate(dataset: Dataset): Date | undefined {
+  const value = dataset.run ?? dataset.createdAt
+  if (typeof value !== 'string') return
+  const date = new Date(value)
+  if (Number.isFinite(date.getTime())) return date
+}
+function usable(dataset: Dataset) {
   return dataset.state === 'complete' && dataset.kind === 'forecast' && dataset.format === 'grib2' &&
-    dataset.model === source.model.toUpperCase() && dataset.producer !== 'signalk-grib-processor' &&
+    validRemoteModel(dataset.model) && !(dataset.producer === 'signalk-grib-processor' && dataset.expiresAt) &&
     dataset.provenance?.channel !== 'signalk' &&
     (!dataset.expiresAt || Date.parse(dataset.expiresAt) > Date.now())
 }
@@ -111,45 +134,68 @@ export class RemoteCatalogue {
     return await response.json() as T
   }
 
-  async find(source: SourceSetting, bbox: Bbox | undefined, signal: AbortSignal): Promise<RemoteCandidate | undefined> {
-    const limit = 25
+  private async *list(signal: AbortSignal, model?: string): AsyncGenerator<Dataset> {
+    const limit = 100
     const seen = new Set<string>()
+    const query = model === undefined ? '' : '&model=' + encodeURIComponent(model)
     for (let offset = 0; ; offset += limit) {
-      const result = await this.request(`${api}/datasets?format=grib2&kind=forecast&model=${encodeURIComponent(source.model.toUpperCase())}&sort=run&limit=${limit}&offset=${offset}`, signal)
+      const result = await this.request(`${api}/datasets?format=grib2&kind=forecast${query}&sort=run&limit=${limit}&offset=${offset}`, signal)
       if (!result || typeof result !== 'object' || Array.isArray(result)) throw new Error('Invalid remote catalogue listing')
       const entries = Object.values(result) as Dataset[]
+      let added = 0
       for (const row of entries) {
         if (!row || typeof row.id !== 'string' || seen.has(row.id)) continue
         seen.add(row.id)
-        if (!usable(row, source) || typeof row.run !== 'string') continue
-        const date = new Date(row.run)
-        if (!Number.isFinite(date.getTime())) continue
-        const href = versionPath(row)
-        let dataset: Dataset
-        try { dataset = await this.request<Dataset>(href, signal) }
-        catch (error) {
-          if (error instanceof RemoteError && error.status === 404 && error.code === 'DATASET_NOT_FOUND') continue
-          throw error
-        }
-        if (!dataset || dataset.id !== row.id || dataset.version !== row.version)
-          throw new Error('Remote catalogue returned a different dataset version')
-        if (!usable(dataset, source) || !Array.isArray(dataset.assets) || !dataset.assets.length) continue
-        if (source.resolution) {
-          const expected = `${source.model}-${source.resolution}`
-          if (dataset.requested?.source !== expected && !dataset.assets.every(asset => typeof asset?.id === 'string' && asset.id.startsWith(expected + '__'))) continue
-        }
-        const operation = dataset.capabilities?.operations?.find(op =>
-          op.operation === 'export' && op.selectors?.includes('bbox'))
-        if (operation?.href && operation.href !== href + '/requests')
-          throw new Error('Unexpected remote processor link')
-        return {
-          dataset,
-          stamp: runStamp(date),
-          ...(bbox && operation ? { selection: remoteZone(bbox), operation: href + '/requests' } : {})
-        }
+        added++
+        if (usable(row) && runDate(row)) yield row
       }
       if (entries.length < limit) return
-      if (!entries.length || seen.size <= offset) throw new Error('Remote catalogue pagination returned repeated datasets')
+      if (!added) throw new Error('Remote catalogue pagination returned repeated datasets')
+    }
+  }
+
+  async models(signal: AbortSignal): Promise<{ model: string; resolutions: string[] }[]> {
+    const rows = new Map<string, Set<string>>()
+    for await (const row of this.list(signal)) {
+      const resolutions = rows.get(row.model) ?? new Set<string>()
+      const resolution = reportedResolution(row)
+      if (resolution) resolutions.add(resolution)
+      rows.set(row.model, resolutions)
+    }
+    return [...rows].sort(([a], [b]) => a.localeCompare(b))
+      .map(([model, resolutions]) => ({ model, resolutions: [...resolutions].sort() }))
+  }
+
+  async find(source: SourceSetting, bbox: Bbox | undefined, signal: AbortSignal): Promise<RemoteCandidate | undefined> {
+    const model = remoteModelName(source)
+    for await (const row of this.list(signal, model)) {
+      if (row.model !== model) continue
+      const href = versionPath(row)
+      let dataset: Dataset
+      try { dataset = await this.request<Dataset>(href, signal) }
+      catch (error) {
+        if (error instanceof RemoteError && error.status === 404 && error.code === 'DATASET_NOT_FOUND') continue
+        throw error
+      }
+      if (!dataset || dataset.id !== row.id || dataset.version !== row.version)
+        throw new Error('Remote catalogue returned a different dataset version')
+      const date = runDate(dataset)
+      if (!date || !usable(dataset) || dataset.model !== model || !Array.isArray(dataset.assets) || !dataset.assets.length) continue
+      if (source.resolution) {
+        const expected = `${model.toLowerCase()}-${source.resolution}`
+        if (reportedResolution(dataset) !== source.resolution &&
+            dataset.requested?.source !== expected &&
+            !dataset.assets.every(asset => typeof asset?.id === 'string' && asset.id.startsWith(expected + '__'))) continue
+      }
+      const operation = dataset.capabilities?.operations?.find(op =>
+        op.operation === 'export' && op.selectors?.includes('bbox'))
+      if (operation?.href && operation.href !== href + '/requests')
+        throw new Error('Unexpected remote processor link')
+      return {
+        dataset,
+        stamp: runStamp(date),
+        ...(bbox && operation ? { selection: remoteZone(bbox), operation: href + '/requests' } : {})
+      }
     }
   }
 
@@ -235,7 +281,10 @@ export class RemoteCatalogue {
     const plan: RunPlan = {
       stamp: candidate.stamp, probe: '', assets,
       remote: {
-        metadata: { run: new Date(candidate.dataset.run).toISOString(), ...(bounds ? { bounds } : {}), ...(forecast ? { forecast } : {}),
+        metadata: {
+          model: candidate.dataset.model,
+          run: candidate.dataset.run === undefined ? undefined : new Date(candidate.dataset.run).toISOString(),
+          ...(bounds ? { bounds } : {}), ...(forecast ? { forecast } : {}),
           ...(fields ? { fields } : {}), ...(grid ? { grid } : {}) },
         provenance: {
           remoteServer: this.setting.id, remoteEndpoint: this.endpoint,

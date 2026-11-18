@@ -1,6 +1,6 @@
 import { CataloguePublisher } from './catalogue'
 import { Bbox, InternetState, SourceSetting, SourceStatus } from './types'
-import { candidateRuns, expectedRunStamp, fetchFingerprint, fingerprintsEqual, nextPublishAt, probeRunStamp, sourceDirName, MODEL_MAX_HOURS, MODEL_SCHEDULES } from './scheduler'
+import { candidateRuns, expectedRunStamp, fetchFingerprint, fingerprintsEqual, nextPublishAt, probeRunStamp, remoteModelName, sourceDirName, MODEL_MAX_HOURS, MODEL_SCHEDULES } from './scheduler'
 import { RemoteCatalogue, remoteZone } from './remote-catalogue'
 import { planRun, runAvailable, toDownloadSource, type Outcome } from './downloader'
 
@@ -89,7 +89,7 @@ export class Orchestrator {
       const paramsOk = this.paramsOk(s, lastRun)
       return {
         name,
-        model: s.model,
+        model: s.remoteServer ? remoteModelName(s) : s.model,
         ...(s.remoteServer ? { remoteServer: s.remoteServer } : {}),
         autoDownload: s.autoDownload !== false,
         lastRun,
@@ -134,7 +134,7 @@ export class Orchestrator {
   nextTickAt(source: SourceSetting, timing: ProbeTiming = {}): Date {
     const now = new Date(Date.now())
     const st = this.states.get(sourceDirName(source))!
-    const interval = (timing.intervalMinutes ?? MODEL_SCHEDULES[source.model].probeEveryMinutes)
+    const interval = (timing.intervalMinutes ?? (source.remoteServer ? 5 : MODEL_SCHEDULES[source.model].probeEveryMinutes))
       * 60_000 * (timing.scale ?? 1)
     if (st.running) return new Date(now.getTime() + interval)
     if (source.remoteServer) return new Date(Math.max(now.getTime(), (st.lastProbeAt ?? 0) + interval))

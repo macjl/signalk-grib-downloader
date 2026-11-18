@@ -19,7 +19,7 @@ const root = (id, v) => `${API}/datasets/${id}/versions/${v}`
 const originalPath = root(datasetId, version), croppedPath = root(croppedId, cropVersion)
 const jobPath = `${API}/requests/${jobId}`
 
-async function setup(t, { processor = false, missing = false, broken = false, unsafe = false, badHash = false } = {}) {
+async function setup(t, { processor = false, missing = false, broken = false, unsafe = false, badHash = false, customModel = false } = {}) {
   const original = grib(2048), crop = grib(256)
   const tokenDir = fs.mkdtempSync(path.join(os.tmpdir(), 'remote-signalk-token-'))
   const tokenFile = path.join(tokenDir, 'token')
@@ -32,6 +32,13 @@ async function setup(t, { processor = false, missing = false, broken = false, un
   const row = {
     id: datasetId, version, state: 'complete', kind: 'forecast', format: 'grib2',
     run: '2026-11-09T15:00:00Z', model: 'AROME', producer: 'signalk-grib-downloader'
+  }
+  if (customModel) {
+    delete row.run
+    row.createdAt = '2026-11-09T15:33:00Z'
+    row.model = 'WRF Manche / 3 km'
+    row.producer = 'signalk-local-forecast'
+    row.grid = { resolution: '3km' }
   }
   const main = { ...row, requested: { source: 'arome-0025' },
     assets: [
@@ -56,7 +63,15 @@ async function setup(t, { processor = false, missing = false, broken = false, un
       res.writeHead(status, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify(data))
     }
-    if (url === API + '/datasets') return json(200, { [datasetId]: row })
+    if (url === API + '/datasets') {
+      const model = new URL(req.url, 'http://localhost').searchParams.get('model')
+      return json(200, !model || model === row.model ? {
+        [datasetId]: row,
+        mirror: { ...row, id: 'mirror', model: 'Looped model', provenance: { channel: 'signalk' } },
+        temporary: { ...row, id: 'temporary', producer: 'signalk-grib-processor', model: 'Temporary crop',
+          expiresAt: '2099-01-01T00:00:00Z' },
+      } : {})
+    }
     if (url === originalPath) return json(200, main)
     if (url === originalPath + '/requests') {
       let bytes = ''
@@ -75,8 +90,8 @@ async function setup(t, { processor = false, missing = false, broken = false, un
   const f = await fixture(t)
   const adapter = new RemoteCatalogue({ id: 'shore', url: peer.base, tokenFile })
   const map = new Map([['shore', adapter]])
-  const orchestrator = area => new Orchestrator([source], f.publisher(), () => {}, () => {}, area, map)
-  return { f, orchestrator, requests, received, original, crop, peer }
+  const orchestrator = (area, setting = source) => new Orchestrator([setting], f.publisher(), () => {}, () => {}, area, map)
+  return { f, orchestrator, requests, received, original, crop, peer, adapter, tokenFile }
 }
 
 for (const missing of [false, true]) {
@@ -136,4 +151,24 @@ test('remote server URLs require HTTPS off loopback and cannot contain credentia
   assert.throws(() => normalizeRemoteUrl('http://shore.example'))
   assert.throws(() => normalizeRemoteUrl('https://user:pass@shore.example'))
   assert.equal(normalizeRemoteUrl('https://shore.example/signalk/'), 'https://shore.example/signalk')
+})
+
+test('discovers and downloads a named GRIB2 model published by a different producer', async t => {
+  const { f, orchestrator, adapter } = await setup(t, { customModel: true })
+  const model = 'WRF Manche / 3 km'
+  assert.deepEqual(await adapter.models(AbortSignal.timeout(5000)), [{ model, resolutions: ['3km'] }])
+  assert.equal(sourceDirName({ ...source, remoteModel: 'AROME' }), sourceDirName(source), 'existing remote identity is stable')
+  const custom = { ...source, remoteModel: model, resolution: '3km' }
+  const name = sourceDirName(custom)
+  assert.match(name, /^signalk-shore__model-[a-f0-9]{24}-3km$/)
+  const orch = orchestrator(bbox, custom)
+  assert.ok(Number.isFinite(orch.nextTickAt(custom).getTime()))
+  assert.equal(await orch.downloadSource(custom), true, orch.status()[0].lastError)
+  assert.equal(orch.status()[0].model, model)
+  const record = [...f.datasets.values()][0]
+  assert.equal(record.metadata.model, model)
+  assert.match(record.metadata.name, /WRF Manche \/ 3 km/)
+  assert.equal(record.metadata.run, undefined, 'catalogue creation time is not a model cycle')
+  assert.equal(record.requested.source, name)
+  assert.equal(record.assets.length, 2)
 })

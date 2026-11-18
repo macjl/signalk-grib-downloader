@@ -5,6 +5,7 @@ export type ModelId = 'gfs' | 'gfs-wave' | 'arome' | 'arpege' | 'icon-eu'
 export interface SourceSetting {
   model: ModelId
   remoteServer?: string // named Signal K origin; omitted for historical upstreams
+  remoteModel?: string  // exact model advertised by the remote catalogue
   resolution?: string   // gfs: 0p25|0p50|1p00 ; gfs-wave: 0p25 ; arome: 0025|001 ; arpege: 01|025
   hours?: number        // forecast duration to download (capped per model)
   retentionDays?: number // catalogue lifetime for new acquisitions; 0 uses archiveRuns
@@ -58,7 +59,7 @@ export interface AppSettings {
 export interface SourceStatus {
   legacyExport?: import('./legacy-export').LegacyExportStatus
   name: string
-  model: ModelId
+  model: string
   remoteServer?: string
   autoDownload: boolean
   lastRun: string | null      // stamp of last committed catalogue acquisition
