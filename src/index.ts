@@ -405,6 +405,10 @@ module.exports = (server: ServerAPI): Plugin => {
             s.archiveRuns !== undefined && (!Number.isFinite(s.archiveRuns) || s.archiveRuns < 0))) {
           return res.status(400).json({ error: 'archiveRuns must be a number ≥ 0' })
         }
+        if ((next.sources ?? []).some(s =>
+            s.retentionDays !== undefined && (!Number.isInteger(s.retentionDays) || s.retentionDays < 0 || s.retentionDays > 365))) {
+          return res.status(400).json({ error: 'retentionDays must be a whole number between 0 and 365' })
+        }
         try {
           saveSettings(next)
         } catch (err) {

@@ -23,6 +23,7 @@ interface RecordEntry {
   acquisitionId?: string
   received?: Record<string, ReceivedAsset>
   version?: string
+  expiresAt?: string
 }
 interface Journal { endpoint: string; records: RecordEntry[] }
 export interface CatalogueReference { datasetId: string; version: string; href: string }
@@ -32,6 +33,7 @@ export class CatalogueHttpError extends Error {
     super(`Forecast Dataset Provider: HTTP ${status}${code ? ` (${code})` : ''}${status === 401 || status === 403 ? ' (check the readwrite token file)' : ''}`)
   }
 }
+const expired = (record: RecordEntry) => record.expiresAt !== undefined && Date.parse(record.expiresAt) <= Date.now()
 const missing = (error: unknown, code: string) => error instanceof CatalogueHttpError && error.status === 404 && error.code === code
 
 export class CataloguePublisher {
@@ -72,7 +74,7 @@ export class CataloguePublisher {
   }
   latest(source: SourceSetting): CompletedRun | null {
     const all = this.read(source).records
-    const records = all.filter(r => r.version).sort((a,b) => b.stamp.localeCompare(a.stamp) || all.indexOf(b) - all.indexOf(a))
+    const records = all.filter(r => r.version && !expired(r)).sort((a,b) => b.stamp.localeCompare(a.stamp) || all.indexOf(b) - all.indexOf(a))
     const record = records[0]
     return record ? { stamp: record.stamp, params: record.params } : null
   }
@@ -80,7 +82,7 @@ export class CataloguePublisher {
     return this.read(source).records.filter(r => !r.version && fingerprintsEqual(r.params, params)).map(r => r.stamp).sort().slice(-1)[0] ?? null
   }
   reference(source: SourceSetting, stamp: string | null, params: unknown): CatalogueReference | null {
-    const record = this.read(source).records.find(r => r.stamp === stamp && r.version && fingerprintsEqual(r.params, params))
+    const record = this.read(source).records.find(r => r.stamp === stamp && r.version && !expired(r) && fingerprintsEqual(r.params, params))
     return record?.version && record.datasetId ? { datasetId: record.datasetId, version: record.version, href: `/signalk/v2/api/resources/forecastDatasets/${record.datasetId}` } : null
   }
   private async response(route: string, method: string, signal?: AbortSignal, json?: unknown, stream?: Readable): Promise<Response> {
@@ -190,6 +192,11 @@ export class CataloguePublisher {
   private finish(source: SourceSetting, journal: Journal, record: RecordEntry, committed: any): void {
     if (committed.id !== record.datasetId || !/^[a-f0-9]{64}$/.test(committed.version) || !Array.isArray(committed.assets) || committed.assets.length !== record.assets.length ||
       record.assets.some(a => { const expected = this.expected(record, a.id), found = committed.assets.find((b: Asset) => a.id === b.id); return !expected || !found || !this.same(expected, found) })) throw new Error('Committed catalogue content does not match the acquired streams')
+    if (committed.expiresAt !== undefined) {
+      if (typeof committed.expiresAt !== 'string' || !Number.isFinite(Date.parse(committed.expiresAt)))
+        throw new Error('Invalid expiration returned by the catalogue')
+      record.expiresAt = committed.expiresAt
+    }
     record.version = committed.version
     delete record.publicationId
     this.save(source, journal)
@@ -237,6 +244,7 @@ export class CataloguePublisher {
         const stamp = plan.stamp, run = `${stamp.slice(0, 4)}-${stamp.slice(4, 6)}-${stamp.slice(6, 8)}T${stamp.slice(9)}:00:00Z`
         stage = await this.request('/publications', 'POST', signal, {
           kind: 'forecast', format: 'grib2', producer: PRODUCER,
+          ...((source.retentionDays ?? 0) > 0 ? { expiresInSeconds: source.retentionDays! * 86_400 } : {}),
           metadata: { name: `${sourceDirName(source)} ${stamp}`, model: source.model.toUpperCase(), run },
           requested: { source: sourceDirName(source), parameters: params },
           provenance: { channel: 'internet', source: sourceDirName(source), run, downloaderAcquisitionId: record.acquisitionId }, assets,
@@ -304,7 +312,12 @@ export class CataloguePublisher {
   }
   private async prune(source: SourceSetting, journal: Journal, log: (message: string) => void, signal?: AbortSignal): Promise<void> {
     const keep = Math.floor(source.archiveRuns ?? 0) + 1
-    const completed = journal.records.filter(r => r.version).sort((a,b) => b.stamp.localeCompare(a.stamp) || journal.records.indexOf(b) - journal.records.indexOf(a))
+    const live = journal.records.filter(record => !expired(record))
+    if (live.length !== journal.records.length) {
+      journal.records = live
+      this.save(source, journal)
+    }
+    const completed = journal.records.filter(r => r.version && !r.expiresAt).sort((a,b) => b.stamp.localeCompare(a.stamp) || journal.records.indexOf(b) - journal.records.indexOf(a))
     const obsolete = journal.records.filter(r => !r.version).concat(completed.slice(keep))
     for (const record of obsolete) {
       try { await this.deleteRecord(record, signal) }

@@ -6,6 +6,7 @@ export interface SourceSetting {
   model: ModelId
   resolution?: string   // gfs: 0p25|0p50|1p00 ; gfs-wave: 0p25 ; arome: 0025|001 ; arpege: 01|025
   hours?: number        // forecast duration to download (capped per model)
+  retentionDays?: number // catalogue lifetime for new acquisitions; 0 uses archiveRuns
   archiveRuns?: number  // past acquisitions retained in the catalogue (0 = none, no upper limit)
   autoDownload?: boolean // default true: include this source in automatic checks
   enabled?: boolean      // legacy: false migrates to autoDownload false

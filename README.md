@@ -203,6 +203,16 @@ so already published acquisitions do not need an upstream download. Unpublished
 legacy files are not imported automatically; the next eligible acquisition is
 streamed from its upstream source.
 
+### Catalogue lifetime
+
+Set **days** on a source to give each new catalogue acquisition a lifetime of
+1–365 days from commit. This requires Forecast Dataset Provider
+`0.3.0-alpha.2` or later with dataset expiration support. The provider removes
+expired datasets even if the downloader is stopped. The count of archived runs
+applies to datasets without an expiration and to the optional legacy file
+export. A setting of 0 leaves new datasets on the archive-count policy.
+Changing the setting applies to future acquisitions.
+
 ## Optional historical GRIB export
 
 To support consumers that read the former shared directory, **Export
