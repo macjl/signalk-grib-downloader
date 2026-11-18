@@ -436,7 +436,7 @@ module.exports = (server: ServerAPI): Plugin => {
         if ((next.sources ?? []).some(s => !valid.includes(s.model))) {
           return res.status(400).json({ error: `model must be one of: ${valid.join(', ')}` })
         }
-        if ((next.sources ?? []).some(s => s.model === 'gfs-wave' && s.resolution && s.resolution !== '0p25')) {
+        if ((next.sources ?? []).some(s => !s.remoteServer && s.model === 'gfs-wave' && s.resolution && s.resolution !== '0p25')) {
           return res.status(400).json({ error: 'GFS-Wave supports only 0p25 resolution' })
         }
         if ((next.sources ?? []).some(s => s.remoteServer && (!remotes.has(s.remoteServer) ||

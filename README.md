@@ -213,8 +213,8 @@ HTTP for tests. The remote server must provide the Forecast Dataset catalogue
 API. Read-only access is enough to retrieve complete datasets. Cropping
 requires a remote token with read/write access to submit processing jobs.
 
-In the downloader webapp, add a source, choose the named server as **Source
-server**, then select a model from that server's current GRIB2 forecasts. The
+In the downloader webapp, add a source, choose the named server under **Source**,
+then select a model from that server's current GRIB2 forecasts. The
 list includes independent producers. Click the refresh button to update it.
 Resolutions are offered when the catalogue identifies them. Otherwise use
 **Any resolution**. A model can be selected without a reported run time if
@@ -232,9 +232,9 @@ For example, shore-sourced AROME is identified as
 the original version and the downloaded version. Custom model names are kept
 as catalogue metadata and displayed in the downloader. Each asset is checked
 against its advertised size and SHA-256 before commit. Changing the map box
-submits a fresh crop when supported. The downloader shows the origin of direct
-sources by model: NOAA (NOMADS) for GFS and GFS-Wave, Météo-France for AROME
-and ARPÈGE, and DWD for ICON-EU.
+submits a fresh crop when supported. For a direct download, choose NOAA (NOMADS)
+for GFS and GFS-Wave, Météo-France for AROME and ARPÈGE, or DWD for ICON-EU.
+The model menu shows the models available from the selected source.
 
 ### Catalogue lifetime
 
