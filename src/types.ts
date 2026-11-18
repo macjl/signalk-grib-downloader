@@ -6,6 +6,7 @@ export interface SourceSetting {
   model: ModelId
   remoteServer?: string // named Signal K origin; omitted for direct downloads
   remoteModel?: string  // exact model advertised by the remote catalogue
+  remoteHours?: number  // last requested lead hour for a supported remote time subset
   resolution?: string   // gfs: 0p25|0p50|1p00 ; gfs-wave: 0p25 ; arome: 0025|001 ; arpege: 01|025
   hours?: number        // forecast duration to download (capped per model)
   retentionDays?: number // catalogue lifetime for new acquisitions; 0 uses archiveRuns

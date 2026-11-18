@@ -68,9 +68,10 @@ export class Orchestrator {
     if (!stamp) return true
     const latest = this.catalogue.latest(source)?.params
     if (source.remoteServer) {
-      const prior = latest as { remoteEndpoint?: string; area?: string; mode?: string } | undefined
+      const prior = latest as { remoteEndpoint?: string; area?: string; requestedHours?: number } | undefined
       return prior?.remoteEndpoint === this.remotes.get(source.remoteServer)?.endpoint &&
-        (prior?.mode === 'complete' || prior?.area === JSON.stringify(remoteZone(this.bbox)))
+        prior?.requestedHours === source.remoteHours &&
+        (prior?.area === undefined || prior.area === JSON.stringify(remoteZone(this.bbox)))
     }
     return fingerprintsEqual(latest, fetchFingerprint(source, this.bbox))
   }
@@ -149,7 +150,7 @@ export class Orchestrator {
 
   // Download one source (no-op if it is already running).
   // Returns true if a fetch was executed.
-  async downloadSource(source: SourceSetting): Promise<boolean> {
+  async downloadSource(source: SourceSetting, expectedSubset?: 'area' | 'time' | 'both'): Promise<boolean> {
     const name = sourceDirName(source)
     const st = this.states.get(name)!
     if (st.running || this.stopped) return false
@@ -196,6 +197,9 @@ export class Orchestrator {
           onProgress('No complete matching GRIB dataset on the remote server')
           return true
         }
+        if (((expectedSubset === 'area' || expectedSubset === 'both') && !candidate.selection?.bbox) ||
+            ((expectedSubset === 'time' || expectedSubset === 'both') && !candidate.selection?.from))
+          throw new Error('Remote subsetting availability changed. Refresh the source before downloading.')
         const latest = this.catalogue.latest(source)
         const params = remote.fingerprint(candidate)
         if ((latest?.stamp === candidate.stamp && fingerprintsEqual(latest.params, params)) ||

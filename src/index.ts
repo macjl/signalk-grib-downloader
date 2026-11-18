@@ -423,6 +423,20 @@ module.exports = (server: ServerAPI): Plugin => {
         }
       })
 
+      router.get('/remote-preview/:server', async (req: any, res: any) => {
+        const peer = remotes.get(req.params.server)
+        if (!peer) return res.status(404).json({ error: 'Unknown remote Signal K server' })
+        const { model, resolution } = req.query
+        if (!validRemoteModel(model) ||
+            (resolution !== undefined && (typeof resolution !== 'string' || !/^[a-zA-Z0-9]{1,16}$/.test(resolution))))
+          return res.status(400).json({ error: 'Choose a remote model and a valid resolution' })
+        try {
+          res.set('Cache-Control', 'no-store').json(await peer.preview(model, resolution, AbortSignal.timeout(20_000)))
+        } catch (error) {
+          res.status(502).json({ error: error instanceof Error ? error.message : 'Remote catalogue unavailable' })
+        }
+      })
+
       router.put('/settings', (req: any, res: any) => {
         if (orchestrator?.isRunning() || deleting.size) return res.status(409).json({ error: 'Wait for the current transfer or deletion to finish' })
         if (!orchestrator) return res.status(503).json({ error: 'plugin not started' })
@@ -445,6 +459,10 @@ module.exports = (server: ServerAPI): Plugin => {
         }
         if ((next.sources ?? []).some(s => s.remoteModel !== undefined && (!s.remoteServer || !validRemoteModel(s.remoteModel)))) {
           return res.status(400).json({ error: 'Choose a valid model advertised by the remote catalogue' })
+        }
+        if ((next.sources ?? []).some(s => s.remoteHours !== undefined &&
+            (!s.remoteServer || !Number.isSafeInteger(s.remoteHours) || s.remoteHours < 0))) {
+          return res.status(400).json({ error: 'Remote forecast duration must be a nonnegative whole number of hours' })
         }
         const names = (next.sources ?? []).map(s => sourceDirName(s))
         if (names.some(name => !/^[A-Za-z0-9_-]+$/.test(name))) return res.status(400).json({ error: 'invalid source name' })
@@ -507,7 +525,10 @@ module.exports = (server: ServerAPI): Plugin => {
         if (!orchestrator) return res.status(503).json({ error: 'plugin not started' })
         const source = orchestrator.findSource(req.params.name)
         if (!source) return res.status(404).json({ error: `no source named ${req.params.name}` })
-        orchestrator.downloadSource(source).catch(err => server.debug(`download error: ${err}`))
+        const expectedSubset = req.query?.subset
+        if (expectedSubset !== undefined && (!source.remoteServer || !['area', 'time', 'both'].includes(expectedSubset)))
+          return res.status(400).json({ error: 'Invalid remote subsetting mode' })
+        orchestrator.downloadSource(source, expectedSubset).catch(err => server.debug(`download error: ${err}`))
         res.status(202).json({ started: [sourceDirName(source)] })
       })
     },

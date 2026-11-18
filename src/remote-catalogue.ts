@@ -11,6 +11,25 @@ const assetName = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$/
 export const remoteId = /^[a-z0-9][a-z0-9-]{0,31}$/
 
 type Zone = [number, number, number, number]
+type Field = { parameter: string; level?: { type: string; value?: number; unit?: string } }
+type Selection = { bbox?: Zone; fields?: Field[]; from?: string; to?: string }
+interface ExportOperation {
+  operation: string
+  href?: string
+  selectors?: string[]
+  fields?: Field[]
+  forecastInterval?: { stepSeconds: number; maxHours: number }
+}
+interface Horizon {
+  minHours: number
+  maxHours: number
+  stepHours: number
+}
+interface Availability {
+  area: boolean
+  horizon?: Horizon
+  reason?: 'processing-unavailable' | 'write-required'
+}
 interface Asset {
   id: string
   href: string
@@ -36,13 +55,14 @@ interface Dataset {
   fields?: unknown[]
   grid?: Record<string, unknown>
   assets: Asset[]
-  capabilities?: { operations?: { operation: string; href?: string; selectors?: string[] }[] }
+  capabilities?: { operations?: ExportOperation[] }
 }
 export interface RemoteCandidate {
   dataset: Dataset
   stamp: string
-  selection?: Zone
+  selection?: Selection
   operation?: string
+  requestedHours?: number
 }
 interface Job { id: string; href: string; state: string; result?: Dataset }
 class RemoteError extends Error {
@@ -50,8 +70,6 @@ class RemoteError extends Error {
     super(`Remote Signal K: HTTP ${status}${code ? ' (' + code + ')' : ''}`)
   }
 }
-class ProcessorUnavailable extends Error {}
-
 export function normalizeRemoteUrl(value: string): string {
   const parsed = new URL(value)
   const loopback = ['localhost', '127.0.0.1', '[::1]'].includes(parsed.hostname)
@@ -94,6 +112,27 @@ function versionPath(dataset: Pick<Dataset, 'id' | 'version'>): string {
   if (!uuid.test(dataset.id) || !hash.test(dataset.version))
     throw new Error('Invalid remote dataset identity')
   return `${api}/datasets/${dataset.id}/versions/${dataset.version}`
+}
+
+const hour = 3_600_000
+function forecastHorizon(dataset: Dataset, operation: ExportOperation): Horizon | undefined {
+  const interval = operation.forecastInterval
+  if (!operation.selectors?.includes('from') || !operation.selectors.includes('to') ||
+      !operation.selectors.includes('fields') || !Array.isArray(operation.fields) ||
+      !operation.fields.length || operation.fields.some(field => typeof field?.parameter !== 'string' || !field.parameter) ||
+      !interval || !Number.isSafeInteger(interval.stepSeconds / 3600) || interval.stepSeconds <= 0 ||
+      !Number.isSafeInteger(interval.maxHours) || interval.maxHours < 1 || !dataset.run) return
+  const stepHours = interval.stepSeconds / 3600
+  const step = stepHours * hour
+  const run = Date.parse(dataset.run)
+  // This slider represents whole hours relative to the model cycle.
+  if (!Number.isFinite(run) || run % hour !== 0) return
+  const from = dataset.forecast ? Date.parse(dataset.forecast.from) : run
+  const first = Math.ceil(Math.max(run, from) / step) * step
+  const to = dataset.forecast ? Date.parse(dataset.forecast.to) : run + interval.maxHours * hour
+  const last = Math.floor(Math.min(to, first + interval.maxHours * hour) / step) * step
+  if (!Number.isFinite(first) || !Number.isFinite(last) || last <= first) return
+  return { minHours: (first - run) / hour, maxHours: (last - run) / hour, stepHours }
 }
 
 export class RemoteCatalogue {
@@ -166,13 +205,11 @@ export class RemoteCatalogue {
       .map(([model, resolutions]) => ({ model, resolutions: [...resolutions].sort() }))
   }
 
-  async find(source: SourceSetting, bbox: Bbox | undefined, signal: AbortSignal): Promise<RemoteCandidate | undefined> {
-    const model = remoteModelName(source)
+  private async match(model: string, resolution: string | undefined, signal: AbortSignal): Promise<Dataset | undefined> {
     for await (const row of this.list(signal, model)) {
       if (row.model !== model) continue
-      const href = versionPath(row)
       let dataset: Dataset
-      try { dataset = await this.request<Dataset>(href, signal) }
+      try { dataset = await this.request<Dataset>(versionPath(row), signal) }
       catch (error) {
         if (error instanceof RemoteError && error.status === 404 && error.code === 'DATASET_NOT_FOUND') continue
         throw error
@@ -181,48 +218,96 @@ export class RemoteCatalogue {
         throw new Error('Remote catalogue returned a different dataset version')
       const date = runDate(dataset)
       if (!date || !usable(dataset) || dataset.model !== model || !Array.isArray(dataset.assets) || !dataset.assets.length) continue
-      if (source.resolution) {
-        const expected = `${model.toLowerCase()}-${source.resolution}`
-        if (reportedResolution(dataset) !== source.resolution &&
+      if (resolution) {
+        const expected = `${model.toLowerCase()}-${resolution}`
+        if (reportedResolution(dataset) !== resolution &&
             dataset.requested?.source !== expected &&
             !dataset.assets.every(asset => typeof asset?.id === 'string' && asset.id.startsWith(expected + '__'))) continue
       }
-      const operation = dataset.capabilities?.operations?.find(op =>
-        op.operation === 'export' && op.selectors?.includes('bbox'))
-      if (operation?.href && operation.href !== href + '/requests')
-        throw new Error('Unexpected remote processor link')
-      return {
-        dataset,
-        stamp: runStamp(date),
-        ...(bbox && operation ? { selection: remoteZone(bbox), operation: href + '/requests' } : {})
-      }
+      return dataset
+    }
+  }
+
+  private async availability(dataset: Dataset, signal: AbortSignal): Promise<Availability & { operation?: ExportOperation }> {
+    const operation = dataset.capabilities?.operations?.find(op => op.operation === 'export')
+    if (!operation) return { area: false }
+    const area = operation.selectors?.includes('bbox') ?? false
+    const horizon = forecastHorizon(dataset, operation)
+    if (!area && !horizon) return { area: false }
+    if (!operation.href) return { area: false, reason: 'processing-unavailable' }
+    if (operation.href !== versionPath(dataset) + '/requests')
+      throw new Error('Unexpected remote processor link')
+    let status: { processing?: string; operations?: string[] }
+    try { status = await this.request(`${api}/status`, signal) }
+    catch (error) {
+      if (error instanceof RemoteError && ([404, 405, 501].includes(error.status) ||
+        (error.status === 503 && error.code === 'PROCESSOR_UNAVAILABLE')))
+        return { area: false, reason: 'processing-unavailable' }
+      throw error
+    }
+    if (!Array.isArray(status?.operations)) throw new Error('Invalid remote processing status')
+    if (status.processing !== 'available' || !status.operations.includes('export'))
+      return { area: false, reason: 'processing-unavailable' }
+    if (!this.setting.tokenFile) return { area: false, reason: 'write-required' }
+    try {
+      const login = await this.request<{ status?: string; userLevel?: string }>('/skServer/loginStatus', signal)
+      if (login?.status !== 'loggedIn' || !['readwrite', 'admin'].includes(login.userLevel ?? ''))
+        return { area: false, reason: 'write-required' }
+    } catch (error) {
+      if (error instanceof RemoteError && [401, 403].includes(error.status))
+        return { area: false, reason: 'write-required' }
+      throw error
+    }
+    return { area, horizon, operation }
+  }
+
+  async preview(model: string, resolution: string | undefined, signal: AbortSignal): Promise<Availability | null> {
+    const dataset = await this.match(model, resolution, signal)
+    if (!dataset) return null
+    const { area, horizon, reason } = await this.availability(dataset, signal)
+    return { area, horizon, reason }
+  }
+
+  async find(source: SourceSetting, bbox: Bbox | undefined, signal: AbortSignal): Promise<RemoteCandidate | undefined> {
+    const dataset = await this.match(remoteModelName(source), source.resolution, signal)
+    if (!dataset) return
+    const { area, horizon, operation } = await this.availability(dataset, signal)
+    const selection: Selection = {}
+    if (area && bbox) selection.bbox = remoteZone(bbox)
+    if (horizon && source.remoteHours !== undefined) {
+      const { minHours, maxHours, stepHours } = horizon
+      const requested = Math.max(minHours, Math.min(maxHours, source.remoteHours))
+      const end = minHours + Math.floor((requested - minHours) / stepHours) * stepHours
+      const run = Date.parse(dataset.run!)
+      selection.fields = operation!.fields
+      selection.from = new Date(run + minHours * hour).toISOString()
+      selection.to = new Date(run + end * hour).toISOString()
+    }
+    return {
+      dataset,
+      stamp: runStamp(runDate(dataset)!),
+      requestedHours: source.remoteHours,
+      ...(selection.bbox || selection.from ? { selection, operation: operation!.href } : {})
     }
   }
 
   fingerprint(candidate: RemoteCandidate) {
-    const { dataset, selection } = candidate
+    const { dataset, selection, requestedHours } = candidate
     // Serialize coordinates as text to retain grid precision. Historical
     // fingerprints round numeric coordinates for the legacy export format.
     return { remoteEndpoint: this.endpoint, remoteId: dataset.id, remoteVersion: dataset.version,
-      mode: selection ? 'subset' : 'complete', ...(selection ? { area: JSON.stringify(selection) } : {}) }
+      mode: selection ? 'subset' : 'complete',
+      ...(selection?.bbox ? { area: JSON.stringify(selection.bbox) } : {}),
+      ...(selection?.from ? { from: selection.from, to: selection.to, fields: selection.fields } : {}),
+      ...(requestedHours === undefined ? {} : { requestedHours }) }
   }
 
   private async crop(candidate: RemoteCandidate, signal: AbortSignal): Promise<Dataset> {
     const active = AbortSignal.any([signal, AbortSignal.timeout(180_000)])
-    let job: Job
-    try {
-      job = await this.request<Job>(candidate.operation!, active, {
-        operation: 'export', output: { format: 'grib2', layout: 'single-file' },
-        selection: { bbox: candidate.selection }
-      })
-    } catch (error) {
-      if (error instanceof RemoteError &&
-          ([405, 501].includes(error.status) ||
-            (error.status === 404 && error.code !== 'DATASET_NOT_FOUND') ||
-            (error.status === 503 && error.code === 'PROCESSOR_UNAVAILABLE')))
-        throw new ProcessorUnavailable()
-      throw error
-    }
+    const selection = candidate.selection!
+    let job = await this.request<Job>(candidate.operation!, active, {
+      operation: 'export', output: { format: 'grib2', layout: 'single-file' }, selection
+    })
     const href = uuid.test(job?.id) ? `${api}/requests/${job.id}` : undefined
     if (!href || job.href !== href) throw new Error('Invalid remote processor job link')
     while (job.state === 'running') {
@@ -237,7 +322,12 @@ export class RemoteCatalogue {
         result.provenance?.source?.id !== candidate.dataset.id || result.provenance.source.version !== candidate.dataset.version)
       throw new Error('Invalid remote GRIB crop result')
     versionPath(result)
-    const requested = candidate.selection!
+    if (selection.from &&
+        (Date.parse(result.forecast?.from ?? '') !== Date.parse(selection.from) ||
+          Date.parse(result.forecast?.to ?? '') !== Date.parse(selection.to!)))
+      throw new Error('Remote GRIB crop does not match the requested forecast interval')
+    const requested = selection.bbox
+    if (!requested) return result
     const actual = result.bounds
     const tolerance = 1e-8
     if (!Array.isArray(actual) || actual.length !== 4 || actual.some(value => !Number.isFinite(value)) ||
@@ -251,13 +341,8 @@ export class RemoteCatalogue {
   async prepare(source: SourceSetting, candidate: RemoteCandidate, log: (message: string) => void, signal: AbortSignal) {
     let dataset = candidate.dataset
     if (candidate.selection) {
-      log('Requesting selected area from the remote GRIB Processor')
-      try { dataset = await this.crop(candidate, signal) }
-      catch (error) {
-        if (!(error instanceof ProcessorUnavailable)) throw error
-        candidate = { dataset: candidate.dataset, stamp: candidate.stamp }
-        log('Remote GRIB Processor unavailable; using the complete dataset')
-      }
+      log('Requesting a subset from the remote GRIB Processor')
+      dataset = await this.crop(candidate, signal)
     }
     const href = versionPath(dataset)
     if (!Array.isArray(dataset.assets) || !dataset.assets.length || dataset.assets.length > 1024)
@@ -291,7 +376,8 @@ export class RemoteCatalogue {
           remoteSource: { id: candidate.dataset.id, version: candidate.dataset.version },
           remoteContent: { id: dataset.id, version: dataset.version },
           mode: candidate.selection ? 'subset' : 'complete',
-          ...(candidate.selection ? { bbox: candidate.selection } : {})
+          ...(candidate.selection?.bbox ? { bbox: candidate.selection.bbox } : {}),
+          ...(candidate.selection?.from ? { forecast: { from: candidate.selection.from, to: candidate.selection.to } } : {})
         }
       }
     }
