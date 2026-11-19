@@ -37,7 +37,7 @@ async function setup(t, options = {}) {
   app.use(API, router)
   const provider = await server(t, app)
   const upstream = await server(t, options.handler ?? ((_req, res) => res.end(grib())))
-  const source = { model: 'gfs', hours: 3 }
+  const source = { model: 'gfs', hours: 3, ...options.source }
   const descriptor = toDownloadSource(source); descriptor.base = upstream.base
   const plan = planRun(descriptor, new Date('2026-10-21T00:00:00Z'))
   const publisher = legacyExport => new CataloguePublisher(provider.base, tokenFile, data, undefined, undefined, legacyExport)
@@ -173,4 +173,20 @@ test('actual provider: legacy export reads immutable committed originals and wri
   const marker = JSON.parse(fs.readFileSync(path.join(root, 'gfs-0p25', `.run-${f.plan.stamp}.complete`)))
   assert.deepEqual(marker, { params: detail.requested.parameters })
   assert.equal(f.upstream.calls.length, upstream)
+})
+
+test('actual provider: day-based retention preserves multiple acquisitions with archiveRuns set to zero', integration, async t => {
+  const f = await setup(t, { source: { retentionDays: 3, archiveRuns: 0 } })
+  const first = await f.publish()
+  const descriptor = toDownloadSource(f.source)
+  descriptor.base = f.upstream.base
+  const next = planRun(descriptor, new Date('2026-10-21T06:00:00Z'))
+  const second = await f.publisher().publish(f.source, next, descriptor.fingerprint, () => {})
+  const list = await f.get('/datasets')
+  assert.deepEqual(Object.keys(list).sort(), [first.datasetId, second.datasetId].sort())
+  for (const dataset of Object.values(list))
+    assert.equal(Date.parse(dataset.expiresAt) - Date.parse(dataset.createdAt), 3 * 86_400_000)
+  const journal = JSON.parse(fs.readFileSync(path.join(f.data, 'catalogue-publications', 'gfs-0p25.json'), 'utf8'))
+  assert.equal(journal.records.length, 2)
+  for (const entry of journal.records) assert.equal(entry.expiresAt, list[entry.datasetId].expiresAt)
 })

@@ -1,12 +1,14 @@
 import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
+import { createHash } from 'node:crypto'
 import { Path, Plugin, ServerAPI } from '@signalk/server-api'
 import { Orchestrator, ProbeTiming } from './orchestrator'
 import { CataloguePublisher } from './catalogue'
 import { CatalogueAccess } from './catalogue-access'
 import { LegacyGribExporter } from './legacy-export'
 import { sourceDirName } from './scheduler'
+import { RemoteCatalogue, normalizeRemoteUrl, remoteId, validRemoteModel } from './remote-catalogue'
 import { AppSettings, InternetState, PluginSettings, SourceSetting } from './types'
 
 const PLUGIN_ID = 'signalk-grib-downloader'
@@ -68,6 +70,21 @@ const buildSchema = (defaultInterval: number, defaultMultiplier: number) => ({
       description: 'Token file, default <plugin data directory>/catalogue-token. When missing, approve the automatic readwrite request in Signal K Security > Access Requests. File contents are never returned by the webapp.',
       default: '',
     },
+    remoteServers: {
+      type: 'array',
+      title: 'Remote Signal K sources',
+      description: 'Save the server, then request a read/write token from its row in Plugin Config.',
+      items: {
+        type: 'object',
+        required: ['id', 'url'],
+        properties: {
+          id: { type: 'string', title: 'Server identifier', pattern: remoteId.source },
+          url: { type: 'string', title: 'Signal K HTTPS base URL' },
+          tokenFile: { type: 'string', title: 'Remote token file',
+            description: 'Optional file for an existing token. An approved token requested from this panel is stored separately and takes precedence.' },
+        },
+      },
+    },
     legacyExportEnabled: {
       type: 'boolean', title: 'Export legacy GRIB files', default: true,
       description: 'Enabled by default during the transition. While enabled, GRIB files are stored twice: in Forecast Dataset Provider and in the export directory, approximately doubling GRIB disk usage. Uncheck to disable when no longer needed. The catalogue is still required.',
@@ -80,6 +97,8 @@ const buildSchema = (defaultInterval: number, defaultMultiplier: number) => ({
 })
 
 function parseSourceName(name: string): SourceSetting | undefined {
+  const remote = /^signalk-([a-z0-9][a-z0-9-]{0,31})__(gfs-wave|gfs|arome|arpege|icon-eu)(?:-([a-zA-Z0-9]{1,16}))?$/.exec(name)
+  if (remote) return { remoteServer: remote[1], model: remote[2] as SourceSetting['model'], resolution: remote[3] }
   if (name === 'icon-eu') return { model: 'icon-eu' }
   const match = /^(gfs-wave|gfs|arome|arpege)-([A-Za-z0-9]+)$/.exec(name)
   return match ? { model: match[1] as SourceSetting['model'], resolution: match[2] } : undefined
@@ -98,6 +117,8 @@ module.exports = (server: ServerAPI): Plugin => {
   let internetState: InternetState = 'unknown'
   let stopInternetStream: (() => void) | null = null
   let infra: PluginSettings = {}
+  let remotes = new Map<string, RemoteCatalogue>()
+  let remoteAccesses = new Map<string, CatalogueAccess>()
   let catalogue: CataloguePublisher
   let access: CatalogueAccess | null = null
   const deleting = new Map<string, AbortController>()
@@ -296,7 +317,8 @@ module.exports = (server: ServerAPI): Plugin => {
       catalogue,
       (msg: string) => server.debug(msg),
       updateStatus,
-      settings.bbox
+      settings.bbox,
+      remotes
     )
 
     if (sources.some(s => s.autoDownload !== false)) {
@@ -322,6 +344,32 @@ module.exports = (server: ServerAPI): Plugin => {
       }
       const tokenFile = expandHome(infra.catalogueTokenFile || path.join(server.getDataDirPath(), 'catalogue-token'))
       if (!path.isAbsolute(tokenFile)) throw new Error('Catalogue token file must be absolute')
+      remotes = new Map()
+      remoteAccesses = new Map()
+      const destination = normalizeRemoteUrl(infra.catalogueUrl || 'http://127.0.0.1:3000')
+      for (const peer of options?.remoteServers ?? []) {
+        if (!peer || typeof peer.id !== 'string' || !remoteId.test(peer.id) || remotes.has(peer.id))
+          throw new Error('Remote Signal K server identifiers must be valid and unique')
+        const remoteToken = peer.tokenFile ? expandHome(peer.tokenFile) : undefined
+        if (remoteToken && (!path.isAbsolute(remoteToken) || path.resolve(remoteToken) === path.resolve(tokenFile)))
+          throw new Error('Configure a separate absolute token file for the remote Signal K source')
+        const endpoint = normalizeRemoteUrl(peer.url)
+        if (endpoint === destination) throw new Error('Use a different server for the remote source and destination catalogue')
+        const key = createHash('sha256').update(endpoint).digest('hex')
+        const dataDir = path.join(server.getDataDirPath(), 'remote-access', peer.id + '-' + key)
+        const managedToken = path.join(dataDir, 'token')
+        if (path.resolve(managedToken) === path.resolve(tokenFile))
+          throw new Error('Configure a separate token file for the destination catalogue')
+        const authorizer = new CatalogueAccess({
+          endpoint, tokenFile: managedToken, dataDir,
+          pluginId: PLUGIN_ID, permissions: 'readwrite', manualRequest: true,
+          description: `GRIB Downloader — remote forecast source ${peer.id}`,
+          onReady: () => { orchestrator?.retryAfterAccessApproval(peer.id); updateStatus(); if (orchestrator && !autoPaused()) runTick() },
+        })
+        const remote = new RemoteCatalogue({ ...peer, tokenFile: remoteToken }, () => authorizer.currentToken())
+        remotes.set(peer.id, remote)
+        remoteAccesses.set(peer.id, authorizer)
+      }
       const legacyExport = infra.legacyExportEnabled ? new LegacyGribExporter(expandHome(infra.gribsRoot || '~/.signalk/gribs')) : undefined
       catalogue = new CataloguePublisher(infra.catalogueUrl || 'http://127.0.0.1:3000', tokenFile, server.getDataDirPath(), () => authorizer.token(), token => authorizer.rejected(token), legacyExport)
       const authorizer = new CatalogueAccess({
@@ -344,14 +392,17 @@ module.exports = (server: ServerAPI): Plugin => {
 
       apply()
       access.start()
+      for (const authorizer of remoteAccesses.values()) authorizer.start()
     },
 
     stop: async () => {
       const active = orchestrator
       orchestrator = null
       const previousAccess = access
+      const previousRemoteAccess = remoteAccesses
       access = null
-      await previousAccess?.stop()
+      remoteAccesses = new Map()
+      await Promise.all([previousAccess?.stop(), ...Array.from(previousRemoteAccess.values(), authorizer => authorizer.stop())])
       stopInternetStream?.()
       stopInternetStream = null
       if (timer) { clearTimeout(timer); timer = null }
@@ -378,7 +429,56 @@ module.exports = (server: ServerAPI): Plugin => {
       // Operational settings, webapp-managed. ('/config' would collide with
       // SignalK's built-in plugin config routes.)
       router.get('/settings', (_req: any, res: any) => {
-        res.json({ ...settings, checkIntervalMinutes: intervalMinutes() })
+        res.json({ ...settings, checkIntervalMinutes: intervalMinutes(), remoteServerIds: [...remotes.keys()],
+          sourceNames: (settings.sources ?? []).map(sourceDirName) })
+      })
+
+      router.get('/remote-models/:server', async (req: any, res: any) => {
+        const peer = remotes.get(req.params.server)
+        if (!peer) return res.status(404).json({ error: 'Unknown remote Signal K server' })
+        try {
+          res.json({ models: await peer.models(AbortSignal.timeout(20_000)) })
+        } catch (error) {
+          res.status(502).json({ error: error instanceof Error ? error.message : 'Remote catalogue unavailable' })
+        }
+      })
+
+      router.get('/remote-access', (_req: any, res: any) => {
+        res.set('Cache-Control', 'no-store').json(Array.from(remoteAccesses, ([id, authorizer]) => {
+          const { state, diagnostics } = authorizer.status()
+          let visibleState = state
+          if (state === 'ready') {
+            try { if (!authorizer.currentToken()) visibleState = 'idle' }
+            catch { visibleState = 'error' }
+          }
+          return { id, endpoint: remotes.get(id)!.endpoint, state: visibleState,
+            httpStatus: state === 'error' ? diagnostics.lastIssue?.httpStatus : undefined }
+        }))
+      })
+
+      router.post('/remote-access/:server', (req: any, res: any) => {
+        const peer = remotes.get(req.params.server)
+        const authorizer = remoteAccesses.get(req.params.server)
+        if (!peer || !authorizer) return res.status(404).json({ error: 'Save the remote server configuration first' })
+        if (req.body?.endpoint !== peer.endpoint)
+          return res.status(409).json({ error: 'The saved remote server URL changed' })
+        try { authorizer.request() }
+        catch { return res.status(500).json({ error: 'Cannot read the managed remote token file' }) }
+        res.status(202).json({ state: authorizer.status().state })
+      })
+
+      router.get('/remote-preview/:server', async (req: any, res: any) => {
+        const peer = remotes.get(req.params.server)
+        if (!peer) return res.status(404).json({ error: 'Unknown remote Signal K server' })
+        const { model, resolution } = req.query
+        if (!validRemoteModel(model) ||
+            (resolution !== undefined && (typeof resolution !== 'string' || !/^[a-zA-Z0-9]{1,16}$/.test(resolution))))
+          return res.status(400).json({ error: 'Choose a remote model and a valid resolution' })
+        try {
+          res.set('Cache-Control', 'no-store').json(await peer.preview(model, resolution, AbortSignal.timeout(20_000)))
+        } catch (error) {
+          res.status(502).json({ error: error instanceof Error ? error.message : 'Remote catalogue unavailable' })
+        }
       })
 
       router.put('/settings', (req: any, res: any) => {
@@ -388,22 +488,38 @@ module.exports = (server: ServerAPI): Plugin => {
         if (!nextRaw || typeof nextRaw !== 'object' || (nextRaw.sources !== undefined && !Array.isArray(nextRaw.sources))) {
           return res.status(400).json({ error: 'invalid settings' })
         }
-        const next = normalizeSettings(nextRaw)
+        const { sources, bbox, mode, checkIntervalMinutes } = nextRaw
+        const next = normalizeSettings({ sources, bbox: bbox ?? settings.bbox, mode, checkIntervalMinutes })
         const valid = ['gfs', 'gfs-wave', 'arome', 'arpege', 'icon-eu']
         if ((next.sources ?? []).some(s => !valid.includes(s.model))) {
           return res.status(400).json({ error: `model must be one of: ${valid.join(', ')}` })
         }
-        if ((next.sources ?? []).some(s => s.model === 'gfs-wave' && s.resolution && s.resolution !== '0p25')) {
+        if ((next.sources ?? []).some(s => !s.remoteServer && s.model === 'gfs-wave' && s.resolution && s.resolution !== '0p25')) {
           return res.status(400).json({ error: 'GFS-Wave supports only 0p25 resolution' })
+        }
+        if ((next.sources ?? []).some(s => s.remoteServer && (!remotes.has(s.remoteServer) ||
+            (s.resolution && !/^[a-zA-Z0-9]{1,16}$/.test(s.resolution))))) {
+          return res.status(400).json({ error: 'Choose a configured remote Signal K server and a valid resolution' })
+        }
+        if ((next.sources ?? []).some(s => s.remoteModel !== undefined && (!s.remoteServer || !validRemoteModel(s.remoteModel)))) {
+          return res.status(400).json({ error: 'Choose a valid model advertised by the remote catalogue' })
+        }
+        if ((next.sources ?? []).some(s => s.remoteHours !== undefined &&
+            (!s.remoteServer || !Number.isSafeInteger(s.remoteHours) || s.remoteHours < 0))) {
+          return res.status(400).json({ error: 'Remote forecast duration must be a nonnegative whole number of hours' })
         }
         const names = (next.sources ?? []).map(s => sourceDirName(s))
         if (names.some(name => !/^[A-Za-z0-9_-]+$/.test(name))) return res.status(400).json({ error: 'invalid source name' })
         if (new Set(names).size !== names.length) {
-          return res.status(400).json({ error: 'duplicate source: each (model, resolution) pair must be unique' })
+          return res.status(400).json({ error: 'duplicate source: each (server, model, resolution) combination must be unique' })
         }
         if ((next.sources ?? []).some(s =>
             s.archiveRuns !== undefined && (!Number.isFinite(s.archiveRuns) || s.archiveRuns < 0))) {
           return res.status(400).json({ error: 'archiveRuns must be a number ≥ 0' })
+        }
+        if ((next.sources ?? []).some(s =>
+            s.retentionDays !== undefined && (!Number.isInteger(s.retentionDays) || s.retentionDays < 0 || s.retentionDays > 365))) {
+          return res.status(400).json({ error: 'retentionDays must be a whole number between 0 and 365' })
         }
         try {
           saveSettings(next)
@@ -412,7 +528,7 @@ module.exports = (server: ServerAPI): Plugin => {
         }
         settings = next
         apply()
-        res.json({ ok: true })
+        res.json((next.sources ?? []).some(s => s.remoteServer) ? { ok: true, sourceNames: names } : { ok: true })
       })
 
       router.post('/download', (_req: any, res: any) => {
@@ -434,7 +550,8 @@ module.exports = (server: ServerAPI): Plugin => {
         const name = req.params.name
         if (!/^[A-Za-z0-9_-]+$/.test(name)) return res.status(400).json({ error: 'invalid source name' })
         if (orchestrator?.isRunning() || deleting.has(name)) return res.status(409).json({ error: 'Source is busy' })
-        const source = orchestrator?.findSource(name) ?? parseSourceName(name)
+        const remoteJournal = /^signalk-[a-z0-9][a-z0-9-]{0,31}__model-[a-f0-9]{24}(?:-[a-zA-Z0-9]{1,16})?$/.test(name)
+        const source = orchestrator?.findSource(name) ?? parseSourceName(name) ?? (remoteJournal ? name : undefined)
         if (!source) return res.status(400).json({ error: 'invalid source name' })
         const controller = new AbortController()
         deleting.set(name, controller)
@@ -452,7 +569,10 @@ module.exports = (server: ServerAPI): Plugin => {
         if (!orchestrator) return res.status(503).json({ error: 'plugin not started' })
         const source = orchestrator.findSource(req.params.name)
         if (!source) return res.status(404).json({ error: `no source named ${req.params.name}` })
-        orchestrator.downloadSource(source).catch(err => server.debug(`download error: ${err}`))
+        const expectedSubset = req.query?.subset
+        if (expectedSubset !== undefined && (!source.remoteServer || !['area', 'time', 'both'].includes(expectedSubset)))
+          return res.status(400).json({ error: 'Invalid remote subsetting mode' })
+        orchestrator.downloadSource(source, expectedSubset).catch(err => server.debug(`download error: ${err}`))
         res.status(202).json({ started: [sourceDirName(source)] })
       })
     },

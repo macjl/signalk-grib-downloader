@@ -172,12 +172,12 @@ test('no automatic download starts behind a captive portal', async () => {
   }
 })
 
-test('settings accept independent manual GFS and GFS-Wave sources and reject unsupported wave resolution', async t => {
+test('settings enforce the GFS-Wave resolution only for direct downloads', async t => {
   const dataDir = tmpDir(), server = makeServer(dataDir, { seed: 'offline' })
   const plugin = makePlugin(server), { router, call } = makeRouter()
   t.after(async () => { await plugin.stop(); fs.rmSync(dataDir, { recursive: true, force: true }) })
   plugin.registerWithRouter(router)
-  plugin.start({ sources: [] })
+  plugin.start({ sources: [], remoteServers: [{ id: 'shore', url: 'https://shore.example' }] })
   const sources = [{ model: 'gfs', autoDownload: false }, { model: 'gfs-wave', hours: 6, autoDownload: false }]
   assert.deepStrictEqual(call('PUT', '/settings', { body: { sources, bbox: BBOX } }), { ok: true })
   assert.deepStrictEqual(call('GET', '/status').sources.map(s => s.name), ['gfs-0p25', 'gfs-wave-0p25'])
@@ -187,4 +187,7 @@ test('settings accept independent manual GFS and GFS-Wave sources and reject uns
   call('PUT', '/settings', { body: { sources: [sources[0]], bbox: BBOX } })
   // Deletion of a removed source must still parse its hyphenated model ID.
   assert.deepStrictEqual(await call('DELETE', '/source-data/:name', { params: { name: 'gfs-wave-0p25' } }), { ok: true })
+  const remote = { ...sources[1], remoteServer: 'shore', remoteModel: 'AROME', resolution: '0025' }
+  assert.strictEqual(call('PUT', '/settings', { body: { sources: [remote], bbox: BBOX } }).ok, true)
+  assert.deepStrictEqual(call('GET', '/settings').sources, [remote])
 })

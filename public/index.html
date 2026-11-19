@@ -59,7 +59,8 @@
     .badge.offline { background: #4d1d22; color: #e37f8a; }
     .badge.captive { background: #4d2d1d; color: #e3a07f; }
 
-    .src-status { font-size: 11px; color: #9fb0c5; margin-top: 2px; }
+    .src-status, .remote-plan { font-size: 11px; color: #9fb0c5; margin-top: 2px; }
+    .remote-plan { padding-left: 24px; }
     .log { font-family: ui-monospace, monospace; font-size: 11px; background: #131c29; border-radius: 6px;
            padding: 8px; margin-top: 6px; white-space: pre-wrap; max-height: 130px; overflow-y: auto; color: #b8c6d9; }
 
@@ -151,8 +152,8 @@ const I18N = {
     confirmCaptive: 'Derrière un portail captif (page de connexion réseau) — le téléchargement va très probablement échouer. Essayer quand même ?',
     checkEvery: 'Vérifier toutes les', sources: 'Sources',
     thModel: 'Modèle', thRes: 'Résol.', thHours: 'Durée (h)', thDir: 'Source', thState: 'État',
-    addSource: '+ Ajouter une source', zone: 'Zone de téléchargement (GFS / GFS-Wave)',
-    zoneHint: 'Glissez les coins du rectangle sur la carte — appliqué à GFS et GFS-Wave. AROME / Arpège / ICON distribuent leur domaine entier.',
+    addSource: '+ Ajouter une source', zone: 'Zone de téléchargement',
+    zoneHint: 'Glissez les coins du rectangle. La zone s’applique à GFS et GFS-Wave en direct, ainsi qu’aux sources Signal K qui affichent une découpe par zone.',
     north: 'Nord', south: 'Sud', west: 'Ouest', east: 'Est',
     save: 'Enregistrer', saved: 'Enregistré ✓', dirty: 'Modifications non enregistrées',
     saveError: 'Erreur : ', downloadAll: 'Tout télécharger', download: '⬇',
@@ -168,7 +169,26 @@ const I18N = {
     lastAttempt: 'dernière tentative', noAttempt: 'aucune tentative depuis le démarrage', logTitle: 'Journal du dernier téléchargement',
     maxLbl: 'max', totalVol: 'Volume estimé par run :', perRun: '/ run',
     volumeUnknown: 'estimation indisponible',
-    archivesLbl: 'archives', archivesTitle: 'Acquisitions précédentes conservées dans le catalogue et, si activé, dans l’export historique (0 = aucune)',
+    archivesLbl: 'archives', archivesTitle: 'Nombre d’acquisitions précédentes sans expiration et, si activé, d’exports historiques (0 = aucune)',
+    upstreamOrigin: 'Source',
+    forecastHours: 'Durée de la prévision',
+    remoteChecking: 'Vérification de la découpe sur le serveur…',
+    remoteCheckFailed: 'Impossible de vérifier la découpe. Actualisez la source.',
+    remoteNoDataset: 'Aucun GRIB complet pour ce modèle et cette résolution.',
+    remoteFull: 'GRIB complet · découpe indisponible',
+    remoteFullAccess: 'GRIB complet · un jeton distant avec accès en écriture est requis pour la découpe',
+    remoteFullTime: 'GRIB complet · réduisez la durée pour découper par échéance',
+    remoteAllHours: 'Toutes',
+    remoteArea: 'GRIB découpé à la zone de la carte',
+    remoteAreaNoTime: 'GRIB découpé à la zone de la carte · découpe par échéance indisponible',
+    remoteTime: 'GRIB découpé par échéance · champs annoncés par le serveur',
+    remoteAreaTime: 'GRIB découpé par zone et par échéance · champs annoncés par le serveur',
+    remoteSaveFirst: 'Enregistrez les réglages avant de télécharger depuis un serveur Signal K.',
+    anyResolution: 'Toute résolution',
+    chooseRemoteModel: 'Choisir un modèle', remoteLoading: 'Lecture du catalogue…',
+    remoteEmpty: 'Aucun modèle GRIB disponible', remoteFailed: 'Catalogue distant indisponible',
+    remoteMissing: 'modèle configuré, indisponible', refreshModels: 'Actualiser les modèles et la découpe',
+    retentionLbl: 'jours', retentionTitle: 'Durée de conservation des nouvelles acquisitions dans le catalogue, après leur publication. 0 utilise le nombre d’archives.',
     confirmDeleteData: n => `Supprimer aussi les données téléchargées de « ${n} » (acquisitions et archives du catalogue) ?\nElles seront effacées à l'enregistrement.`,
     loginRequired: 'Connexion requise — <a href="/admin/#/login" style="color:#7fc4e3">connectez-vous à SignalK</a> puis rechargez cette page.',
   },
@@ -184,8 +204,8 @@ const I18N = {
     confirmCaptive: 'Behind a captive portal (network login page) — the download will most likely fail. Try anyway?',
     checkEvery: 'Check every', sources: 'Sources',
     thModel: 'Model', thRes: 'Res.', thHours: 'Hours', thDir: 'Source', thState: 'State',
-    addSource: '+ Add source', zone: 'Download area (GFS / GFS-Wave)',
-    zoneHint: 'Drag the rectangle corners on the map — applies to GFS and GFS-Wave. AROME / Arpège / ICON distribute their whole domain.',
+    addSource: '+ Add source', zone: 'Download area',
+    zoneHint: 'Drag the rectangle corners. The area applies to direct GFS and GFS-Wave downloads and remote Signal K sources that show area cropping.',
     north: 'North', south: 'South', west: 'West', east: 'East',
     save: 'Save', saved: 'Saved ✓', dirty: 'Unsaved changes',
     saveError: 'Error: ', downloadAll: 'Download all', download: '⬇',
@@ -201,7 +221,26 @@ const I18N = {
     lastAttempt: 'last attempt', noAttempt: 'no attempt since startup', logTitle: 'Last download log',
     maxLbl: 'max', totalVol: 'Estimated volume per run:', perRun: '/ run',
     volumeUnknown: 'estimate unavailable',
-    archivesLbl: 'archives', archivesTitle: 'Previous acquisitions kept in the catalogue and, when enabled, the legacy export (0 = none)',
+    archivesLbl: 'archives', archivesTitle: 'Number of previous datasets without an expiration and, when enabled, legacy exports (0 = none)',
+    upstreamOrigin: 'Source',
+    forecastHours: 'Forecast duration',
+    remoteChecking: 'Checking remote GRIB subsetting…',
+    remoteCheckFailed: 'Could not verify subsetting. Refresh this source.',
+    remoteNoDataset: 'No complete GRIB for this model and resolution.',
+    remoteFull: 'Complete GRIB · subsetting unavailable',
+    remoteFullAccess: 'Complete GRIB · subsetting requires a remote token with write access',
+    remoteFullTime: 'Complete GRIB · shorten the forecast to subset by lead time',
+    remoteAllHours: 'All',
+    remoteArea: 'GRIB cropped to the map area',
+    remoteAreaNoTime: 'GRIB cropped to the map area · lead-time subsetting unavailable',
+    remoteTime: 'GRIB subset by lead time · fields advertised by the server',
+    remoteAreaTime: 'GRIB subset by area and lead time · fields advertised by the server',
+    remoteSaveFirst: 'Save your settings before downloading from a Signal K server.',
+    anyResolution: 'Any resolution',
+    chooseRemoteModel: 'Choose a model', remoteLoading: 'Reading catalogue…',
+    remoteEmpty: 'No GRIB models available', remoteFailed: 'Remote catalogue unavailable',
+    remoteMissing: 'configured model, unavailable', refreshModels: 'Refresh models and subsetting',
+    retentionLbl: 'days', retentionTitle: 'Catalogue lifetime for new acquisitions after publication. 0 uses the archive count.',
     confirmDeleteData: n => `Also delete the downloaded data of "${n}" (catalogue acquisitions and archives)?\nDeleted when you save.`,
     loginRequired: 'Login required — <a href="/admin/#/login" style="color:#7fc4e3">log in to SignalK</a> and reload this page.',
   },
@@ -211,17 +250,23 @@ document.querySelectorAll('[data-i18n]').forEach(el => { el.textContent = t[el.d
 
 // ── Constants ────────────────────────────────────────────────────────────────
 const API = '/plugins/signalk-grib-downloader'
+const DIRECT_PROVIDERS = {
+  noaa: 'NOAA (NOMADS)',
+  meteofrance: 'Météo-France',
+  dwd: 'DWD',
+}
 const MODELS = {
-  gfs:       { resolutions: ['0p25', '0p50', '1p00'], maxHours: 384, sliderStep: 3 },
-  'gfs-wave': { label: 'GFS-Wave', resolutions: ['0p25'], maxHours: 384, sliderStep: 3 },
-  arome:     { resolutions: ['0025', '001'],          maxHours: 51,  sliderStep: 1 },
-  arpege:    { resolutions: ['01', '025'],            maxHours: 102, sliderStep: 1 },
-  'icon-eu': { resolutions: [],                       maxHours: 120, sliderStep: 3 },
+  gfs:        { provider: 'noaa', label: 'GFS', resolutions: ['0p25', '0p50', '1p00'], maxHours: 384, sliderStep: 3 },
+  'gfs-wave': { provider: 'noaa', label: 'GFS-Wave', resolutions: ['0p25'], maxHours: 384, sliderStep: 3 },
+  arome:      { provider: 'meteofrance', label: 'AROME', resolutions: ['0025', '001'], maxHours: 51, sliderStep: 1 },
+  arpege:     { provider: 'meteofrance', label: 'ARPÈGE', resolutions: ['01', '025'], maxHours: 102, sliderStep: 1 },
+  'icon-eu':  { provider: 'dwd', label: 'ICON-EU', resolutions: [], maxHours: 120, sliderStep: 3 },
 }
 
 // Volume estimation (MB) — constants measured on real downloads.
 // GFS is bbox-subsetted server-side: size ∝ grid points × steps.
 function estimateMB(s) {
+  if (s.remoteServer) return NaN
   const hours = s.hours ?? MODELS[s.model].maxHours
   // No measured wave compression estimate yet; do not show zero or reuse
   // atmospheric sizing. Any total including waves is also unknown.
@@ -253,6 +298,9 @@ function fmtEstimate(mb) {
 
 // ── State ────────────────────────────────────────────────────────────────────
 let config = { bbox: { latMin: 35, lonMin: -6, latMax: 45, lonMax: 17 }, sources: [] }
+const modelCatalogues = new Map()
+const remotePreviews = new Map()
+const sourceNames = new WeakMap()
 let statusBySource = {}
 let schedulerError = null
 let internetState = 'unknown'
@@ -365,10 +413,17 @@ function refreshRect(fit) {
 
 // ── Sources table ────────────────────────────────────────────────────────────
 // Directory name derived from model+resolution — the contract with the provider.
-const DEFAULT_RES = { gfs: '0p25', 'gfs-wave': '0p25', arome: '0025', arpege: '01', 'icon-eu': null }
 function dirName(s) {
-  const res = s.resolution || DEFAULT_RES[s.model]
+  if (s.remoteServer) return sourceNames.get(s) ?? ''
+  const res = s.resolution || MODELS[s.model]?.resolutions[0]
   return res ? `${s.model}-${res}` : s.model
+}
+
+function selectDirectModel(s, modelId) {
+  const model = MODELS[modelId]
+  if (s.model !== modelId) s.hours = model.maxHours
+  s.model = modelId
+  s.resolution = model.resolutions[0]
 }
 
 function sourceStateBadge(s) {
@@ -402,6 +457,59 @@ function sourceStatusLine(s) {
   return line
 }
 
+async function readRemoteModels(id, refresh = false) {
+  if (!id || modelCatalogues.get(id)?.loading || (!refresh && modelCatalogues.has(id))) return
+  remotePreviews.delete(id)
+  modelCatalogues.set(id, { loading: true })
+  renderSources()
+  try {
+    const response = await fetch(`${API}/remote-models/${encodeURIComponent(id)}`, { cache: 'no-store' })
+    const body = await response.json()
+    if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`)
+    modelCatalogues.set(id, { models: body.models })
+  } catch (error) {
+    modelCatalogues.set(id, { error: error.message })
+  }
+  renderSources()
+}
+
+function remotePreview(server, model, resolution) {
+  if (!remotePreviews.has(server)) remotePreviews.set(server, new Map())
+  const previews = remotePreviews.get(server)
+  const query = new URLSearchParams({ model })
+  if (resolution) query.set('resolution', resolution)
+  const key = query.toString()
+  if (!previews.has(key)) {
+    const state = { loading: true }
+    previews.set(key, state)
+    fetch(`${API}/remote-preview/${encodeURIComponent(server)}?${key}`, { cache: 'no-store' })
+      .then(async response => {
+        const body = await response.json()
+        if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`)
+        state.dataset = body
+      })
+      .catch(error => { state.error = error.message })
+      .finally(() => {
+        state.loading = false
+        if (remotePreviews.get(server) === previews) renderSources()
+      })
+  }
+  return previews.get(key)
+}
+
+function remoteDownloadLabel(catalogue, model, preview, hours) {
+  if (catalogue?.error) return t.remoteFailed
+  if (!catalogue || catalogue.loading || preview?.loading) return t.remoteChecking
+  if (!model) return catalogue.models?.length ? t.chooseRemoteModel : t.remoteNoDataset
+  if (preview?.error) return t.remoteCheckFailed
+  const dataset = preview?.dataset
+  if (!dataset) return t.remoteNoDataset
+  if (hours !== undefined && dataset.horizon) return dataset.area ? t.remoteAreaTime : t.remoteTime
+  if (dataset.area) return dataset.horizon ? t.remoteArea : t.remoteAreaNoTime
+  if (dataset.horizon) return t.remoteFullTime
+  return dataset.reason === 'write-required' ? t.remoteFullAccess : t.remoteFull
+}
+
 function renderSources() {
   const list = document.getElementById('src-list')
   list.innerHTML = ''
@@ -409,8 +517,30 @@ function renderSources() {
   config.sources.forEach((s, idx) => {
     const name = dirName(s)
     const model = MODELS[s.model] || MODELS.gfs
-    const resOpts = model.resolutions
-    const hours = s.hours ?? model.maxHours
+    const remoteServers = new Set([...(config.remoteServerIds ?? []), ...(s.remoteServer ? [s.remoteServer] : [])])
+    const catalogue = modelCatalogues.get(s.remoteServer)
+    const advertised = catalogue?.models ?? []
+    const remoteModel = s.remoteModel ?? (sourceNames.has(s) ? s.model.toUpperCase() : '')
+    const available = advertised.find(entry => entry.model === remoteModel)
+    const resOpts = s.remoteServer
+      ? [...new Set([...(available?.resolutions ?? []), ...(s.resolution ? [s.resolution] : [])])]
+      : model.resolutions
+    const prompt = catalogue?.loading ? t.remoteLoading
+      : catalogue?.error ? t.remoteFailed
+      : advertised.length ? t.chooseRemoteModel : t.remoteEmpty
+
+    const preview = s.remoteServer && available ? remotePreview(s.remoteServer, remoteModel, s.resolution) : undefined
+    const horizon = s.remoteServer ? preview?.dataset?.horizon
+      : { minHours: model.sliderStep, maxHours: model.maxHours, stepHours: model.sliderStep }
+    const configuredHours = s.remoteServer ? s.remoteHours : s.hours
+    const areaSubset = preview?.dataset?.area
+    const timeSubset = preview?.dataset?.horizon && configuredHours !== undefined
+    const expectedSubset = areaSubset ? (timeSubset ? 'both' : 'area') : (timeSubset ? 'time' : '')
+    const hours = horizon?.maxHours !== undefined ? horizon.minHours + Math.floor(
+      (Math.max(horizon.minHours, Math.min(horizon.maxHours, configuredHours ?? horizon.maxHours)) - horizon.minHours) /
+      horizon.stepHours) * horizon.stepHours : undefined
+    const showHours = horizon?.maxHours !== undefined && horizon.minHours < horizon.maxHours
+    const showOpenHours = horizon && !showHours && horizon.maxHours === undefined
     const mb = estimateMB(s)
     totalMB += mb
 
@@ -423,48 +553,89 @@ function renderSources() {
           <input type="checkbox" ${s.autoDownload !== false ? 'checked' : ''} data-f="autoDownload">
           <span>${t.auto}</span>
         </label>
-        <select data-f="model">${Object.keys(MODELS).map(m => `<option value="${m}" ${m === s.model ? 'selected' : ''}>${MODELS[m].label || m}</option>`).join('')}</select>
-        <select data-f="resolution" ${resOpts.length === 0 ? 'disabled' : ''}>
-          ${resOpts.map(r => `<option ${r === s.resolution ? 'selected' : ''}>${r}</option>`).join('')}
+        <select data-f="origin" aria-label="${t.upstreamOrigin}">
+          ${Object.entries(DIRECT_PROVIDERS).map(([id, label]) => `<option value="direct:${id}" ${!s.remoteServer && id === model.provider ? 'selected' : ''}>${label}</option>`).join('')}
+          ${[...remoteServers].map(id => `<option value="signalk:${escapeHtml(id)}" ${id === s.remoteServer ? 'selected' : ''}>${escapeHtml(id)}</option>`).join('')}
         </select>
-        <code style="font-size:12px;color:#9fb0c5">${name}</code>
+        ${s.remoteServer ? `<select data-f="remoteModel" aria-label="${t.chooseRemoteModel}" ${catalogue?.loading ? 'disabled' : ''}>
+          ${!remoteModel ? `<option value="" selected disabled>${prompt}</option>` : ''}
+          ${remoteModel && !available ? `<option selected disabled value="${escapeHtml(remoteModel)}">${escapeHtml(remoteModel)} · ${t.remoteMissing}</option>` : ''}
+          ${advertised.map(entry => `<option value="${escapeHtml(entry.model)}" ${entry.model === remoteModel ? 'selected' : ''}>${escapeHtml(entry.model)}</option>`).join('')}
+        </select>
+        <button type="button" class="small secondary" data-act="refresh-models" title="${escapeHtml(catalogue?.error || t.refreshModels)}" aria-label="${t.refreshModels}">↻</button>`
+          : `<select data-f="model" aria-label="${t.thModel}">
+          ${Object.entries(MODELS).filter(([, entry]) => entry.provider === model.provider).map(([id, entry]) => `<option value="${id}" ${id === s.model ? 'selected' : ''}>${entry.label}</option>`).join('')}
+        </select>`}
+        <select data-f="resolution" ${resOpts.length === 0 ? 'disabled' : ''}>
+          ${s.remoteServer && resOpts.length ? `<option value="" ${!s.resolution ? 'selected' : ''}>${t.anyResolution}</option>` : ''}
+          ${resOpts.map(r => `<option ${r === s.resolution ? 'selected' : ''}>${escapeHtml(r)}</option>`).join('')}
+        </select>
+        <code style="font-size:12px;color:#9fb0c5">${escapeHtml(name || (s.remoteServer ? s.remoteServer : ''))}</code>
         <span style="flex:1"></span>
         <span class="badge-slot">${sourceStateBadge(s)}</span>
         <span class="row-actions">
-          <button class="small" data-act="dl" title="${t.download}">⬇</button>
+          <button class="small" data-act="dl" title="${t.download}" ${s.remoteServer && (!name || !preview?.dataset) ? 'disabled' : ''}>⬇</button>
           <button class="small secondary" data-act="more">${expanded.has(name) ? '▾' : '▸'}</button>
           <button class="small danger" data-act="del">✕</button>
         </span>
       </div>
       <div class="src-sub">
-        <input type="range" data-f="hours" min="${model.sliderStep}" max="${model.maxHours}"
-               step="${model.sliderStep}" value="${hours}">
-        <span class="hours-label ${hours >= model.maxHours ? 'at-max' : ''}">
-          <b data-r="hval">${hours}</b> h <span class="max">/ ${t.maxLbl} ${model.maxHours} h</span>
-        </span>
-        <span class="vol" data-r="vol">${fmtEstimate(mb)}</span>
+        ${showHours ? `<input type="range" data-f="hours" aria-label="${t.forecastHours}" min="${horizon.minHours}" max="${horizon.maxHours}"
+               step="${horizon.stepHours}" value="${hours}">
+        <span class="hours-label ${hours >= horizon.maxHours ? 'at-max' : ''}">
+          <b data-r="hval">${hours}</b> h <span class="max">/ ${t.maxLbl} ${horizon.maxHours} h</span>
+        </span>` : ''}
+        ${showOpenHours ? `<label class="hours-label">${t.forecastHours}
+          <input type="number" data-f="remoteHours" aria-label="${t.forecastHours}" min="0" step="1"
+                 placeholder="${t.remoteAllHours}" value="${Number.isSafeInteger(configuredHours) ? configuredHours : ''}"
+                 style="width:80px;display:inline-block"> h
+        </label>` : ''}
+        ${s.remoteServer ? '' : `<span class="vol" data-r="vol">${fmtEstimate(mb)}</span>`}
         <span style="font-size:12px;color:#9fb0c5;white-space:nowrap" title="${t.archivesTitle}">
           ${t.archivesLbl}
           <input type="number" data-f="archiveRuns" min="0" step="1" value="${s.archiveRuns ?? 0}"
                  style="width:52px;display:inline-block">
         </span>
+        <span style="font-size:12px;color:#9fb0c5;white-space:nowrap" title="${t.retentionTitle}">
+          <input type="number" data-f="retentionDays" min="0" max="365" step="1" value="${Number(s.retentionDays) || 0}"
+                 aria-label="${t.retentionTitle}" style="width:52px;display:inline-block">
+          ${t.retentionLbl}
+        </span>
       </div>
+      ${s.remoteServer ? `<div class="remote-plan" role="status" title="${escapeHtml(preview?.error || '')}">
+        ${remoteDownloadLabel(catalogue, remoteModel, preview, configuredHours)}
+      </div>` : ''}
       <div class="src-status" style="padding-left:24px">${sourceStatusLine(s)}</div>
       <div class="src-details"></div>`
 
     card.querySelectorAll('[data-f]').forEach(el => {
       const f = el.dataset.f
+      if (f === 'remoteHours') {
+        el.addEventListener('change', () => {
+          if (!el.reportValidity()) return
+          if (el.value === '') delete s.remoteHours
+          else if (Number.isSafeInteger(el.valueAsNumber)) s.remoteHours = el.valueAsNumber
+          else return
+          renderSources()
+          markDirty()
+        })
+        return
+      }
       if (f === 'hours') {
         // live label/volume update while sliding; commit on release
         el.addEventListener('input', () => {
           const h = parseInt(el.value, 10)
           const lbl = card.querySelector('[data-r="hval"]')
           lbl.textContent = h
-          lbl.parentElement.classList.toggle('at-max', h >= model.maxHours)
-          card.querySelector('[data-r="vol"]').textContent = fmtEstimate(estimateMB({ ...s, hours: h }))
+          lbl.parentElement.classList.toggle('at-max', h >= horizon.maxHours)
+          if (!s.remoteServer)
+            card.querySelector('[data-r="vol"]').textContent = fmtEstimate(estimateMB({ ...s, hours: h }))
         })
         el.addEventListener('change', () => {
-          s.hours = parseInt(el.value, 10)
+          const h = Number(el.value)
+          if (!s.remoteServer) s.hours = h
+          else if (h < horizon.maxHours) s.remoteHours = h
+          else delete s.remoteHours
           renderSources()
           markDirty()
         })
@@ -472,17 +643,42 @@ function renderSources() {
       }
       el.addEventListener('change', () => {
         if (f === 'autoDownload') s.autoDownload = el.checked
+        else if (f === 'origin') {
+          sourceNames.delete(s)
+          delete s.remoteModel
+          delete s.remoteHours
+          const [kind, id] = el.value.split(':', 2)
+          if (kind === 'signalk') {
+            s.remoteServer = id
+            delete s.resolution
+            void readRemoteModels(id, true)
+          } else {
+            delete s.remoteServer
+            const modelId = MODELS[s.model]?.provider === id ? s.model : Object.keys(MODELS).find(key => MODELS[key].provider === id)
+            selectDirectModel(s, modelId)
+          }
+        }
+        else if (f === 'model') selectDirectModel(s, el.value)
+        else if (f === 'remoteModel') {
+          s.remoteModel = el.value
+          delete s.remoteHours
+          delete s.resolution
+          sourceNames.delete(s)
+        }
+        else if (f === 'resolution' && s.remoteServer) {
+          if (!s.remoteModel && sourceNames.has(s)) s.remoteModel = s.model.toUpperCase()
+          s.resolution = el.value || undefined
+          sourceNames.delete(s)
+        }
+        else if (f === 'retentionDays') s.retentionDays = Math.min(365, Math.max(0, parseInt(el.value, 10) || 0))
         else if (f === 'archiveRuns') s.archiveRuns = Math.max(0, parseInt(el.value, 10) || 0)
         else s[f] = el.value
-        if (f === 'model') {
-          s.resolution = (MODELS[s.model]?.resolutions ?? [])[0]
-          s.hours = MODELS[s.model]?.maxHours
-        }
         renderSources()
         markDirty()
       })
     })
-    card.querySelector('[data-act="dl"]').addEventListener('click', () => triggerDownload(name))
+    card.querySelector('[data-act="refresh-models"]')?.addEventListener('click', () => readRemoteModels(s.remoteServer, true))
+    card.querySelector('[data-act="dl"]').addEventListener('click', () => triggerDownload(name, Boolean(s.remoteServer), expectedSubset))
     card.querySelector('[data-act="more"]').addEventListener('click', (e) => {
       expanded.has(name) ? expanded.delete(name) : expanded.add(name)
       e.target.textContent = expanded.has(name) ? '▾' : '▸'
@@ -490,7 +686,7 @@ function renderSources() {
     })
     card.querySelector('[data-act="del"]').addEventListener('click', () => {
       if (!confirm(t.confirmDelete)) return
-      if (confirm(t.confirmDeleteData(name))) pendingDataDeletions.add(name)
+      if (name && confirm(t.confirmDeleteData(name))) pendingDataDeletions.add(name)
       config.sources.splice(idx, 1)
       renderSources()
       markDirty()
@@ -528,7 +724,11 @@ function renderNetBadge() {
 document.getElementById('btn-download-all').textContent = t.downloadAll
 document.getElementById('btn-download-all').addEventListener('click', () => triggerDownload())
 
-async function triggerDownload(name) {
+async function triggerDownload(name, remote = false, expectedSubset = '') {
+  if (dirty && (remote || (!name && config.sources.some(s => s.remoteServer)))) {
+    window.alert(t.remoteSaveFirst)
+    return
+  }
   // Manual downloads are never blocked server-side — but warn before
   // spending metered bandwidth or attempting doomed offline/captive
   // downloads.
@@ -536,7 +736,8 @@ async function triggerDownload(name) {
   if ((internetState === 'offline' || internetState === 'captive') &&
       !confirm(internetState === 'offline' ? t.confirmOffline : t.confirmCaptive)) return
   try {
-    await fetch(`${API}/download${name ? '/' + encodeURIComponent(name) : ''}`, { method: 'POST' })
+    const query = expectedSubset ? '?subset=' + expectedSubset : ''
+    await fetch(`${API}/download${name ? '/' + encodeURIComponent(name) : ''}${query}`, { method: 'POST' })
     setTimeout(pollStatus, 800)
   } catch (e) { console.error(e) }
 }
@@ -544,6 +745,8 @@ async function triggerDownload(name) {
 document.getElementById('btn-save').addEventListener('click', async () => {
   const note = document.getElementById('save-note')
   try {
+    if (config.sources.some(s => s.remoteServer && !s.remoteModel && !sourceNames.has(s)))
+      throw new Error(t.chooseRemoteModel)
     const r = await fetch(`${API}/settings`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
@@ -553,6 +756,10 @@ document.getElementById('btn-save').addEventListener('click', async () => {
       const body = await r.json().catch(() => ({}))
       throw new Error(body.error || `HTTP ${r.status}`)
     }
+    const saved = await r.json()
+    config.sources.forEach((s, index) => {
+      if (saved.sourceNames?.[index]) sourceNames.set(s, saved.sourceNames[index])
+    })
     for (const name of pendingDataDeletions) {
       const deletion = await fetch(`${API}/source-data/${encodeURIComponent(name)}`, { method: 'DELETE' })
       if (!deletion.ok) throw new Error((await deletion.json()).error || `HTTP ${deletion.status}`)
@@ -561,6 +768,7 @@ document.getElementById('btn-save').addEventListener('click', async () => {
     pendingDataDeletions.clear()
     dirty = false
     renderSaveBar()
+    renderSources()
     note.textContent = t.saved
     setTimeout(() => { if (!dirty) note.textContent = '' }, 3000)
   } catch (e) {
@@ -646,6 +854,10 @@ async function loadConfig() {
       ...s,
       autoDownload: s.autoDownload ?? (s.enabled !== false),
     }))
+    config.sources.forEach((s, index) => {
+      if (c.sourceNames?.[index]) sourceNames.set(s, c.sourceNames[index])
+      if (s.remoteServer) void readRemoteModels(s.remoteServer)
+    })
     config.bbox = c.bbox ?? { latMin: 35, lonMin: -6, latMax: 45, lonMax: 17 }
   }
   renderSchedule()

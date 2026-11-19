@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.7.0-beta.1] - 2026-11-19
+
+- Add remote Signal K catalogues as a download source alongside NOAA,
+  Météo-France and DWD. Discover GRIB2 models from the selected catalogue.
+- Request a read/write token from the remote Signal K server in Plugin Config
+  and show which selections the source can serve before downloading.
+- Use the remote GRIB export API for area and time selections. Read the actual
+  retained forecast range from the result, including irregular time steps.
+- Configure the catalogue lifetime for downloads per source.
+
 ## [0.6.1] - 2026-11-08
 
 - Correct the development dependency lock metadata for @js-temporal/polyfill;

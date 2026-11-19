@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { ModelId, SourceSetting, Bbox } from './types'
 
 export interface PublicationWindow {
@@ -126,7 +127,16 @@ export function defaultResolution(model: ModelId): string | undefined {
 
 // Stable catalogue source ID: <model>[-<resolution>]. Atmospheric and wave
 // acquisitions keep independent publication journals and retention histories.
+export function remoteModelName(s: SourceSetting): string {
+  return s.remoteModel ?? s.model.toUpperCase()
+}
 export function sourceDirName(s: SourceSetting): string {
+  if (s.remoteServer) {
+    const model = remoteModelName(s)
+    const known = Object.keys(MODEL_SCHEDULES).find(key => key.toUpperCase() === model)
+    const code = known ?? 'model-' + createHash('sha256').update(model).digest('hex').slice(0, 24)
+    return `signalk-${s.remoteServer}__${code}${s.resolution ? '-' + s.resolution : ''}`
+  }
   const res = s.resolution || defaultResolution(s.model)
   return res ? `${s.model}-${res}` : s.model
 }

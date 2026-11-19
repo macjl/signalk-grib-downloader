@@ -4,8 +4,12 @@ export type ModelId = 'gfs' | 'gfs-wave' | 'arome' | 'arpege' | 'icon-eu'
 // The catalogue owns originals; optional legacy filesystem exports are copies.
 export interface SourceSetting {
   model: ModelId
+  remoteServer?: string // named Signal K origin; omitted for direct downloads
+  remoteModel?: string  // exact model advertised by the remote catalogue
+  remoteHours?: number  // last requested lead hour for a supported remote time subset
   resolution?: string   // gfs: 0p25|0p50|1p00 ; gfs-wave: 0p25 ; arome: 0025|001 ; arpege: 01|025
   hours?: number        // forecast duration to download (capped per model)
+  retentionDays?: number // catalogue lifetime for new acquisitions; 0 uses archiveRuns
   archiveRuns?: number  // past acquisitions retained in the catalogue (0 = none, no upper limit)
   autoDownload?: boolean // default true: include this source in automatic checks
   enabled?: boolean      // legacy: false migrates to autoDownload false
@@ -27,7 +31,14 @@ export interface Bbox {
 export type InternetState = 'online' | 'offline' | 'metered' | 'captive' | 'unknown'
 
 // Infrastructure settings — managed in the SignalK plugin config panel.
+export interface RemoteServerSetting {
+  id: string
+  url: string
+  tokenFile?: string
+}
+
 export interface PluginSettings {
+  remoteServers?: RemoteServerSetting[]
   catalogueUrl?: string             // Signal K server URL, default loopback:3000
   catalogueTokenFile?: string       // readwrite bearer token; never exposed via settings/status
   legacyExportEnabled?: boolean     // opt-in bridge for historical file consumers
@@ -49,7 +60,8 @@ export interface AppSettings {
 export interface SourceStatus {
   legacyExport?: import('./legacy-export').LegacyExportStatus
   name: string
-  model: ModelId
+  model: string
+  remoteServer?: string
   autoDownload: boolean
   lastRun: string | null      // stamp of last committed catalogue acquisition
   expectedRun: string         // stamp of the run that should be available now

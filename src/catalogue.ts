@@ -23,6 +23,7 @@ interface RecordEntry {
   acquisitionId?: string
   received?: Record<string, ReceivedAsset>
   version?: string
+  expiresAt?: string
 }
 interface Journal { endpoint: string; records: RecordEntry[] }
 export interface CatalogueReference { datasetId: string; version: string; href: string }
@@ -32,6 +33,7 @@ export class CatalogueHttpError extends Error {
     super(`Forecast Dataset Provider: HTTP ${status}${code ? ` (${code})` : ''}${status === 401 || status === 403 ? ' (check the readwrite token file)' : ''}`)
   }
 }
+const expired = (record: RecordEntry) => record.expiresAt !== undefined && Date.parse(record.expiresAt) <= Date.now()
 const missing = (error: unknown, code: string) => error instanceof CatalogueHttpError && error.status === 404 && error.code === code
 
 export class CataloguePublisher {
@@ -42,12 +44,12 @@ export class CataloguePublisher {
     if (url.protocol === 'http:' && !['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)) throw new Error('Use HTTPS for a remote catalogue server')
     this.endpoint = url.href.replace(/\/$/, '')
   }
-  private file(source: SourceSetting): string {
-    const name = sourceDirName(source)
+  private file(source: SourceSetting | string): string {
+    const name = typeof source === 'string' ? source : sourceDirName(source)
     if (!/^[A-Za-z0-9_-]+$/.test(name)) throw new Error('Invalid source name')
     return path.join(this.dataDir, 'catalogue-publications', `${name}.json`)
   }
-  private read(source: SourceSetting): Journal {
+  private read(source: SourceSetting | string): Journal {
     try {
       const journal = JSON.parse(fs.readFileSync(this.file(source), 'utf8')) as Journal
       if (journal.endpoint !== this.endpoint) throw new Error('Catalogue URL changed: preserve the old publication journal before switching servers')
@@ -57,7 +59,7 @@ export class CataloguePublisher {
       throw error
     }
   }
-  private save(source: SourceSetting, journal: Journal): void {
+  private save(source: SourceSetting | string, journal: Journal): void {
     const file = this.file(source)
     fs.mkdirSync(path.dirname(file), { recursive: true })
     const fd = fs.openSync(file + '.tmp', 'w', 0o600)
@@ -72,7 +74,7 @@ export class CataloguePublisher {
   }
   latest(source: SourceSetting): CompletedRun | null {
     const all = this.read(source).records
-    const records = all.filter(r => r.version).sort((a,b) => b.stamp.localeCompare(a.stamp) || all.indexOf(b) - all.indexOf(a))
+    const records = all.filter(r => r.version && !expired(r)).sort((a,b) => b.stamp.localeCompare(a.stamp) || all.indexOf(b) - all.indexOf(a))
     const record = records[0]
     return record ? { stamp: record.stamp, params: record.params } : null
   }
@@ -80,7 +82,7 @@ export class CataloguePublisher {
     return this.read(source).records.filter(r => !r.version && fingerprintsEqual(r.params, params)).map(r => r.stamp).sort().slice(-1)[0] ?? null
   }
   reference(source: SourceSetting, stamp: string | null, params: unknown): CatalogueReference | null {
-    const record = this.read(source).records.find(r => r.stamp === stamp && r.version && fingerprintsEqual(r.params, params))
+    const record = this.read(source).records.find(r => r.stamp === stamp && r.version && !expired(r) && fingerprintsEqual(r.params, params))
     return record?.version && record.datasetId ? { datasetId: record.datasetId, version: record.version, href: `/signalk/v2/api/resources/forecastDatasets/${record.datasetId}` } : null
   }
   private async response(route: string, method: string, signal?: AbortSignal, json?: unknown, stream?: Readable): Promise<Response> {
@@ -190,6 +192,11 @@ export class CataloguePublisher {
   private finish(source: SourceSetting, journal: Journal, record: RecordEntry, committed: any): void {
     if (committed.id !== record.datasetId || !/^[a-f0-9]{64}$/.test(committed.version) || !Array.isArray(committed.assets) || committed.assets.length !== record.assets.length ||
       record.assets.some(a => { const expected = this.expected(record, a.id), found = committed.assets.find((b: Asset) => a.id === b.id); return !expected || !found || !this.same(expected, found) })) throw new Error('Committed catalogue content does not match the acquired streams')
+    if (committed.expiresAt !== undefined) {
+      if (typeof committed.expiresAt !== 'string' || !Number.isFinite(Date.parse(committed.expiresAt)))
+        throw new Error('Invalid expiration returned by the catalogue')
+      record.expiresAt = committed.expiresAt
+    }
     record.version = committed.version
     delete record.publicationId
     this.save(source, journal)
@@ -202,9 +209,29 @@ export class CataloguePublisher {
       if (await this.verify(source, plan.stamp, params, signal)) { await this.prune(source, journal, log, signal); return this.reference(source, plan.stamp, params)! }
       return this.publish(source, plan, params, log, signal)
     }
-    const assets: Asset[] = plan.assets.map(a => ({ id: a.id, mediaType: 'application/octet-stream' }))
+    const assets: Asset[] = plan.assets.map(a => ({ id: a.id, mediaType: 'application/octet-stream',
+      ...(a.catalogue ? { size: a.catalogue.size, sha256: a.catalogue.sha256 } : {}) }))
     if (!assets.length || new Set(assets.map(a => a.id)).size !== assets.length) throw new Error('Invalid acquisition asset plan')
-    if (record && (record.assets.length !== assets.length || record.assets.some(a => !assets.some(b => a.id === b.id)))) throw new Error('Resumed acquisition plan differs from the original declaration')
+    if (record && (record.assets.length !== assets.length || record.assets.some(a =>
+      !assets.some(b => a.id === b.id && a.size === b.size && a.sha256 === b.sha256)))) {
+      if (!plan.remote) throw new Error('Resumed acquisition plan differs from the original declaration')
+      // The prior upload may have committed just before a response was lost.
+      if (record.datasetId) {
+        try {
+          const committed = await this.request(`/datasets/${record.datasetId}`, 'GET', signal)
+          this.finish(source, journal, record, committed)
+          await this.prune(source, journal, log, signal)
+          return this.reference(source, plan.stamp, params)!
+        } catch (error) {
+          if (!missing(error, 'DATASET_NOT_FOUND')) throw error
+        }
+      }
+      // A regenerated crop may differ from the staged bytes.
+      await this.abortStaging(record, signal)
+      journal.records = journal.records.filter(entry => entry !== record)
+      this.save(source, journal)
+      record = undefined
+    }
     if (!record) {
       // Persist the identity BEFORE creation: a lost POST response can be
       // recovered through the provider's publication listing without duplicates.
@@ -237,9 +264,13 @@ export class CataloguePublisher {
         const stamp = plan.stamp, run = `${stamp.slice(0, 4)}-${stamp.slice(4, 6)}-${stamp.slice(6, 8)}T${stamp.slice(9)}:00:00Z`
         stage = await this.request('/publications', 'POST', signal, {
           kind: 'forecast', format: 'grib2', producer: PRODUCER,
-          metadata: { name: `${sourceDirName(source)} ${stamp}`, model: source.model.toUpperCase(), run },
+          ...((source.retentionDays ?? 0) > 0 ? { expiresInSeconds: source.retentionDays! * 86_400 } : {}),
+          metadata: { model: source.model.toUpperCase(), run, ...plan.remote?.metadata,
+            name: (source.remoteModel
+              ? `Signal K ${source.remoteServer} · ${source.remoteModel}${source.resolution ? ' ' + source.resolution : ''} · ${stamp}`
+              : `${sourceDirName(source)} ${stamp}`).slice(0, 512) },
           requested: { source: sourceDirName(source), parameters: params },
-          provenance: { channel: 'internet', source: sourceDirName(source), run, downloaderAcquisitionId: record.acquisitionId }, assets,
+          provenance: { channel: plan.remote ? 'signalk' : 'internet', source: sourceDirName(source), run, ...plan.remote?.provenance, downloaderAcquisitionId: record.acquisitionId }, assets,
         })
       }
       this.validateStage(source, record, stage)
@@ -274,6 +305,8 @@ export class CataloguePublisher {
       try {
         for await (const chunk of readAsset(asset, active)) { size += chunk.length; hash.update(chunk); yield chunk }
         const received = { id: asset.id, size, sha256: hash.digest('hex'), mediaType: 'application/octet-stream' }
+        if (asset.catalogue && (size !== asset.catalogue.size || received.sha256 !== asset.catalogue.sha256))
+          throw new Error('Remote GRIB bytes do not match the advertised size and SHA-256')
         record.received ??= {}
         record.received[asset.id] = received
         // Persist successful upstream EOF before the provider can acknowledge it.
@@ -287,7 +320,7 @@ export class CataloguePublisher {
     } catch (error) { throw upstreamError ?? error }
     finally { controller.abort(); body.destroy() }
   }
-  private async deleteRecord(record: RecordEntry, signal?: AbortSignal): Promise<void> {
+  private async abortStaging(record: RecordEntry, signal?: AbortSignal): Promise<void> {
     // An interrupted creation may have no publication ID locally yet.
     if (!record.publicationId && !record.version && record.acquisitionId) {
       const stages = (await this.publications(signal)).filter(p => p.declaration?.provenance?.downloaderAcquisitionId === record.acquisitionId && p.declaration?.producer === PRODUCER)
@@ -297,6 +330,9 @@ export class CataloguePublisher {
       try { await this.request(`/publications/${record.publicationId}`, 'DELETE', signal) }
       catch (error) { if (!missing(error, 'PUBLICATION_NOT_FOUND')) throw error }
     }
+  }
+  private async deleteRecord(record: RecordEntry, signal?: AbortSignal): Promise<void> {
+    await this.abortStaging(record, signal)
     if (record.datasetId) {
       try { await this.request(`/datasets/${record.datasetId}`, 'DELETE', signal) }
       catch (error) { if (!missing(error, 'DATASET_NOT_FOUND')) throw error }
@@ -304,7 +340,12 @@ export class CataloguePublisher {
   }
   private async prune(source: SourceSetting, journal: Journal, log: (message: string) => void, signal?: AbortSignal): Promise<void> {
     const keep = Math.floor(source.archiveRuns ?? 0) + 1
-    const completed = journal.records.filter(r => r.version).sort((a,b) => b.stamp.localeCompare(a.stamp) || journal.records.indexOf(b) - journal.records.indexOf(a))
+    const live = journal.records.filter(record => !expired(record))
+    if (live.length !== journal.records.length) {
+      journal.records = live
+      this.save(source, journal)
+    }
+    const completed = journal.records.filter(r => r.version && !r.expiresAt).sort((a,b) => b.stamp.localeCompare(a.stamp) || journal.records.indexOf(b) - journal.records.indexOf(a))
     const obsolete = journal.records.filter(r => !r.version).concat(completed.slice(keep))
     for (const record of obsolete) {
       try { await this.deleteRecord(record, signal) }
@@ -313,7 +354,7 @@ export class CataloguePublisher {
       this.save(source, journal)
     }
   }
-  async removeSource(source: SourceSetting, signal?: AbortSignal): Promise<void> {
+  async removeSource(source: SourceSetting | string, signal?: AbortSignal): Promise<void> {
     const journal = this.read(source)
     for (const record of [...journal.records]) {
       await this.deleteRecord(record, signal)

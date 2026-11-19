@@ -97,6 +97,43 @@ test('plugin restart resumes the same pending request instead of requesting a se
   assert.equal(f.requests.length, 1); assert.equal(second.token(), f.secret)
 })
 
+test('remote access waits for a click and resumes the same pending read/write request after restart', async t => {
+  const f = await fixture(t)
+  const first = f.manager({ manualRequest: true })
+  first.start()
+  assert.equal(first.status().state, 'idle')
+  await new Promise(resolve => setTimeout(resolve, 25))
+  assert.equal(f.requests.length, 0)
+  first.request()
+  first.request()
+  await waitFor(() => f.polls.length)
+  assert.equal(f.requests.length, 1)
+  assert.equal(f.requests[0].body.permissions, 'readwrite')
+  await first.stop()
+  const resumed = f.manager({ manualRequest: true })
+  f.approved = true
+  resumed.start()
+  await waitFor(() => resumed.status().state === 'ready')
+  assert.equal(resumed.currentToken(), f.secret)
+  assert.equal(f.requests.length, 1)
+})
+
+test('remote denial persists across restart until the administrator retries', async t => {
+  const f = await fixture(t)
+  const first = f.manager({ manualRequest: true })
+  f.denied = true
+  first.start(); first.request()
+  await waitFor(() => first.status().state === 'denied')
+  await first.stop()
+  const resumed = f.manager({ manualRequest: true })
+  resumed.start()
+  assert.equal(resumed.status().state, 'denied')
+  assert.equal(f.requests.length, 1)
+  f.denied = false
+  resumed.request()
+  await waitFor(() => f.requests.length === 2)
+})
+
 test('denial never writes a token or repeatedly asks the administrator', async t => {
   const f = await fixture(t), first = f.manager(); f.denied = true; first.start()
   await waitFor(() => first.status().state === 'denied')
@@ -205,6 +242,53 @@ test('plugin startup exposes a pending request, resumes after approval and stops
   const polls = f.polls.length
   await new Promise(resolve => setTimeout(resolve, 20))
   assert.equal(f.polls.length, polls)
+})
+
+test('remote token request is bound to a saved server and approved token is used without overwriting the manual file', async t => {
+  const f = await fixture(t)
+  fs.writeFileSync(f.options.tokenFile, 'destination-token\n')
+  const manual = path.join(f.directory, 'shore-manual-token')
+  fs.writeFileSync(manual, 'manual-token\n')
+  const plugin = require('../dist/index')({
+    getDataDirPath: () => f.directory, getSelfPath: () => 'offline',
+    streambundle: { getSelfStream: () => ({ onValue: () => () => {} }) },
+    setPluginStatus() {}, debug() {},
+  })
+  t.after(() => plugin.stop())
+  const routes = {}, router = {}
+  for (const method of ['get', 'post', 'put', 'delete'])
+    router[method] = (route, handler) => { routes[method + ' ' + route] = handler }
+  plugin.registerWithRouter(router)
+  async function call(route, req = {}) {
+    let status = 200, body
+    const res = { set: () => res, status: code => { status = code; return res }, json: value => { body = value } }
+    await routes[route](req, res)
+    return { status, body }
+  }
+  plugin.start({ legacyExportEnabled: false, remoteServers: [{ id: 'shore', url: f.options.endpoint, tokenFile: manual }] })
+  const status = async () => (await call('get /remote-access')).body[0]
+  const request = (server, endpoint) => call('post /remote-access/:server', { params: { server }, body: { endpoint } })
+  const models = () => call('get /remote-models/:server', { params: { server: 'shore' } })
+  assert.equal((await status()).state, 'idle')
+  assert.equal((await request('unknown', f.options.endpoint)).status, 404)
+  assert.equal((await request('shore', 'https://other.example')).status, 409)
+  assert.equal(f.requests.length, 0)
+  await models()
+  assert.equal(f.catalogueRequests.at(-1).auth, 'Bearer manual-token')
+  assert.equal((await request('shore', f.options.endpoint)).status, 202)
+  f.approved = true
+  for (let i = 0; i < 700 && (await status()).state !== 'ready'; i++)
+    await new Promise(resolve => setTimeout(resolve, 10))
+  const ready = await status()
+  assert.equal(ready.state, 'ready')
+  assert.ok(!JSON.stringify(ready).includes(f.secret))
+  assert.ok(!JSON.stringify(ready).includes(f.id))
+  assert.equal(f.requests.length, 1)
+  assert.match(f.requests[0].body.description, /remote forecast source shore/)
+  await models()
+  assert.equal(f.catalogueRequests.at(-1).auth, 'Bearer ' + f.secret)
+  assert.equal(fs.readFileSync(manual, 'utf8'), 'manual-token\n')
+  assert.equal(fs.readFileSync(f.options.tokenFile, 'utf8'), 'destination-token\n')
 })
 
 test('a rejected automatically issued token requests approval again without deleting a newer token', async t => {

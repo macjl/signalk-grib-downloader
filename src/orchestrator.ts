@@ -1,6 +1,7 @@
 import { CataloguePublisher } from './catalogue'
 import { Bbox, InternetState, SourceSetting, SourceStatus } from './types'
-import { candidateRuns, expectedRunStamp, fetchFingerprint, fingerprintsEqual, nextPublishAt, probeRunStamp, sourceDirName, MODEL_MAX_HOURS, MODEL_SCHEDULES } from './scheduler'
+import { candidateRuns, expectedRunStamp, fetchFingerprint, fingerprintsEqual, nextPublishAt, probeRunStamp, remoteModelName, sourceDirName, MODEL_MAX_HOURS, MODEL_SCHEDULES } from './scheduler'
+import { RemoteCatalogue, remoteZone } from './remote-catalogue'
 import { planRun, runAvailable, toDownloadSource, type Outcome } from './downloader'
 
 // Per-source download timeout — equivalent to the previous container job
@@ -46,7 +47,8 @@ export class Orchestrator {
     private catalogue: CataloguePublisher,
     private log: (msg: string) => void,
     private onChange: () => void = () => {}, // notify status updates
-    private bbox?: Bbox
+    private bbox?: Bbox,
+    private remotes: ReadonlyMap<string, RemoteCatalogue> = new Map()
   ) {
     if (!catalogue) throw new Error('Forecast Dataset Provider publisher is required')
     for (const s of sources) {
@@ -58,13 +60,20 @@ export class Orchestrator {
   }
 
   autoSources(): SourceSetting[] {
-    return this.sources.filter(s => s.autoDownload !== false)
+    return this.sources.filter(s => s.autoDownload !== false && (!s.remoteServer || this.remotes.has(s.remoteServer)))
   }
 
   // The provider owns GRIB bytes. Scheduling reads only durable publication receipts.
   private paramsOk(source: SourceSetting, stamp: string | null): boolean {
     if (!stamp) return true
-    return fingerprintsEqual(this.catalogue.latest(source)?.params, fetchFingerprint(source, this.bbox))
+    const latest = this.catalogue.latest(source)?.params
+    if (source.remoteServer) {
+      const prior = latest as { remoteEndpoint?: string; area?: string; requestedHours?: number } | undefined
+      return prior?.remoteEndpoint === this.remotes.get(source.remoteServer)?.endpoint &&
+        prior?.requestedHours === source.remoteHours &&
+        (prior?.area === undefined || prior.area === JSON.stringify(remoteZone(this.bbox)))
+    }
+    return fingerprintsEqual(latest, fetchFingerprint(source, this.bbox))
   }
 
   lastRunStamp(source: SourceSetting): string | null {
@@ -76,20 +85,21 @@ export class Orchestrator {
       const name = sourceDirName(s)
       const st = this.states.get(name)!
       const lastRun = this.lastRunStamp(s)
-      const expected = expectedRunStamp(s.model)
-      const target = probeRunStamp(s.model)
+      const expected = s.remoteServer ? st.lastProbeRun ?? lastRun ?? '' : expectedRunStamp(s.model)
+      const target = s.remoteServer ? null : probeRunStamp(s.model)
       const paramsOk = this.paramsOk(s, lastRun)
       return {
         name,
-        model: s.model,
+        model: s.remoteServer ? remoteModelName(s) : s.model,
+        ...(s.remoteServer ? { remoteServer: s.remoteServer } : {}),
         autoDownload: s.autoDownload !== false,
         lastRun,
         expectedRun: expected,
-        pendingRun: lastRun !== null && lastRun >= target ? null : target,
-        publicationLate: lastRun === null || lastRun < expected,
+        pendingRun: target && !(lastRun !== null && lastRun >= target) ? target : null,
+        publicationLate: !s.remoteServer && (lastRun === null || lastRun < expected),
         upToDate: lastRun !== null && lastRun >= expected && paramsOk && this.published(s, lastRun),
         catalogue: this.catalogue.reference(s, lastRun, this.catalogue.latest(s)?.params),
-        publicationPending: this.catalogue.pendingStamp(s, fetchFingerprint(s, this.bbox)) !== null,
+        publicationPending: !s.remoteServer && this.catalogue.pendingStamp(s, fetchFingerprint(s, this.bbox)) !== null,
         configStale: lastRun !== null && !paramsOk,
         running: st.running,
         lastError: st.lastError,
@@ -105,6 +115,7 @@ export class Orchestrator {
   // whose last publication used different parameters.
   private isBehind(source: SourceSetting): boolean {
     const last = this.lastRunStamp(source)
+    if (source.remoteServer) return last === null || !this.paramsOk(source, last) || !this.published(source, last)
     return last === null || last < expectedRunStamp(source.model) || !this.paramsOk(source, last) || !this.published(source, last)
   }
 
@@ -114,6 +125,7 @@ export class Orchestrator {
 
   private needsProbe(source: SourceSetting): boolean {
     const last = this.lastRunStamp(source)
+    if (source.remoteServer) return this.remotes.has(source.remoteServer)
     return last === null || last < probeRunStamp(source.model) || !this.paramsOk(source, last) || !this.published(source, last) || !!this.catalogue.exportPending?.(source)
   }
 
@@ -123,9 +135,10 @@ export class Orchestrator {
   nextTickAt(source: SourceSetting, timing: ProbeTiming = {}): Date {
     const now = new Date(Date.now())
     const st = this.states.get(sourceDirName(source))!
-    const interval = (timing.intervalMinutes ?? MODEL_SCHEDULES[source.model].probeEveryMinutes)
+    const interval = (timing.intervalMinutes ?? (source.remoteServer ? 5 : MODEL_SCHEDULES[source.model].probeEveryMinutes))
       * 60_000 * (timing.scale ?? 1)
     if (st.running) return new Date(now.getTime() + interval)
+    if (source.remoteServer) return new Date(Math.max(now.getTime(), (st.lastProbeAt ?? 0) + interval))
     const nextWindow = nextPublishAt(source.model, now, this.lastRunStamp(source))
     if (!this.needsProbe(source)) return nextWindow
     const target = probeRunStamp(source.model, now)
@@ -137,7 +150,7 @@ export class Orchestrator {
 
   // Download one source (no-op if it is already running).
   // Returns true if a fetch was executed.
-  async downloadSource(source: SourceSetting): Promise<boolean> {
+  async downloadSource(source: SourceSetting, expectedSubset?: 'area' | 'time' | 'both'): Promise<boolean> {
     const name = sourceDirName(source)
     const st = this.states.get(name)!
     if (st.running || this.stopped) return false
@@ -146,11 +159,10 @@ export class Orchestrator {
     st.lastError = null
     st.lastLog = []
     st.lastProbeAt = Date.now()
-    st.lastProbeRun = probeRunStamp(source.model)
+    if (!source.remoteServer) st.lastProbeRun = probeRunStamp(source.model)
     this.onChange()
     this.log(`${name}: starting download`)
 
-    const ds = toDownloadSource(source, this.bbox)
     const onProgress = (line: string) => {
       st.lastLog.push(line)
       if (st.lastLog.length > LOG_TAIL) st.lastLog.shift()
@@ -174,6 +186,40 @@ export class Orchestrator {
       const previous = this.catalogue.latest(source)
       if (previous) await this.catalogue.verify(source, previous.stamp, previous.params, controller.signal)
       await this.catalogue.exportLatest?.(source, onProgress, controller.signal)
+      if (source.remoteServer) {
+        const remote = this.remotes.get(source.remoteServer)
+        if (!remote) throw new Error('This remote Signal K server is no longer configured')
+        const signal = controller.signal
+        const candidate = await remote.find(source, this.bbox, signal)
+        st.lastProbeRun = candidate?.stamp ?? null
+        if (!candidate) {
+          st.lastOutcome = 'unavailable'
+          onProgress('No complete matching GRIB dataset on the remote server')
+          return true
+        }
+        if (((expectedSubset === 'area' || expectedSubset === 'both') && !candidate.selection?.bbox) ||
+            ((expectedSubset === 'time' || expectedSubset === 'both') && !candidate.selection?.from))
+          throw new Error('Remote subsetting availability changed. Refresh the source before downloading.')
+        const latest = this.catalogue.latest(source)
+        const params = remote.fingerprint(candidate)
+        if ((latest?.stamp === candidate.stamp && fingerprintsEqual(latest.params, params)) ||
+            (latest && latest.stamp > candidate.stamp && this.paramsOk(source, latest.stamp))) {
+          st.lastOutcome = 'up-to-date'
+          return true
+        }
+        const ready = await remote.prepare(source, candidate, onProgress, signal)
+        if (latest?.stamp === candidate.stamp && fingerprintsEqual(latest.params, ready.params)) {
+          st.lastOutcome = 'up-to-date'
+          return true
+        }
+        if (!candidate.selection) onProgress('Importing complete remote GRIB dataset')
+        await this.catalogue.publish(source, ready.plan, ready.params, onProgress, signal)
+        await this.catalogue.exportLatest?.(source, onProgress, signal)
+        st.lastOutcome = 'downloaded'
+        return true
+      }
+
+      const ds = toDownloadSource(source, this.bbox)
       let outcome: Outcome = 'unavailable'
       const pending = this.catalogue.pendingStamp(source, ds.fingerprint)
       if (pending) {
@@ -220,9 +266,11 @@ export class Orchestrator {
   }
 
   // A newly approved credential permits an immediate retry of failed work.
-  retryAfterAccessApproval(): void {
-    for (const state of this.states.values()) {
-      if (state.lastOutcome === 'failed') state.lastProbeAt = null
+  retryAfterAccessApproval(remoteServer?: string): void {
+    for (const source of this.sources) {
+      const state = this.states.get(sourceDirName(source))!
+      if (remoteServer ? source.remoteServer === remoteServer : state.lastOutcome === 'failed')
+        state.lastProbeAt = null
     }
   }
 

@@ -1,17 +1,18 @@
 {
   "name": "signalk-grib-downloader",
-  "version": "0.6.1",
+  "version": "0.7.0-beta.1",
   "description": "Downloads GRIB forecasts and publishes immutable datasets to signalk-forecast-dataset-provider",
   "main": "dist/index.js",
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && webpack --config webpack.config.cjs",
     "watch": "tsc -w",
     "pretest": "npm run build",
     "test": "node --test",
-    "prepublishOnly": "npm run build"
+    "prepack": "npm run build"
   },
   "keywords": [
     "signalk-node-server-plugin",
+    "signalk-plugin-configurator",
     "signalk-webapp",
     "signalk-category-weather",
     "signalk",
@@ -61,9 +62,15 @@
     "@signalk/server-api": ">=2.0.0"
   },
   "devDependencies": {
+    "@babel/core": "^7.29.13",
+    "@babel/preset-react": "^7.29.7",
     "@signalk/server-api": "^2.25.0",
     "@types/node": "^26.1.0",
-    "typescript": "^7.0.2"
+    "babel-loader": "^10.1.1",
+    "react": "^19.3.1",
+    "typescript": "^7.0.2",
+    "webpack": "^5.112.2",
+    "webpack-cli": "^7.3.1"
   },
   "dependencies": {
     "@digitaldefiance/bzip2-wasm": "^1.1.1"
