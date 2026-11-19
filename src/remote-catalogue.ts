@@ -22,7 +22,7 @@ interface ExportOperation {
 }
 interface Horizon {
   minHours: number
-  maxHours: number
+  maxHours?: number
   stepHours: number
 }
 interface Availability {
@@ -62,6 +62,7 @@ export interface RemoteCandidate {
   stamp: string
   selection?: Selection
   operation?: string
+  exactForecastEndpoints?: boolean
   requestedHours?: number
 }
 interface Job { id: string; href: string; state: string; result?: Dataset }
@@ -116,17 +117,31 @@ function versionPath(dataset: Pick<Dataset, 'id' | 'version'>): string {
 
 const hour = 3_600_000
 function forecastHorizon(dataset: Dataset, operation: ExportOperation): Horizon | undefined {
+  if (!operation.selectors?.includes('from') || !operation.selectors.includes('to') || !dataset.run) return
+  const run = Date.parse(dataset.run)
+  if (!Number.isFinite(run)) return
   const interval = operation.forecastInterval
-  if (!operation.selectors?.includes('from') || !operation.selectors.includes('to') ||
-      !operation.selectors.includes('fields') || !Array.isArray(operation.fields) ||
+  if (!interval) {
+    const from = Date.parse(dataset.forecast?.from ?? '')
+    const to = Date.parse(dataset.forecast?.to ?? '')
+    if (Number.isFinite(from) && Number.isFinite(to) && to >= Math.max(run, from)) {
+      return {
+        minHours: Math.max(0, Math.ceil((from - run) / hour)),
+        maxHours: Math.ceil((to - run) / hour),
+        stepHours: 1
+      }
+    }
+    // The server can filter by date even for datasets with no declared horizon.
+    return { minHours: 0, stepHours: 1 }
+  }
+  if (!operation.selectors.includes('fields') || !Array.isArray(operation.fields) ||
       !operation.fields.length || operation.fields.some(field => typeof field?.parameter !== 'string' || !field.parameter) ||
-      !interval || !Number.isSafeInteger(interval.stepSeconds / 3600) || interval.stepSeconds <= 0 ||
-      !Number.isSafeInteger(interval.maxHours) || interval.maxHours < 1 || !dataset.run) return
+      !Number.isSafeInteger(interval.stepSeconds / 3600) || interval.stepSeconds <= 0 ||
+      !Number.isSafeInteger(interval.maxHours) || interval.maxHours < 1) return
   const stepHours = interval.stepSeconds / 3600
   const step = stepHours * hour
-  const run = Date.parse(dataset.run)
   // This slider represents whole hours relative to the model cycle.
-  if (!Number.isFinite(run) || run % hour !== 0) return
+  if (run % hour !== 0) return
   const from = dataset.forecast ? Date.parse(dataset.forecast.from) : run
   const first = Math.ceil(Math.max(run, from) / step) * step
   const to = dataset.forecast ? Date.parse(dataset.forecast.to) : run + interval.maxHours * hour
@@ -275,21 +290,25 @@ export class RemoteCatalogue {
     if (!dataset) return
     const { area, horizon, operation } = await this.availability(dataset, signal)
     const selection: Selection = {}
+    const exactForecastEndpoints = Boolean(operation?.forecastInterval)
     if (area && bbox) selection.bbox = remoteZone(bbox)
     if (horizon && source.remoteHours !== undefined) {
       const { minHours, maxHours, stepHours } = horizon
-      const requested = Math.max(minHours, Math.min(maxHours, source.remoteHours))
+      const requested = Math.max(minHours, Math.min(maxHours ?? Infinity, source.remoteHours))
       const end = minHours + Math.floor((requested - minHours) / stepHours) * stepHours
       const run = Date.parse(dataset.run!)
-      selection.fields = operation!.fields
-      selection.from = new Date(run + minHours * hour).toISOString()
+      const first = Date.parse(dataset.forecast?.from ?? '')
+      const from = !exactForecastEndpoints && Number.isFinite(first) && first <= run + end * hour
+        ? Math.max(run, first) : run + minHours * hour
+      if (exactForecastEndpoints) selection.fields = operation!.fields
+      selection.from = new Date(from).toISOString()
       selection.to = new Date(run + end * hour).toISOString()
     }
     return {
       dataset,
       stamp: runStamp(runDate(dataset)!),
       requestedHours: source.remoteHours,
-      ...(selection.bbox || selection.from ? { selection, operation: operation!.href } : {})
+      ...(selection.bbox || selection.from ? { selection, operation: operation!.href, exactForecastEndpoints } : {})
     }
   }
 
@@ -300,7 +319,8 @@ export class RemoteCatalogue {
     return { remoteEndpoint: this.endpoint, remoteId: dataset.id, remoteVersion: dataset.version,
       mode: selection ? 'subset' : 'complete',
       ...(selection?.bbox ? { area: JSON.stringify(selection.bbox) } : {}),
-      ...(selection?.from ? { from: selection.from, to: selection.to, fields: selection.fields } : {}),
+      ...(selection?.from ? { from: selection.from, to: selection.to } : {}),
+      ...(selection?.fields ? { fields: selection.fields } : {}),
       ...(requestedHours === undefined ? {} : { requestedHours }) }
   }
 
@@ -324,10 +344,13 @@ export class RemoteCatalogue {
         result.provenance?.source?.id !== candidate.dataset.id || result.provenance.source.version !== candidate.dataset.version)
       throw new Error('Invalid remote GRIB crop result')
     versionPath(result)
-    if (selection.from &&
-        (Date.parse(result.forecast?.from ?? '') !== Date.parse(selection.from) ||
-          Date.parse(result.forecast?.to ?? '') !== Date.parse(selection.to!)))
-      throw new Error('Remote GRIB crop does not match the requested forecast interval')
+    if (selection.from) {
+      const from = Date.parse(selection.from), to = Date.parse(selection.to!)
+      const first = Date.parse(result.forecast?.from ?? ''), last = Date.parse(result.forecast?.to ?? '')
+      if (!(from <= first && first <= last && last <= to) ||
+          (candidate.exactForecastEndpoints && (first !== from || last !== to)))
+        throw new Error('Remote GRIB crop does not match the requested forecast interval')
+    }
     const requested = selection.bbox
     if (!requested) return result
     const actual = result.bounds

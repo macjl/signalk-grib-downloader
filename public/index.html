@@ -178,6 +178,7 @@ const I18N = {
     remoteFull: 'GRIB complet · découpe indisponible',
     remoteFullAccess: 'GRIB complet · un jeton distant avec accès en écriture est requis pour la découpe',
     remoteFullTime: 'GRIB complet · réduisez la durée pour découper par échéance',
+    remoteAllHours: 'Toutes',
     remoteArea: 'GRIB découpé à la zone de la carte',
     remoteAreaNoTime: 'GRIB découpé à la zone de la carte · découpe par échéance indisponible',
     remoteTime: 'GRIB découpé par échéance · champs annoncés par le serveur',
@@ -229,6 +230,7 @@ const I18N = {
     remoteFull: 'Complete GRIB · subsetting unavailable',
     remoteFullAccess: 'Complete GRIB · subsetting requires a remote token with write access',
     remoteFullTime: 'Complete GRIB · shorten the forecast to subset by lead time',
+    remoteAllHours: 'All',
     remoteArea: 'GRIB cropped to the map area',
     remoteAreaNoTime: 'GRIB cropped to the map area · lead-time subsetting unavailable',
     remoteTime: 'GRIB subset by lead time · fields advertised by the server',
@@ -534,10 +536,11 @@ function renderSources() {
     const areaSubset = preview?.dataset?.area
     const timeSubset = preview?.dataset?.horizon && configuredHours !== undefined
     const expectedSubset = areaSubset ? (timeSubset ? 'both' : 'area') : (timeSubset ? 'time' : '')
-    const hours = horizon ? horizon.minHours + Math.floor(
+    const hours = horizon?.maxHours !== undefined ? horizon.minHours + Math.floor(
       (Math.max(horizon.minHours, Math.min(horizon.maxHours, configuredHours ?? horizon.maxHours)) - horizon.minHours) /
       horizon.stepHours) * horizon.stepHours : undefined
-    const showHours = horizon && horizon.minHours < horizon.maxHours
+    const showHours = horizon?.maxHours !== undefined && horizon.minHours < horizon.maxHours
+    const showOpenHours = horizon && !showHours && horizon.maxHours === undefined
     const mb = estimateMB(s)
     totalMB += mb
 
@@ -582,6 +585,11 @@ function renderSources() {
         <span class="hours-label ${hours >= horizon.maxHours ? 'at-max' : ''}">
           <b data-r="hval">${hours}</b> h <span class="max">/ ${t.maxLbl} ${horizon.maxHours} h</span>
         </span>` : ''}
+        ${showOpenHours ? `<label class="hours-label">${t.forecastHours}
+          <input type="number" data-f="remoteHours" aria-label="${t.forecastHours}" min="0" step="1"
+                 placeholder="${t.remoteAllHours}" value="${Number.isSafeInteger(configuredHours) ? configuredHours : ''}"
+                 style="width:80px;display:inline-block"> h
+        </label>` : ''}
         ${s.remoteServer ? '' : `<span class="vol" data-r="vol">${fmtEstimate(mb)}</span>`}
         <span style="font-size:12px;color:#9fb0c5;white-space:nowrap" title="${t.archivesTitle}">
           ${t.archivesLbl}
@@ -602,6 +610,17 @@ function renderSources() {
 
     card.querySelectorAll('[data-f]').forEach(el => {
       const f = el.dataset.f
+      if (f === 'remoteHours') {
+        el.addEventListener('change', () => {
+          if (!el.reportValidity()) return
+          if (el.value === '') delete s.remoteHours
+          else if (Number.isSafeInteger(el.valueAsNumber)) s.remoteHours = el.valueAsNumber
+          else return
+          renderSources()
+          markDirty()
+        })
+        return
+      }
       if (f === 'hours') {
         // live label/volume update while sliding; commit on release
         el.addEventListener('input', () => {

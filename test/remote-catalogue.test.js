@@ -46,14 +46,14 @@ async function setup(t, { processor = false, time = false, area = true, statusAv
     { parameter: 'air_pressure_at_mean_sea_level' }
   ]
   const main = { ...row, requested: { source: 'arome-0025' },
-    ...(time ? { forecast: { from: '2026-11-09T15:00:00Z', to: '2026-11-10T03:00:00Z' } } : {}),
+    ...(time === true ? { forecast: { from: '2026-11-09T15:00:00Z', to: '2026-11-10T03:00:00Z' } } : {}),
     assets: [
       manifest(datasetId, version, 'arome-0025__run__first_grb2', original),
       manifest(datasetId, version, 'arome-0025__run__second_grb2', original)
     ],
     capabilities: { operations: processor ? [{ operation: 'export', href: originalPath + '/requests',
       selectors: [...(area ? ['bbox'] : []), ...(time ? ['from', 'to', 'fields'] : [])],
-      ...(time ? { fields, forecastInterval: { stepSeconds: 3600, maxHours: 51 } } : {}) }] : [] }
+      ...(time === true ? { fields, forecastInterval: { stepSeconds: 3600, maxHours: 51 } } : {}) }] : [] }
   }
   if (unsafe) main.assets[0].href = 'https://unrelated.invalid/asset'
   const derived = { ...row, id: croppedId, version: cropVersion, producer: 'signalk-grib-processor',
@@ -92,8 +92,10 @@ async function setup(t, { processor = false, time = false, area = true, statusAv
     }
     if (url === jobPath) {
       const { bbox, from, to } = received.at(-1).selection
+      const forecast = time === 'range'
+        ? { from: '2026-11-09T15:30:00Z', to: '2026-11-09T20:15:00Z' } : { from, to }
       return json(200, broken ? { id: jobId, href: jobPath, state: 'failed' }
-        : { id: jobId, href: jobPath, state: 'complete', result: { ...derived, bounds: bbox, ...(from ? { forecast: { from, to } } : {}) } })
+        : { id: jobId, href: jobPath, state: 'complete', result: { ...derived, bounds: bbox, ...(from ? { forecast } : {}) } })
     }
     if (main.assets.some(asset => asset.href === url)) return res.end(original)
     if (derived.assets[0].href === url) return res.end(crop)
@@ -185,6 +187,22 @@ for (const area of [false, true]) {
     assert.ok(requests.filter(([, url]) => url.includes('/assets/')).every(([, url]) => url.startsWith(croppedPath)))
   })
 }
+
+test('uses a remote time range without published fields or a fixed forecast cadence', async t => {
+  const { f, orchestrator, received, adapter } = await setup(t, { processor: true, time: 'range', area: false })
+  assert.deepEqual(await adapter.preview('AROME', '0025', AbortSignal.timeout(5000)), {
+    area: false, horizon: { minHours: 0, stepHours: 1 }, reason: undefined
+  })
+  const selected = { ...source, remoteHours: 6 }
+  const orch = orchestrator(bbox, selected)
+  assert.equal(await orch.downloadSource(selected, 'time'), true, orch.status()[0].lastError)
+  assert.deepEqual(received[0].selection, {
+    from: '2026-11-09T15:00:00.000Z', to: '2026-11-09T21:00:00.000Z'
+  })
+  assert.deepEqual(f.declarations[0].metadata.forecast, {
+    from: '2026-11-09T15:30:00Z', to: '2026-11-09T20:15:00Z'
+  })
+})
 
 test('failed crops and invalid remote links or checksums do not silently download or commit originals', async t => {
   for (const options of [{ processor: true, broken: true }, { processor: true, missing: true }, { unsafe: true }, { badHash: true }]) {

@@ -233,10 +233,14 @@ selectors, the remote processing status and the configured token's write access.
 The webapp shows whether the download will use the map area, a forecast
 interval, or the full GRIB. The refresh button updates this check.
 
-When the dataset offers time selection, the forecast slider uses the
-processor's step and limit and any forecast coverage the dataset reports.
-Shortening the forecast requests the fields advertised by the processor. The
-maximum slider position preserves all forecast times. When the preflight
+When a dataset provides a model run and the catalogue advertises time
+selection, the downloader can request all available fields up to a given lead
+hour. It shows a slider when the dataset reports forecast coverage, or a lead
+hour input when the maximum is unknown. The maximum slider position and a
+blank input preserve all forecast times. For generic time selection, use
+Forecast Dataset Provider 0.3.0-beta.2 and GRIB Processor 0.1.0-beta.3 on the
+remote server. Older processors can advertise a fixed step and required
+fields. When the preflight
 confirms that no applicable subset can be requested, the downloader streams
 all original assets. An inconclusive check or an error after a subset has
 been selected stops the download. The downloader checks availability again
