@@ -2,6 +2,10 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.7.0-beta.2] - 2026-11-19
+
+- Keep the Catalogue link clickable when the webapp refreshes a source status.
+
 ## [0.7.0-beta.1] - 2026-11-19
 
 - Add remote Signal K catalogues as a download source alongside NOAA,

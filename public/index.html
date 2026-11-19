@@ -60,6 +60,7 @@
     .badge.captive { background: #4d2d1d; color: #e3a07f; }
 
     .src-status, .remote-plan { font-size: 11px; color: #9fb0c5; margin-top: 2px; }
+    .src-status a { color: #7fc4e3; }
     .remote-plan { padding-left: 24px; }
     .log { font-family: ui-monospace, monospace; font-size: 11px; background: #131c29; border-radius: 6px;
            padding: 8px; margin-top: 6px; white-space: pre-wrap; max-height: 130px; overflow-y: auto; color: #b8c6d9; }
@@ -446,15 +447,22 @@ function sourceStateBadge(s) {
   return `<span class="badge stale">${t.stStale}</span>`
 }
 
-function sourceStatusLine(s) {
+function renderSourceStatus(card, s) {
   const st = statusBySource[dirName(s)]
-  if (schedulerError && s.autoDownload !== false) return schedulerError
-  if (!st) return ''
-  let line = st.lastRun ? `${t.lastRun}: ${st.lastRun}` : t.stNoData
-  if (st.publicationLate) line += ` — ${t.expected}: ${st.expectedRun}`
-  else if (st.pendingRun) line += ` — ${t.expected}: ${st.pendingRun}`
-  if (st.catalogue) line += ` · <a href="${st.catalogue.href}" target="_blank" rel="noopener">${t.stPublished}</a>`
-  return line
+  const error = s.autoDownload !== false ? schedulerError : null
+  let text = error || ''
+  if (!error && st) {
+    text = st.lastRun ? `${t.lastRun}: ${st.lastRun}` : t.stNoData
+    if (st.publicationLate) text += ` — ${t.expected}: ${st.expectedRun}`
+    else if (st.pendingRun) text += ` — ${t.expected}: ${st.pendingRun}`
+  }
+  card.querySelector('.src-status-text').textContent = text
+  const catalogue = card.querySelector('.src-catalogue')
+  const link = catalogue.querySelector('a')
+  const href = error ? null : st?.catalogue?.href
+  catalogue.hidden = !href
+  if (href) link.setAttribute('href', href)
+  else link.removeAttribute('href')
 }
 
 async function readRemoteModels(id, refresh = false) {
@@ -605,9 +613,10 @@ function renderSources() {
       ${s.remoteServer ? `<div class="remote-plan" role="status" title="${escapeHtml(preview?.error || '')}">
         ${remoteDownloadLabel(catalogue, remoteModel, preview, configuredHours)}
       </div>` : ''}
-      <div class="src-status" style="padding-left:24px">${sourceStatusLine(s)}</div>
+      <div class="src-status" style="padding-left:24px"><span class="src-status-text"></span><span class="src-catalogue" hidden> · <a target="_blank" rel="noopener">${t.stPublished}</a></span></div>
       <div class="src-details"></div>`
 
+    renderSourceStatus(card, s)
     card.querySelectorAll('[data-f]').forEach(el => {
       const f = el.dataset.f
       if (f === 'remoteHours') {
@@ -809,8 +818,7 @@ function updateStatusUI() {
     if (!card) continue
     const badgeSlot = card.querySelector('.badge-slot')
     if (badgeSlot) badgeSlot.innerHTML = sourceStateBadge(s)
-    const statusLine = card.querySelector('.src-status')
-    if (statusLine) statusLine.textContent = sourceStatusLine(s)
+    renderSourceStatus(card, s)
     fillDetails(card, name)
   }
 }
