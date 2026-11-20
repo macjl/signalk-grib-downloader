@@ -23,7 +23,7 @@ const jobPath = `${API}/requests/${jobId}`
 
 async function setup(t, { processor = false, time = false, area = true, statusAvailable = true,
   userLevel = 'readwrite', missing = false, broken = false, unsafe = false, badHash = false, customModel = false,
-  parameters, verifiedForecast, coverage, alternateCoverage, pendingArea = false, busy = 0 } = {}) {
+  parameters, verifiedForecast, coverage, alternateCoverage, alternateRun, pendingArea = false, busy = 0 } = {}) {
   const original = grib(2048), crop = grib(256)
   const tokenDir = fs.mkdtempSync(path.join(os.tmpdir(), 'remote-signalk-token-'))
   const tokenFile = path.join(tokenDir, 'token')
@@ -63,9 +63,10 @@ async function setup(t, { processor = false, time = false, area = true, statusAv
   }
   if (unsafe) main.assets[0].href = 'https://unrelated.invalid/asset'
   const alternate = alternateCoverage && {
-    ...row, id: alternateId, bounds: alternateCoverage, requested: main.requested,
+    ...row, id: alternateId, run: alternateRun ?? row.run, bounds: alternateCoverage, requested: main.requested,
     assets: [manifest(alternateId, version, 'arome-0025__alt_grb2', original)]
   }
+  let latestPublished = !alternateRun
   const derived = { ...row, id: croppedId, version: cropVersion, producer: 'signalk-grib-processor',
     provenance: { source: { id: datasetId, version } },
     bounds: [-6, 44, -1, 48],
@@ -83,8 +84,8 @@ async function setup(t, { processor = false, time = false, area = true, statusAv
     if (url === API + '/datasets') {
       const model = new URL(req.url, 'http://localhost').searchParams.get('model')
       return json(200, !model || model === row.model ? {
-        [datasetId]: row,
-        ...(alternate ? { [alternateId]: { ...row, id: alternateId } } : {}),
+        ...(latestPublished ? { [datasetId]: row } : {}),
+        ...(alternate ? { [alternateId]: { ...row, id: alternateId, run: alternate.run } } : {}),
         mirror: { ...row, id: 'mirror', model: 'Looped model', provenance: { channel: 'signalk' } },
         temporary: { ...row, id: 'temporary', producer: 'signalk-grib-processor', model: 'Temporary crop',
           expiresAt: '2099-01-01T00:00:00Z' },
@@ -123,7 +124,8 @@ async function setup(t, { processor = false, time = false, area = true, statusAv
   const adapter = new RemoteCatalogue({ id: 'shore', url: peer.base, tokenFile })
   const map = new Map([['shore', adapter]])
   const orchestrator = (area, setting = source) => new Orchestrator([setting], f.publisher(), () => {}, () => {}, area, map)
-  return { f, orchestrator, requests, received, original, crop, peer, adapter, tokenFile, fields }
+  return { f, orchestrator, requests, received, original, crop, peer, adapter, tokenFile, fields,
+    publishLatest: () => { latestPublished = true } }
 }
 
 for (const [options, reason] of [
@@ -226,6 +228,28 @@ test('remote preview and acquisition choose the next covering dataset of the sam
   const outside = await adapter.preview('AROME', '0025', signal, [20, 45, 24, 49])
   assert.equal(outside.reason, 'outside-coverage')
   assert.deepEqual(outside.bounds, [10, 42, 17, 52])
+})
+
+test('a newer remote run outside the map area does not fall back to a covering archive', async t => {
+  const bounds = [10, 42, 17, 52]
+  const { adapter, orchestrator, f, requests, publishLatest } = await setup(t, {
+    coverage: bounds, alternateCoverage: [-10, 40, 0, 50], alternateRun: '2026-10-09T15:00:00Z'
+  })
+  const orch = orchestrator(bbox)
+  assert.equal(await orch.downloadSource(source), true)
+  assert.equal(orch.status()[0].upToDate, true)
+  assert.deepEqual(f.declarations[0].provenance.remoteSource, { id: alternateId, version })
+
+  publishLatest()
+  requests.length = 0
+  assert.deepEqual(await adapter.preview('AROME', '0025', AbortSignal.timeout(3000), [-6, 44, -1, 48]), {
+    area: false, bounds, reason: 'outside-coverage'
+  })
+  assert.equal(await orch.downloadSource(source), true)
+  assert.equal(orch.status()[0].lastOutcome, 'unavailable')
+  assert.equal(orch.status()[0].upToDate, false)
+  assert.equal(f.declarations.length, 1)
+  assert.ok(requests.every(([method, url]) => method === 'GET' && !url.startsWith(alternatePath) && !url.includes('/assets/')))
 })
 
 test('a pending grid analysis does not cause a premature full download', async t => {

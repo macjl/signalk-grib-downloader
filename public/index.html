@@ -344,7 +344,7 @@ let config = { bbox: { latMin: 35, lonMin: -6, latMax: 45, lonMax: 17 }, sources
 const modelCatalogues = new Map()
 const remotePreviews = new Map()
 const remoteWriteAccess = new Map()
-const sourceNames = new WeakMap()
+const remoteSourceNames = new Map()
 let statusBySource = {}
 let schedulerError = null
 let internetState = 'unknown'
@@ -355,7 +355,12 @@ const requestedDataDeletions = new Set()
 let dirty = false
 let editRevision = 0
 
-function markDirty() { editRevision++; dirty = true; renderSaveBar() }
+function markDirty() {
+  for (const source of config.sources) requestedDataDeletions.delete(dirName(source))
+  editRevision++
+  dirty = true
+  renderSaveBar()
+}
 function renderSaveBar() {
   const note = document.getElementById('save-note')
   note.textContent = dirty ? t.dirty : ''
@@ -534,9 +539,13 @@ function refreshRect(fit) {
 })
 
 // ── Sources table ────────────────────────────────────────────────────────────
+function remoteSourceKey(s) {
+  return JSON.stringify([s.remoteServer, s.remoteModel, s.resolution ?? ''])
+}
+
 // Directory name derived from model+resolution — the contract with the provider.
 function dirName(s) {
-  if (s.remoteServer) return sourceNames.get(s) ?? ''
+  if (s.remoteServer) return remoteSourceNames.get(remoteSourceKey(s)) ?? ''
   const res = s.resolution || MODELS[s.model]?.resolutions[0]
   return res ? `${s.model}-${res}` : s.model
 }
@@ -668,7 +677,7 @@ function renderSources() {
     const remoteServers = new Set([...(config.remoteServerIds ?? []), ...(s.remoteServer ? [s.remoteServer] : [])])
     const catalogue = modelCatalogues.get(s.remoteServer)
     const advertised = catalogue?.models ?? []
-    const remoteModel = s.remoteModel ?? (sourceNames.has(s) ? s.model.toUpperCase() : '')
+    const remoteModel = s.remoteModel ?? ''
     const available = advertised.find(entry => entry.model === remoteModel)
     const resOpts = s.remoteServer
       ? [...new Set([...(available?.resolutions ?? []), ...(s.resolution ? [s.resolution] : [])])]
@@ -811,7 +820,6 @@ function renderSources() {
       el.addEventListener('change', () => {
         if (f === 'autoDownload') s.autoDownload = el.checked
         else if (f === 'origin') {
-          sourceNames.delete(s)
           delete s.remoteModel
           delete s.remoteHours
           const [kind, id] = el.value.split(':', 2)
@@ -830,12 +838,9 @@ function renderSources() {
           s.remoteModel = el.value
           delete s.remoteHours
           delete s.resolution
-          sourceNames.delete(s)
         }
         else if (f === 'resolution' && s.remoteServer) {
-          if (!s.remoteModel && sourceNames.has(s)) s.remoteModel = s.model.toUpperCase()
           s.resolution = el.value || undefined
-          sourceNames.delete(s)
         }
         else if (f === 'retentionDays') s.retentionDays = Math.min(365, Math.max(0, parseInt(el.value, 10) || 0))
         else if (f === 'archiveRuns') s.archiveRuns = Math.max(0, parseInt(el.value, 10) || 0)
@@ -853,7 +858,10 @@ function renderSources() {
     })
     card.querySelector('[data-act="del"]').addEventListener('click', () => {
       if (!confirm(t.confirmDelete)) return
-      if (name && confirm(t.confirmDeleteData(name))) requestedDataDeletions.add(name)
+      if (name) {
+        if (confirm(t.confirmDeleteData(name))) requestedDataDeletions.add(name)
+        else requestedDataDeletions.delete(name)
+      }
       config.sources.splice(idx, 1)
       renderSources()
       markDirty()
@@ -917,7 +925,7 @@ saveButton.addEventListener('click', async () => {
   const deletions = [...requestedDataDeletions]
   saveButton.disabled = true
   try {
-    if (config.sources.some(s => s.remoteServer && !s.remoteModel && !sourceNames.has(s)))
+    if (config.sources.some(s => s.remoteServer && !s.remoteModel))
       throw new Error(t.chooseRemoteModel)
     const r = await fetch(`${API}/settings`, {
       method: 'PUT',
@@ -932,8 +940,9 @@ saveButton.addEventListener('click', async () => {
     renderPendingDeletions(saved.pendingDataDeletions)
     if (revision === editRevision) {
       requestedDataDeletions.clear()
+      remoteSourceNames.clear()
       config.sources.forEach((s, index) => {
-        if (saved.sourceNames?.[index]) sourceNames.set(s, saved.sourceNames[index])
+        if (s.remoteServer && saved.sourceNames?.[index]) remoteSourceNames.set(remoteSourceKey(s), saved.sourceNames[index])
       })
       dirty = false
       renderSaveBar()
@@ -1018,7 +1027,7 @@ async function pollStatus() {
         void readRemoteModels(id, true)
     }
     for (const source of config.sources) {
-      const model = source.remoteModel ?? (sourceNames.has(source) ? source.model.toUpperCase() : '')
+      const model = source.remoteModel
       if (source.remoteServer && modelCatalogues.get(source.remoteServer)?.models?.some(item => item.model === model))
         remotePreview(source.remoteServer, model, source.resolution, true)
     }
@@ -1038,10 +1047,13 @@ async function loadConfig() {
     config.sources = (config.sources ?? []).map(s => ({
       ...s,
       autoDownload: s.autoDownload ?? (s.enabled !== false),
+      ...(s.remoteServer && { remoteModel: s.remoteModel ?? s.model.toUpperCase() }),
     }))
     config.sources.forEach((s, index) => {
-      if (c.sourceNames?.[index]) sourceNames.set(s, c.sourceNames[index])
-      if (s.remoteServer) void readRemoteModels(s.remoteServer)
+      if (s.remoteServer) {
+        if (c.sourceNames?.[index]) remoteSourceNames.set(remoteSourceKey(s), c.sourceNames[index])
+        void readRemoteModels(s.remoteServer)
+      }
     })
   }
   renderSchedule()

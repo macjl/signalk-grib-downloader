@@ -273,6 +273,8 @@ export class RemoteCatalogue {
     let outsideCoverage: Dataset | undefined
     for await (const row of this.list(signal, model)) {
       if (row.model !== model) continue
+      if (outsideCoverage && (Boolean(row.run) !== Boolean(outsideCoverage.run) ||
+          runDate(row)?.getTime() !== runDate(outsideCoverage)?.getTime())) break
       let dataset: Dataset
       try { dataset = await this.request<Dataset>(versionPath(row), signal) }
       catch (error) {
@@ -295,7 +297,7 @@ export class RemoteCatalogue {
       }
       return dataset
     }
-    // Keep the first disjoint dataset for the map if none overlap.
+    // Keep the latest matching run's coverage for the map if all its variants are disjoint.
     return outsideCoverage
   }
 

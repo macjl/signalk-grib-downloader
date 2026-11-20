@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.7.0] - 2026-11-20
+
+- Add remote Signal K sources with model discovery, verified coverage and optional geographic and forecast-time selection.
+- Show model coverage on the map and skip the download when the latest matching run is outside the requested area.
+- Allow settings changes during transfers and honour the last data-deletion choice when editing sources.
+- Keep legacy GRIB export available for existing consumers.
+
 ## [0.7.0-beta.6] - 2026-11-20
 
 - Check other remote datasets when published bounds rule out the requested area.
