@@ -241,6 +241,9 @@ model bounds. Direct AROME, ARPEGE and ICON-EU use full-domain files when the
 area overlaps. The direct NOAA sources use NOAA's spatial filter.
 On the map, dashed outlines show the known bounds of the configured models.
 Select a model in the map legend to frame its coverage and your download area.
+For a remote model, the outline uses the dataset's published `bounds`.
+The Forecast Dataset Provider and GRIB Processor can measure and publish
+these bounds automatically for compatible GRIB2 grids.
 
 When a dataset provides a model run and the catalogue advertises time
 selection, the downloader can request all available fields up to a given lead
@@ -371,7 +374,8 @@ Automatic work still obeys offline, captive and metered-connection settings.
   intact. Filesystem exports are managed while enabled, through
   their historical layout and archive retention; catalogue deletion leaves them
   intact.
-  Settings changes and deletion are blocked while a transfer runs. Plugin stop
+  Settings can be saved during a transfer and apply to subsequent transfers.
+  Data can be deleted after transfers finish. Plugin stop
   aborts both HTTP sides and waits for the active transfer.
 
 A source has a one-hour acquisition timeout; upstream streams also have a

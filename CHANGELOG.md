@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.7.0-beta.5] - 2026-11-20
+
+- Save operational settings while a transfer is running. The active transfer
+  keeps its original settings and subsequent transfers use the updated ones.
+- Report source data deletion separately from saving settings.
+- Explain when a remote catalogue does not publish geographic coverage.
+
 ## [0.7.0-beta.4] - 2026-11-20
 
 - Show configured model coverage and the requested area on the map.
