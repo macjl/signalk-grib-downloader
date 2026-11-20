@@ -13,6 +13,20 @@
 
     #side { overflow-y: auto; min-width: 0; overflow-wrap: anywhere; padding: 16px; }
     #map  { height: 100%; min-height: 300px; }
+    .coverage-legend {
+      max-width: min(66vw, 255px); max-height: 30vh; overflow: auto;
+      padding: 5px 8px; border: 1px solid #b4c0ce; border-radius: 6px;
+      background: #f8fafc; color: #263548; font: 12px/1.35 system-ui, sans-serif;
+    }
+    .coverage-legend .coverage-key {
+      display: flex; align-items: center; gap: 7px; width: 100%; padding: 3px 0;
+      border: 0; background: transparent; color: inherit; font: inherit;
+      text-align: left; overflow-wrap: anywhere;
+    }
+    .coverage-legend button.coverage-key:hover,
+    .coverage-legend button.coverage-key:focus-visible { text-decoration: underline; }
+    .coverage-swatch { flex: 0 0 18px; border-top: 3px dashed; }
+    .coverage-swatch.requested { border-color: #2973c7; border-top-style: solid; }
 
     h1 { font-size: 17px; margin-bottom: 12px; display: flex; align-items: center; gap: 8px; }
     h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .5px; color: #9fb0c5; margin: 18px 0 8px; }
@@ -157,7 +171,8 @@ const I18N = {
     checkEvery: 'Vérifier toutes les', sources: 'Sources',
     thModel: 'Modèle', thRes: 'Résol.', thHours: 'Durée (h)', thDir: 'Source', thState: 'État',
     addSource: '+ Ajouter une source', zone: 'Zone de téléchargement',
-    zoneHint: 'Glissez les coins du rectangle. La zone s’applique à GFS et GFS-Wave en direct, ainsi qu’aux sources Signal K qui affichent une découpe par zone.',
+    mapCoverage: 'Couverture des modèles', globalCoverage: 'mondiale',
+    zoneHint: 'Glissez les coins du rectangle. Une source hors zone est ignorée quand sa couverture est connue. GFS, GFS-Wave et les serveurs Signal K compatibles découpent les données avant transfert.',
     north: 'Nord', south: 'Sud', west: 'Ouest', east: 'Est',
     save: 'Enregistrer', saved: 'Enregistré ✓', dirty: 'Modifications non enregistrées',
     saveError: 'Erreur : ', downloadAll: 'Tout télécharger', download: '⬇',
@@ -179,6 +194,10 @@ const I18N = {
     remoteChecking: 'Vérification de la découpe sur le serveur…',
     remoteCheckFailed: 'Impossible de vérifier la découpe. Actualisez la source.',
     remoteNoDataset: 'Aucun GRIB complet pour ce modèle et cette résolution.',
+    outsideCoverage: 'Zone hors couverture · aucun téléchargement',
+    areaClipped: 'Découpe limitée à la partie couverte par le GRIB',
+    splitArea: 'La couverture se trouve des deux côtés de l’antiméridien. Sélectionnez un côté à la fois.',
+    directFullArea: 'Fichiers du domaine complet · la source ne propose pas de découpe par zone',
     remoteFull: 'GRIB complet · découpe indisponible',
     remoteFullAccess: 'GRIB complet · un jeton distant avec accès en écriture est requis pour la découpe',
     remoteFullTime: 'GRIB complet · réduisez la durée pour découper par échéance',
@@ -209,7 +228,8 @@ const I18N = {
     checkEvery: 'Check every', sources: 'Sources',
     thModel: 'Model', thRes: 'Res.', thHours: 'Hours', thDir: 'Source', thState: 'State',
     addSource: '+ Add source', zone: 'Download area',
-    zoneHint: 'Drag the rectangle corners. The area applies to direct GFS and GFS-Wave downloads and remote Signal K sources that show area cropping.',
+    mapCoverage: 'Model coverage', globalCoverage: 'global',
+    zoneHint: 'Drag the rectangle corners. Sources outside the area are skipped when coverage is known. GFS, GFS-Wave and compatible Signal K servers crop files before transfer.',
     north: 'North', south: 'South', west: 'West', east: 'East',
     save: 'Save', saved: 'Saved ✓', dirty: 'Unsaved changes',
     saveError: 'Error: ', downloadAll: 'Download all', download: '⬇',
@@ -231,6 +251,10 @@ const I18N = {
     remoteChecking: 'Checking remote GRIB subsetting…',
     remoteCheckFailed: 'Could not verify subsetting. Refresh this source.',
     remoteNoDataset: 'No complete GRIB for this model and resolution.',
+    outsideCoverage: 'Outside coverage · no download',
+    areaClipped: 'Crop limited to the area covered by the GRIB',
+    splitArea: 'Coverage falls on both sides of the antimeridian. Select one side at a time.',
+    directFullArea: 'Full-domain files · the source does not offer area cropping',
     remoteFull: 'Complete GRIB · subsetting unavailable',
     remoteFullAccess: 'Complete GRIB · subsetting requires a remote token with write access',
     remoteFullTime: 'Complete GRIB · shorten the forecast to subset by lead time',
@@ -271,6 +295,7 @@ const MODELS = {
 // GFS is bbox-subsetted server-side: size ∝ grid points × steps.
 function estimateMB(s) {
   if (s.remoteServer) return NaN
+  if (directOutside(s)) return 0
   const hours = s.hours ?? MODELS[s.model].maxHours
   // No measured wave compression estimate yet; do not show zero or reuse
   // atmospheric sizing. Any total including waves is also unknown.
@@ -291,6 +316,7 @@ function estimateMB(s) {
 }
 
 function fmtVol(mb) {
+  if (mb === 0) return '0 MB'
   if (mb >= 1024) return (mb / 1024).toFixed(1) + ' GB'
   if (mb >= 1)    return Math.round(mb) + ' MB'
   return Math.max(1, Math.round(mb * 1024)) + ' kB'
@@ -361,6 +387,61 @@ const map = L.map('map', { zoomControl: true }).setView([40, 5], 5)
 L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
   attribution: '© OpenStreetMap', maxZoom: 12,
 }).addTo(map)
+const coveragePane = map.createPane('forecast-coverage')
+coveragePane.style.zIndex = 390
+coveragePane.style.pointerEvents = 'none'
+const coverageLayers = L.layerGroup().addTo(map)
+const coverageColors = ['#a74410', '#6a3187', '#006a61', '#a8295b', '#52610e', '#483475']
+const coverageLegend = document.createElement('div')
+coverageLegend.className = 'coverage-legend'
+coverageLegend.hidden = true
+coverageLegend.setAttribute('role', 'group')
+coverageLegend.setAttribute('aria-label', t.mapCoverage)
+const legendControl = L.control({ position: 'bottomleft' })
+legendControl.onAdd = () => coverageLegend
+legendControl.addTo(map)
+L.DomEvent.disableClickPropagation(coverageLegend)
+L.DomEvent.disableScrollPropagation(coverageLegend)
+
+function renderCoverage(regions) {
+  coverageLayers.clearLayers()
+  coverageLegend.replaceChildren()
+  coverageLegend.hidden = regions.size === 0
+  if (!regions.size) return
+
+  const requested = document.createElement('div')
+  requested.className = 'coverage-key'
+  requested.innerHTML = '<span class="coverage-swatch requested" aria-hidden="true"></span>'
+  requested.append(t.zone)
+  coverageLegend.append(requested)
+
+  let index = 0
+  for (const { bounds: [west, south, east, north], names } of regions.values()) {
+    const color = coverageColors[index++ % coverageColors.length]
+    const spans = west < east ? [[west, east]] : [[west, 180], [-180, east]]
+    const boxes = spans.filter(([left, right]) => left < right)
+      .map(([left, right]) => [[south, left], [north, right]])
+    for (const box of boxes) L.rectangle(box, {
+      pane: 'forecast-coverage', className: 'forecast-coverage-outline',
+      color, weight: 2.5, dashArray: '7 5', fill: false, interactive: false,
+    }).addTo(coverageLayers)
+
+    const entry = document.createElement('button')
+    entry.type = 'button'
+    entry.className = 'coverage-key'
+    const swatch = document.createElement('span')
+    swatch.className = 'coverage-swatch'
+    swatch.style.borderColor = color
+    swatch.setAttribute('aria-hidden', 'true')
+    const global = west === -180 && east === 180 && south === -90 && north === 90
+    entry.append(swatch, names.join(' · ') + (global ? ' · ' + t.globalCoverage : ''))
+    entry.addEventListener('click', () => {
+      const b = config.bbox
+      map.fitBounds([...boxes.flat(), [b.latMin, b.lonMin], [b.latMax, b.lonMax]], { padding: [30, 30] })
+    })
+    coverageLegend.append(entry)
+  }
+}
 
 let rect = null, swMarker = null, neMarker = null
 const cornerIcon = L.divIcon({
@@ -383,6 +464,17 @@ function bboxToInputs(b) {
   document.getElementById('bb-lonmax').value = b.lonMax
 }
 
+function directOutside(s) {
+  const bounds = directBounds(s)
+  const { lonMin, latMin, lonMax, latMax } = config.bbox
+  return Boolean(bounds && (lonMin >= bounds[2] || lonMax <= bounds[0] ||
+    latMin >= bounds[3] || latMax <= bounds[1]))
+}
+
+function directBounds(s) {
+  return config.directDomains?.[dirName(s)] ?? config.directDomains?.[s.model]
+}
+
 function refreshRect(fit) {
   const b = config.bbox
   const bounds = [[b.latMin, b.lonMin], [b.latMax, b.lonMax]]
@@ -390,20 +482,25 @@ function refreshRect(fit) {
     rect = L.rectangle(bounds, { color: '#4d9fff', weight: 2, fillOpacity: 0.08 }).addTo(map)
     swMarker = L.marker([b.latMin, b.lonMin], { icon: cornerIcon, draggable: true }).addTo(map)
     neMarker = L.marker([b.latMax, b.lonMax], { icon: cornerIcon, draggable: true }).addTo(map)
-    const onDrag = () => {
+    const onDrag = (event) => {
       const sw = swMarker.getLatLng(), ne = neMarker.getLatLng()
+      const lon = value => Math.max(-180, Math.min(180, Math.round(value * 2) / 2))
+      const lat = value => Math.max(-90, Math.min(90, Math.round(value * 2) / 2))
       config.bbox = {
-        latMin: Math.round(Math.min(sw.lat, ne.lat) * 2) / 2,
-        latMax: Math.round(Math.max(sw.lat, ne.lat) * 2) / 2,
-        lonMin: Math.round(Math.min(sw.lng, ne.lng) * 2) / 2,
-        lonMax: Math.round(Math.max(sw.lng, ne.lng) * 2) / 2,
+        latMin: lat(Math.min(sw.lat, ne.lat)),
+        latMax: lat(Math.max(sw.lat, ne.lat)),
+        lonMin: lon(Math.min(sw.lng, ne.lng)),
+        lonMax: lon(Math.max(sw.lng, ne.lng)),
       }
       rect.setBounds([[config.bbox.latMin, config.bbox.lonMin], [config.bbox.latMax, config.bbox.lonMax]])
       bboxToInputs(config.bbox)
-      renderSources()  // GFS volume estimation depends on the bbox
+      if (event.type === 'dragend') {
+        refreshRect(false)
+        renderSources()
+      }
       markDirty()
     }
-    swMarker.on('drag', onDrag); neMarker.on('drag', onDrag)
+    swMarker.on('drag dragend', onDrag); neMarker.on('drag dragend', onDrag)
   } else {
     rect.setBounds(bounds)
     swMarker.setLatLng([b.latMin, b.lonMin])
@@ -502,23 +599,29 @@ function remotePreview(server, model, resolution, recheck = false) {
   const query = new URLSearchParams({ model })
   if (resolution) query.set('resolution', resolution)
   const key = query.toString()
-  const previous = previews.get(key)
-  const delay = previous?.dataset?.horizon && !previous.dataset.horizon.leads ? 30_000 : 300_000
+  const { lonMin, latMin, lonMax, latMax } = config.bbox
+  const zone = [lonMin, latMin, lonMax, latMax].join(',')
+  query.set('bbox', zone)
+  const existing = previews.get(key)
+  const previous = existing?.zone === zone ? existing : undefined
+  const delay = previous?.dataset?.reason === 'coverage-pending' ? 5_000
+    : previous?.dataset?.horizon && !previous.dataset.horizon.leads ? 30_000 : 300_000
   if (!previous || (recheck && !previous.loading && Date.now() - previous.checkedAt >= delay)) {
-    const state = { loading: true, dataset: previous?.dataset, error: previous?.error }
+    const state = { zone, loading: true, dataset: previous?.dataset, bounds: existing?.bounds, error: previous?.error }
     previews.set(key, state)
-    fetch(`${API}/remote-preview/${encodeURIComponent(server)}?${key}`, { cache: 'no-store' })
+    fetch(`${API}/remote-preview/${encodeURIComponent(server)}?${query}`, { cache: 'no-store' })
       .then(async response => {
         const body = await response.json()
         if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`)
         state.dataset = body
+        state.bounds = body?.bounds
         state.error = undefined
       })
-      .catch(error => { state.dataset = undefined; state.error = error.message })
+      .catch(error => { state.dataset = undefined; state.bounds = undefined; state.error = error.message })
       .finally(() => {
         state.loading = false
         state.checkedAt = Date.now()
-        if (remotePreviews.get(server) === previews &&
+        if (remotePreviews.get(server) === previews && previews.get(key) === state &&
             (!previous || previous.error !== state.error ||
               JSON.stringify(previous.dataset) !== JSON.stringify(state.dataset))) renderSources()
       })
@@ -533,6 +636,9 @@ function remoteDownloadLabel(catalogue, model, preview, hours) {
   if (preview?.error) return t.remoteCheckFailed
   const dataset = preview?.dataset
   if (!dataset) return t.remoteNoDataset
+  if (dataset.reason === 'outside-coverage') return t.outsideCoverage
+  if (dataset.reason === 'coverage-pending') return t.remoteChecking
+  if (dataset.reason === 'split-area') return t.splitArea
   if (hours !== undefined && dataset.horizon) return dataset.area ? t.remoteAreaTime : t.remoteTime
   if (dataset.area) return dataset.horizon ? t.remoteArea : t.remoteAreaNoTime
   if (dataset.horizon) return t.remoteFullTime
@@ -543,6 +649,7 @@ function renderSources() {
   const list = document.getElementById('src-list')
   list.innerHTML = ''
   let totalMB = 0
+  const regions = new Map()
   config.sources.forEach((s, idx) => {
     const name = dirName(s)
     const model = MODELS[s.model] || MODELS.gfs
@@ -559,6 +666,14 @@ function renderSources() {
       : advertised.length ? t.chooseRemoteModel : t.remoteEmpty
 
     const preview = s.remoteServer && available ? remotePreview(s.remoteServer, remoteModel, s.resolution) : undefined
+    const bounds = s.remoteServer ? preview?.bounds : directBounds(s)
+    if (bounds) {
+      const title = (s.remoteServer ? remoteModel : model.label) +
+        (s.resolution ? ' ' + s.resolution : '') + (s.remoteServer ? ' (' + s.remoteServer + ')' : '')
+      const key = bounds.join(',')
+      if (!regions.has(key)) regions.set(key, { bounds, names: [] })
+      regions.get(key).names.push(title)
+    }
     const horizon = s.remoteServer ? preview?.dataset?.horizon
       : { minHours: model.sliderStep, maxHours: model.maxHours, stepHours: model.sliderStep }
     const configuredHours = s.remoteServer ? s.remoteHours : s.hours
@@ -567,6 +682,9 @@ function renderSources() {
     const areaSubset = preview?.dataset?.area
     const timeSubset = preview?.dataset?.horizon && configuredHours !== undefined
     const expectedSubset = areaSubset ? (timeSubset ? 'both' : 'area') : (timeSubset ? 'time' : '')
+    const blocked = s.remoteServer
+      ? !name || !preview?.dataset || ['outside-coverage', 'split-area', 'coverage-pending'].includes(preview.dataset.reason)
+      : directOutside(s)
     const hours = leads ? leads[sliderIndex] : horizon?.maxHours !== undefined ? horizon.minHours + Math.floor(
       (Math.max(horizon.minHours, Math.min(horizon.maxHours, configuredHours ?? horizon.maxHours)) - horizon.minHours) /
       horizon.stepHours) * horizon.stepHours : undefined
@@ -605,7 +723,7 @@ function renderSources() {
         <code class="source-name">${escapeHtml(name || (s.remoteServer ? s.remoteServer : ''))}</code>
         <span class="badge-slot">${sourceStateBadge(s)}</span>
         <span class="row-actions">
-          <button class="small" data-act="dl" title="${t.download}" ${s.remoteServer && (!name || !preview?.dataset) ? 'disabled' : ''}>⬇</button>
+          <button class="small" data-act="dl" title="${t.download}" ${blocked ? 'disabled' : ''}>⬇</button>
           <button class="small secondary" data-act="more">${expanded.has(name) ? '▾' : '▸'}</button>
           <button class="small danger" data-act="del">✕</button>
         </span>
@@ -636,7 +754,9 @@ function renderSources() {
       </div>
       ${s.remoteServer ? `<div class="remote-plan" role="status" title="${escapeHtml(preview?.error || '')}">
         ${remoteDownloadLabel(catalogue, remoteModel, preview, configuredHours)}
-      </div>` : ''}
+        ${preview?.dataset?.areaClipped ? ` · ${t.areaClipped}` : ''}
+      </div>` : !['gfs', 'gfs-wave'].includes(s.model)
+        ? `<div class="remote-plan" role="status">${blocked ? t.outsideCoverage : t.directFullArea}</div>` : ''}
       <div class="src-status" style="padding-left:24px"><span class="src-status-text"></span><span class="src-catalogue" hidden> · <a target="_blank" rel="noopener">${t.stPublished}</a></span></div>
       <div class="src-details"></div>`
 
@@ -728,6 +848,7 @@ function renderSources() {
     fillDetails(card, name)
     list.appendChild(card)
   })
+  renderCoverage(regions)
   document.getElementById('total-vol').innerHTML =
     `${t.totalVol} <b>${fmtEstimate(totalMB)}</b> ${t.perRun}`
 }
@@ -895,6 +1016,7 @@ async function loadConfig() {
   } else if (r.ok) {
     const c = await r.json()
     config = Object.assign({ checkIntervalMinutes: 5, sources: [] }, c)
+    config.bbox = c.bbox ?? { latMin: 35, lonMin: -6, latMax: 45, lonMax: 17 }
     config.sources = (config.sources ?? []).map(s => ({
       ...s,
       autoDownload: s.autoDownload ?? (s.enabled !== false),
@@ -903,7 +1025,6 @@ async function loadConfig() {
       if (c.sourceNames?.[index]) sourceNames.set(s, c.sourceNames[index])
       if (s.remoteServer) void readRemoteModels(s.remoteServer)
     })
-    config.bbox = c.bbox ?? { latMin: 35, lonMin: -6, latMax: 45, lonMax: 17 }
   }
   renderSchedule()
   renderSources()

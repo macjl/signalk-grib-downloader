@@ -10,6 +10,7 @@ import { LegacyGribExporter } from './legacy-export'
 import { sourceDirName } from './scheduler'
 import { RemoteCatalogue, normalizeRemoteUrl, remoteId, validRemoteModel } from './remote-catalogue'
 import { AppSettings, InternetState, PluginSettings, SourceSetting } from './types'
+import { directDomains, mapZone, validZone } from './coverage'
 
 const PLUGIN_ID = 'signalk-grib-downloader'
 const DEFAULT_CHECK_INTERVAL_MINUTES = 5
@@ -441,7 +442,7 @@ module.exports = (server: ServerAPI): Plugin => {
       // Operational settings, webapp-managed. ('/config' would collide with
       // SignalK's built-in plugin config routes.)
       router.get('/settings', (_req: any, res: any) => {
-        res.json({ ...settings, checkIntervalMinutes: intervalMinutes(), remoteServerIds: [...remotes.keys()],
+        res.json({ ...settings, checkIntervalMinutes: intervalMinutes(), remoteServerIds: [...remotes.keys()], directDomains,
           sourceNames: (settings.sources ?? []).map(sourceDirName) })
       })
 
@@ -473,12 +474,17 @@ module.exports = (server: ServerAPI): Plugin => {
       router.get('/remote-preview/:server', async (req: any, res: any) => {
         const peer = remotes.get(req.params.server)
         if (!peer) return res.status(404).json({ error: 'Unknown remote Signal K server' })
-        const { model, resolution } = req.query
+        const { model, resolution, bbox } = req.query
         if (!validRemoteModel(model) ||
             (resolution !== undefined && (typeof resolution !== 'string' || !/^[a-zA-Z0-9]{1,16}$/.test(resolution))))
           return res.status(400).json({ error: 'Choose a remote model and a valid resolution' })
+        const zone = typeof bbox === 'string' && bbox.split(',').every(part => part.trim())
+          ? bbox.split(',').map(Number) : undefined
+        const valid = validZone(zone) && zone[0] < zone[2]
+        if (bbox !== undefined && !valid)
+          return res.status(400).json({ error: 'Choose a valid map area' })
         try {
-          res.set('Cache-Control', 'no-store').json(await peer.preview(model, resolution, AbortSignal.timeout(20_000)))
+          res.set('Cache-Control', 'no-store').json(await peer.preview(model, resolution, AbortSignal.timeout(20_000), valid ? zone : undefined))
         } catch (error) {
           res.status(502).json({ error: error instanceof Error ? error.message : 'Remote catalogue unavailable' })
         }
@@ -493,6 +499,8 @@ module.exports = (server: ServerAPI): Plugin => {
         }
         const { sources, bbox, mode, checkIntervalMinutes } = nextRaw
         const next = normalizeSettings({ sources, bbox: bbox ?? settings.bbox, mode, checkIntervalMinutes })
+        if (next.bbox && (!validZone(mapZone(next.bbox)) || next.bbox.lonMin >= next.bbox.lonMax))
+          return res.status(400).json({ error: 'Choose a valid map area' })
         const valid = ['gfs', 'gfs-wave', 'arome', 'arpege', 'icon-eu']
         if ((next.sources ?? []).some(s => !valid.includes(s.model))) {
           return res.status(400).json({ error: `model must be one of: ${valid.join(', ')}` })

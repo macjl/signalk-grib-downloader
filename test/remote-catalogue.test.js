@@ -21,7 +21,7 @@ const jobPath = `${API}/requests/${jobId}`
 
 async function setup(t, { processor = false, time = false, area = true, statusAvailable = true,
   userLevel = 'readwrite', missing = false, broken = false, unsafe = false, badHash = false, customModel = false,
-  parameters, verifiedForecast } = {}) {
+  parameters, verifiedForecast, coverage, pendingArea = false, busy = 0 } = {}) {
   const original = grib(2048), crop = grib(256)
   const tokenDir = fs.mkdtempSync(path.join(os.tmpdir(), 'remote-signalk-token-'))
   const tokenFile = path.join(tokenDir, 'token')
@@ -47,6 +47,7 @@ async function setup(t, { processor = false, time = false, area = true, statusAv
     { parameter: 'air_pressure_at_mean_sea_level' }
   ]
   const main = { ...row, requested: { source: 'arome-0025', parameters },
+    ...(coverage ? { bounds: coverage } : {}),
     ...(time === true ? { forecast: { from: '2026-11-09T15:00:00Z', to: '2026-11-10T03:00:00Z' } } : {}),
     ...(verifiedForecast ? { forecast: verifiedForecast } : {}),
     assets: [
@@ -55,6 +56,7 @@ async function setup(t, { processor = false, time = false, area = true, statusAv
     ],
     capabilities: { operations: processor ? [{ operation: 'export', href: originalPath + '/requests',
       selectors: [...(area ? ['bbox'] : []), ...(time ? ['from', 'to', 'fields'] : [])],
+      ...(pendingArea ? { pendingSelectors: ['bbox'] } : {}),
       ...(time === true ? { fields, forecastInterval: { stepSeconds: 3600, maxHours: 51 } } : {}) }] : [] }
   }
   if (unsafe) main.assets[0].href = 'https://unrelated.invalid/asset'
@@ -89,6 +91,11 @@ async function setup(t, { processor = false, time = false, area = true, statusAv
       let bytes = ''
       for await (const chunk of req) bytes += chunk
       received.push(JSON.parse(bytes))
+      if (busy > 0) {
+        busy--
+        res.setHeader('Retry-After', '0')
+        return json(429, { code: 'PROCESSING_BUSY' })
+      }
       if (missing) return json(503, { code: 'PROCESSOR_UNAVAILABLE' })
       return json(202, { id: jobId, href: jobPath, state: 'running' })
     }
@@ -161,6 +168,45 @@ test('sends the selected map area, downloads only the crop, and repeats on a cha
   assert.equal(received.length, 2)
   assert.deepEqual(received[1].selection.bbox, [-5.99, 44, -1, 48])
   assert.equal(f.datasets.size, 1)
+})
+
+test('a remote export uses the overlap, retries a busy slot and imports only the crop', async t => {
+  const { adapter, f, orchestrator, requests, received } = await setup(t, {
+    processor: true, coverage: [-5, 45, 9, 55], busy: 1
+  })
+  assert.deepEqual(await adapter.preview('AROME', '0025', AbortSignal.timeout(3000), [-6, 44, -1, 48]), {
+    area: true, bounds: [-5, 45, 9, 55], horizon: undefined, reason: undefined, areaClipped: true
+  })
+  const orch = orchestrator(bbox)
+  assert.equal(await orch.downloadSource(source, 'area'), true, orch.status()[0].lastError)
+  assert.deepEqual(received.map(request => request.selection.bbox), [[-5, 45, -1, 48], [-5, 45, -1, 48]])
+  assert.equal(f.datasets.size, 1)
+  assert.equal(orch.status()[0].configStale, false)
+  assert.ok(requests.filter(([, url]) => url.includes('/assets/')).every(([, url]) => url.startsWith(croppedPath)))
+})
+
+test('no remote forecast is downloaded for an empty map overlap, with or without a processor', async t => {
+  for (const processor of [false, true]) {
+    const { adapter, f, orchestrator, requests } = await setup(t, { processor, coverage: [0, 38, 16, 55] })
+    assert.deepEqual(await adapter.preview('AROME', '0025', AbortSignal.timeout(3000), [-6, 44, -1, 48]), {
+      area: false, bounds: [0, 38, 16, 55], reason: 'outside-coverage'
+    })
+    const orch = orchestrator(bbox)
+    assert.equal(await orch.downloadSource(source), true)
+    assert.equal(orch.status()[0].lastOutcome, 'unavailable')
+    assert.equal(f.datasets.size, 0)
+    assert.ok(requests.every(([method, url]) => method !== 'POST' && !url.includes('/assets/')))
+  }
+})
+
+test('a pending grid analysis does not cause a premature full download', async t => {
+  const { adapter, f, orchestrator, requests } = await setup(t, { processor: true, area: false, pendingArea: true })
+  assert.equal((await adapter.preview('AROME', '0025', AbortSignal.timeout(3000), [-6, 44, -1, 48])).reason, 'coverage-pending')
+  const orch = orchestrator(bbox)
+  assert.equal(await orch.downloadSource(source), false)
+  assert.match(orch.status()[0].lastError, /still being analyzed/)
+  assert.equal(f.datasets.size, 0)
+  assert.ok(requests.every(([method, url]) => method !== 'POST' && !url.includes('/assets/')))
 })
 
 for (const area of [false, true]) {
