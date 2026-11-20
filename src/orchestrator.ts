@@ -109,7 +109,8 @@ export class Orchestrator {
         expectedRun: expected,
         pendingRun: target && !(lastRun !== null && lastRun >= target) ? target : null,
         publicationLate: !s.remoteServer && (lastRun === null || lastRun < expected),
-        upToDate: lastRun !== null && lastRun >= expected && paramsOk && this.published(s, lastRun),
+        upToDate: (!s.remoteServer || st.lastOutcome !== 'unavailable') &&
+          lastRun !== null && lastRun >= expected && paramsOk && this.published(s, lastRun),
         catalogue: this.catalogue.reference(s, lastRun, this.catalogue.latest(s)?.params),
         publicationPending: !s.remoteServer && this.catalogue.pendingStamp(s, fetchFingerprint(s, this.bbox)) !== null,
         configStale: lastRun !== null && !paramsOk,

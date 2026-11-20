@@ -147,7 +147,7 @@ Everything operational is managed in the webapp (Webapps → GRIB Downloader),
 not in the plugin config panel:
 
 - **Download area** drawn on a map (draggable rectangle corners) — applied to
-  GFS, the only model with server-side subsetting
+  direct GFS and GFS-Wave downloads and to Signal K sources with spatial subsetting
 - **Sources**: model, resolution, forecast duration on a slider showing the
   model maximum, past-runs archive count, enable/disable
 - **Volume estimation** per source and per run, following the area and
@@ -243,6 +243,8 @@ area overlaps. The direct NOAA sources use NOAA's spatial filter.
 On the map, dashed outlines show the known bounds of the configured models.
 Select a model in the map legend to frame its coverage and your download area.
 For a remote model, the outline uses the dataset's published `bounds`.
+The downloader checks the variants of the latest matching run. If none covers
+the requested area, it displays the latest run's coverage and skips the download.
 The Forecast Dataset Provider and GRIB Processor can measure and publish
 these bounds automatically for compatible GRIB2 grids.
 
@@ -253,13 +255,10 @@ hour input when the maximum is unknown. For datasets published by GRIB
 Downloader, the slider can also use the original acquisition steps or groups.
 When the catalogue publishes verified validity times, the slider selects
 those exact times, including irregular or sub-hourly steps. Automatic GRIB2
-inventory requires Forecast Dataset Provider 0.3.0-beta.3 and GRIB Processor
-0.1.0-beta.4 on the remote server.
+inventory and generic time selection are available with Forecast Dataset
+Provider 0.3.0 and GRIB Processor 0.1.0 on the remote server.
 The maximum slider position and a blank input preserve all forecast times.
-For generic time selection, use
-Forecast Dataset Provider 0.3.0-beta.2 and GRIB Processor 0.1.0-beta.3 on the
-remote server. Older processors can advertise a fixed step and required
-fields. When the preflight
+Older processors can advertise a fixed step and required fields. When the preflight
 confirms that no applicable subset can be requested, the downloader streams
 all original assets. An inconclusive check or an error after a subset has
 been selected stops the download. The downloader checks availability again
