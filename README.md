@@ -234,7 +234,8 @@ The webapp shows whether the download will use the map area, a forecast
 interval, or the full GRIB. The refresh button updates this check.
 
 When the dataset reports bounds, the downloader skips an empty intersection
-with the map. With a compatible processor it requests only the intersection.
+with the map and checks the next candidate. With a compatible processor it
+requests only the intersection.
 A server still analyzing the grid does not trigger a full download. The
 downloader also skips out-of-area direct regional products using published
 model bounds. Direct AROME, ARPEGE and ICON-EU use full-domain files when the
@@ -375,7 +376,9 @@ Automatic work still obeys offline, captive and metered-connection settings.
   their historical layout and archive retention; catalogue deletion leaves them
   intact.
   Settings can be saved during a transfer and apply to subsequent transfers.
-  Data can be deleted after transfers finish. Plugin stop
+  A confirmed deletion in the webapp is saved with the settings and runs
+  after active transfers finish. Pending deletions resume after restart.
+  Plugin stop
   aborts both HTTP sides and waits for the active transfer.
 
 A source has a one-hour acquisition timeout; upstream streams also have a

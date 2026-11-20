@@ -17,11 +17,13 @@ const bbox = { lonMin: -6, latMin: 44, lonMax: -1, latMax: 48 }
 const version = 'a'.repeat(64), cropVersion = 'b'.repeat(64)
 const root = (id, v) => `${API}/datasets/${id}/versions/${v}`
 const originalPath = root(datasetId, version), croppedPath = root(croppedId, cropVersion)
+const alternateId = '85e81722-cd95-4dd8-95c8-e0423f354ee6'
+const alternatePath = root(alternateId, version)
 const jobPath = `${API}/requests/${jobId}`
 
 async function setup(t, { processor = false, time = false, area = true, statusAvailable = true,
   userLevel = 'readwrite', missing = false, broken = false, unsafe = false, badHash = false, customModel = false,
-  parameters, verifiedForecast, coverage, pendingArea = false, busy = 0 } = {}) {
+  parameters, verifiedForecast, coverage, alternateCoverage, pendingArea = false, busy = 0 } = {}) {
   const original = grib(2048), crop = grib(256)
   const tokenDir = fs.mkdtempSync(path.join(os.tmpdir(), 'remote-signalk-token-'))
   const tokenFile = path.join(tokenDir, 'token')
@@ -60,6 +62,10 @@ async function setup(t, { processor = false, time = false, area = true, statusAv
       ...(time === true ? { fields, forecastInterval: { stepSeconds: 3600, maxHours: 51 } } : {}) }] : [] }
   }
   if (unsafe) main.assets[0].href = 'https://unrelated.invalid/asset'
+  const alternate = alternateCoverage && {
+    ...row, id: alternateId, bounds: alternateCoverage, requested: main.requested,
+    assets: [manifest(alternateId, version, 'arome-0025__alt_grb2', original)]
+  }
   const derived = { ...row, id: croppedId, version: cropVersion, producer: 'signalk-grib-processor',
     provenance: { source: { id: datasetId, version } },
     bounds: [-6, 44, -1, 48],
@@ -78,6 +84,7 @@ async function setup(t, { processor = false, time = false, area = true, statusAv
       const model = new URL(req.url, 'http://localhost').searchParams.get('model')
       return json(200, !model || model === row.model ? {
         [datasetId]: row,
+        ...(alternate ? { [alternateId]: { ...row, id: alternateId } } : {}),
         mirror: { ...row, id: 'mirror', model: 'Looped model', provenance: { channel: 'signalk' } },
         temporary: { ...row, id: 'temporary', producer: 'signalk-grib-processor', model: 'Temporary crop',
           expiresAt: '2099-01-01T00:00:00Z' },
@@ -87,6 +94,7 @@ async function setup(t, { processor = false, time = false, area = true, statusAv
       ? { operations: ['export'], processing: 'available' } : { operations: [], processing: 'not-implemented' })
     if (url === '/skServer/loginStatus') return json(200, { status: 'loggedIn', userLevel })
     if (url === originalPath) return json(200, main)
+    if (alternate && url === alternatePath) return json(200, alternate)
     if (url === originalPath + '/requests') {
       let bytes = ''
       for await (const chunk of req) bytes += chunk
@@ -107,6 +115,7 @@ async function setup(t, { processor = false, time = false, area = true, statusAv
         : { id: jobId, href: jobPath, state: 'complete', result: { ...derived, bounds: bbox, ...(from ? { forecast } : {}) } })
     }
     if (main.assets.some(asset => asset.href === url)) return res.end(original)
+    if (alternate?.assets.some(asset => asset.href === url)) return res.end(original)
     if (derived.assets[0].href === url) return res.end(crop)
     return json(404, { code: 'DATASET_NOT_FOUND' })
   })
@@ -197,6 +206,26 @@ test('no remote forecast is downloaded for an empty map overlap, with or without
     assert.equal(f.datasets.size, 0)
     assert.ok(requests.every(([method, url]) => method !== 'POST' && !url.includes('/assets/')))
   }
+})
+
+test('remote preview and acquisition choose the next covering dataset of the same run', async t => {
+  const bounds = [-10, 40, 0, 50]
+  const { adapter, orchestrator, f, requests } = await setup(t, {
+    coverage: [10, 42, 17, 52], alternateCoverage: bounds
+  })
+  const signal = AbortSignal.timeout(5000)
+  const preview = await adapter.preview('AROME', '0025', signal, [-6, 44, -1, 48])
+  assert.deepEqual(preview.bounds, bounds)
+  assert.equal(preview.reason, undefined)
+  const orch = orchestrator(bbox)
+  assert.equal(await orch.downloadSource(source), true, orch.status()[0].lastError)
+  assert.deepEqual(f.declarations[0].provenance.remoteSource, { id: alternateId, version })
+  const assetRequests = requests.filter(([, url]) => url.includes('/assets/'))
+  assert.equal(assetRequests.length, 1)
+  assert.ok(assetRequests[0][1].startsWith(alternatePath))
+  const outside = await adapter.preview('AROME', '0025', signal, [20, 45, 24, 49])
+  assert.equal(outside.reason, 'outside-coverage')
+  assert.deepEqual(outside.bounds, [10, 42, 17, 52])
 })
 
 test('a pending grid analysis does not cause a premature full download', async t => {

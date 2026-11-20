@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.7.0-beta.6] - 2026-11-20
+
+- Check other remote datasets when published bounds rule out the requested area.
+- Save confirmed source data deletions with the settings. Resume pending cleanup
+  after active downloads finish, including after a reload or plugin restart.
+
 ## [0.7.0-beta.5] - 2026-11-20
 
 - Save operational settings while a transfer is running. The active transfer

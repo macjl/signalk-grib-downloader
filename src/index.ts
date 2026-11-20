@@ -110,6 +110,10 @@ const DEFAULT_APP_SETTINGS: AppSettings = {
   sources: [],
 }
 
+type SavedSettings = AppSettings & { pendingDataDeletions?: string[] }
+const validSourceName = (name: unknown): name is string =>
+  typeof name === 'string' && /^[A-Za-z0-9_-]+$/.test(name)
+
 module.exports = (server: ServerAPI): Plugin => {
   let orchestrator: Orchestrator | null = null
   let timer: ReturnType<typeof setTimeout> | null = null
@@ -123,7 +127,8 @@ module.exports = (server: ServerAPI): Plugin => {
   let catalogue: CataloguePublisher
   let access: CatalogueAccess | null = null
   const deleting = new Map<string, AbortController>()
-  let settings: AppSettings = { ...DEFAULT_APP_SETTINGS }
+  let deletionTimer: ReturnType<typeof setTimeout> | undefined
+  let settings: SavedSettings = { ...DEFAULT_APP_SETTINGS }
   let legacyIntervalMinutes: number | undefined
 
   const settingsPath = () => path.join(server.getDataDirPath(), 'settings.json')
@@ -147,7 +152,7 @@ module.exports = (server: ServerAPI): Plugin => {
   const meteredMultiplier = () =>
     validMultiplier(infra.meteredIntervalMultiplier) ?? DEFAULT_METERED_MULTIPLIER
 
-  const normalizeSettings = (raw: AppSettings): AppSettings => {
+  const normalizeSettings = (raw: SavedSettings): SavedSettings => {
     const legacyManual = raw.mode === 'manual'
     const normalized = {
       ...DEFAULT_APP_SETTINGS,
@@ -166,32 +171,38 @@ module.exports = (server: ServerAPI): Plugin => {
     return normalized
   }
 
-  const loadSettings = (legacy: AppSettings): AppSettings => {
+  const loadSettings = (legacy: AppSettings): SavedSettings => {
+    let loaded: SavedSettings
     try {
-      const raw = JSON.parse(fs.readFileSync(settingsPath(), 'utf-8')) as AppSettings
+      const raw = JSON.parse(fs.readFileSync(settingsPath(), 'utf-8')) as SavedSettings
       legacyIntervalMinutes = validInterval(raw.checkIntervalMinutes)
-      const loaded = normalizeSettings(raw)
-      saveSettings(loaded)
-      return loaded
+      loaded = normalizeSettings(raw)
+      const activeNames = new Set(loaded.sources?.map(sourceDirName))
+      loaded.pendingDataDeletions = Array.isArray(raw.pendingDataDeletions)
+        ? [...new Set(raw.pendingDataDeletions.filter(name => validSourceName(name) && !activeNames.has(name)))]
+        : undefined
     } catch {
       // First run — migrate any operational fields a previous version
       // stored in the plugin options, then persist them to settings.json.
       legacyIntervalMinutes = validInterval(legacy.checkIntervalMinutes)
-      const migrated = normalizeSettings({
+      loaded = normalizeSettings({
         ...DEFAULT_APP_SETTINGS,
         ...(legacy.mode ? { mode: legacy.mode } : {}),
         ...(legacy.checkIntervalMinutes ? { checkIntervalMinutes: legacy.checkIntervalMinutes } : {}),
         ...(legacy.bbox ? { bbox: legacy.bbox } : {}),
         ...(legacy.sources ? { sources: legacy.sources } : {}),
       })
-      saveSettings(migrated)
-      return migrated
     }
+    saveSettings(loaded)
+    return loaded
   }
 
-  const saveSettings = (s: AppSettings) => {
+  const saveSettings = (s: SavedSettings) => {
     fs.mkdirSync(server.getDataDirPath(), { recursive: true })
-    fs.writeFileSync(settingsPath(), JSON.stringify(s, null, 2))
+    const file = settingsPath()
+    const temporary = file + '.tmp'
+    fs.writeFileSync(temporary, JSON.stringify(s, null, 2), { flush: true })
+    fs.renameSync(temporary, file)
   }
 
   const remoteAccessStatus = () => Array.from(remoteAccesses, ([id, authorizer]) => {
@@ -328,6 +339,46 @@ module.exports = (server: ServerAPI): Plugin => {
     }
   }
 
+  const deleteSourceData = async (name: string): Promise<void> => {
+    const controller = new AbortController()
+    deleting.set(name, controller)
+    try {
+      await catalogue.removeSource(name, controller.signal)
+      controller.signal.throwIfAborted()
+      if (settings.pendingDataDeletions?.includes(name)) {
+        const remaining = settings.pendingDataDeletions.filter(item => item !== name)
+        const next = { ...settings, pendingDataDeletions: remaining.length ? remaining : undefined }
+        saveSettings(next)
+        settings = next
+      }
+    } finally {
+      deleting.delete(name)
+      scheduleNextTick()
+    }
+  }
+
+  const scheduleDataDeletions = (delay = 0): void => {
+    if (deletionTimer || !orchestrator || !settings.pendingDataDeletions?.length) return
+    deletionTimer = setTimeout(async () => {
+      deletionTimer = undefined
+      if (!orchestrator || deleting.size || orchestrator.isRunning()) {
+        scheduleDataDeletions(1000)
+        return
+      }
+      for (const name of settings.pendingDataDeletions ?? []) {
+        if (!orchestrator || deleting.size || orchestrator.isRunning()) break
+        if (!settings.pendingDataDeletions?.includes(name)) continue
+        try {
+          await deleteSourceData(name)
+        } catch (error) {
+          if (orchestrator) server.debug(`source data deletion deferred (${name}): ${error}`)
+        }
+      }
+      scheduleDataDeletions(30_000)
+    }, delay)
+    deletionTimer.unref()
+  }
+
   const plugin: Plugin = {
     id: PLUGIN_ID,
     name: 'GRIB Downloader',
@@ -395,6 +446,7 @@ module.exports = (server: ServerAPI): Plugin => {
         (msg: string) => server.debug(msg), updateStatus, settings.bbox, remotes)
       refreshSchedule()
       access.start()
+      scheduleDataDeletions()
       for (const authorizer of remoteAccesses.values()) authorizer.start()
     },
 
@@ -409,6 +461,7 @@ module.exports = (server: ServerAPI): Plugin => {
       stopInternetStream?.()
       stopInternetStream = null
       if (timer) { clearTimeout(timer); timer = null }
+      if (deletionTimer) { clearTimeout(deletionTimer); deletionTimer = undefined }
       nextTickAtMs = null
       for (const controller of deleting.values()) controller.abort(new Error('plugin stopped'))
       await active?.stop()
@@ -427,6 +480,7 @@ module.exports = (server: ServerAPI): Plugin => {
           internetState,
           nextAutoTickAt: nextTickAtMs === null ? null : new Date(nextTickAtMs).toISOString(),
           sources: orchestrator.status(),
+          pendingDataDeletions: settings.pendingDataDeletions ?? [],
         })
       })
 
@@ -483,11 +537,13 @@ module.exports = (server: ServerAPI): Plugin => {
 
       router.put('/settings', (req: any, res: any) => {
         if (!orchestrator) return res.status(503).json({ error: 'plugin not started' })
-        const nextRaw = req.body as AppSettings
+        const nextRaw = req.body as AppSettings & { deleteSources?: unknown }
         if (!nextRaw || typeof nextRaw !== 'object' || (nextRaw.sources !== undefined && !Array.isArray(nextRaw.sources))) {
           return res.status(400).json({ error: 'invalid settings' })
         }
-        const { sources, bbox, mode, checkIntervalMinutes } = nextRaw
+        const { sources, bbox, mode, checkIntervalMinutes, deleteSources } = nextRaw
+        if (deleteSources !== undefined && (!Array.isArray(deleteSources) || !deleteSources.every(validSourceName)))
+          return res.status(400).json({ error: 'Invalid source data deletions' })
         const next = normalizeSettings({ sources, bbox: bbox ?? settings.bbox, mode, checkIntervalMinutes })
         if (next.bbox && (!validZone(mapZone(next.bbox)) || next.bbox.lonMin >= next.bbox.lonMax))
           return res.status(400).json({ error: 'Choose a valid map area' })
@@ -511,8 +567,9 @@ module.exports = (server: ServerAPI): Plugin => {
           return res.status(400).json({ error: 'Invalid remote forecast cutoff' })
         }
         const names = (next.sources ?? []).map(s => sourceDirName(s))
-        if (names.some(name => !/^[A-Za-z0-9_-]+$/.test(name))) return res.status(400).json({ error: 'invalid source name' })
-        if (new Set(names).size !== names.length) {
+        if (names.some(name => !validSourceName(name))) return res.status(400).json({ error: 'invalid source name' })
+        const activeNames = new Set(names)
+        if (activeNames.size !== names.length) {
           return res.status(400).json({ error: 'duplicate source: each (server, model, resolution) combination must be unique' })
         }
         if ((next.sources ?? []).some(s =>
@@ -523,6 +580,13 @@ module.exports = (server: ServerAPI): Plugin => {
             s.retentionDays !== undefined && (!Number.isInteger(s.retentionDays) || s.retentionDays < 0 || s.retentionDays > 365))) {
           return res.status(400).json({ error: 'retentionDays must be a whole number between 0 and 365' })
         }
+        const previousNames = new Set(settings.sources?.map(sourceDirName))
+        if (names.some(name => deleting.has(name) && !previousNames.has(name)))
+          return res.status(409).json({ error: 'A source being re-added is still being deleted' })
+        const requested = (deleteSources as string[] | undefined)?.filter(name => previousNames.has(name)) ?? []
+        const pending = [...new Set([...(settings.pendingDataDeletions ?? []), ...requested])]
+          .filter(name => !activeNames.has(name))
+        next.pendingDataDeletions = pending.length ? pending : undefined
         try {
           saveSettings(next)
         } catch (err) {
@@ -531,7 +595,12 @@ module.exports = (server: ServerAPI): Plugin => {
         settings = next
         orchestrator.updateSettings(next.sources ?? [], next.bbox)
         refreshSchedule()
-        res.json((next.sources ?? []).some(s => s.remoteServer) ? { ok: true, sourceNames: names } : { ok: true })
+        scheduleDataDeletions()
+        res.json({
+          ok: true,
+          ...((next.sources ?? []).some(s => s.remoteServer) ? { sourceNames: names } : {}),
+          ...(pending.length ? { pendingDataDeletions: pending } : {}),
+        })
       })
 
       router.post('/download', (_req: any, res: any) => {
@@ -551,20 +620,17 @@ module.exports = (server: ServerAPI): Plugin => {
       router.delete('/source-data/:name', async (req: any, res: any) => {
         if (!orchestrator) return res.status(503).json({ error: 'plugin not started' })
         const name = req.params.name
-        if (!/^[A-Za-z0-9_-]+$/.test(name)) return res.status(400).json({ error: 'invalid source name' })
+        if (!validSourceName(name)) return res.status(400).json({ error: 'invalid source name' })
         if (orchestrator?.isRunning() || deleting.has(name)) return res.status(409).json({ error: 'Source is busy' })
         const remoteJournal = /^signalk-[a-z0-9][a-z0-9-]{0,31}__model-[a-f0-9]{24}(?:-[a-zA-Z0-9]{1,16})?$/.test(name)
-        const source = orchestrator?.findSource(name) ?? parseSourceName(name) ?? (remoteJournal ? name : undefined)
-        if (!source) return res.status(400).json({ error: 'invalid source name' })
-        const controller = new AbortController()
-        deleting.set(name, controller)
+        if (!orchestrator.findSource(name) && !parseSourceName(name) && !remoteJournal)
+          return res.status(400).json({ error: 'invalid source name' })
         try {
-          await catalogue.removeSource(source, controller.signal)
-          controller.signal.throwIfAborted()
+          await deleteSourceData(name)
           res.json({ ok: true })
         } catch (error) {
           res.status(502).json({ error: String(error) })
-        } finally { deleting.delete(name); scheduleNextTick() }
+        }
       })
 
       router.post('/download/:name', (req: any, res: any) => {

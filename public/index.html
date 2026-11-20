@@ -82,7 +82,7 @@
     #bbox-inputs { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; margin-top: 8px; }
     @media (max-width: 420px) { #bbox-inputs { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
     #save-bar { position: sticky; bottom: 0; background: #1a2535; padding: 10px 0 2px; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
-    #save-note { font-size: 12px; color: #9fb0c5; }
+    #save-note, #pending-deletions { font-size: 12px; color: #9fb0c5; }
     #save-note.dirty { color: #e3c47f; font-weight: 600; }
     .row-actions { display: flex; gap: 4px; margin-left: auto; }
 
@@ -146,6 +146,7 @@
     <div id="save-bar">
       <button id="btn-save" data-i18n="save">Enregistrer</button>
       <span id="save-note"></span>
+      <span id="pending-deletions" role="status"></span>
     </div>
   </div>
   <div id="map"></div>
@@ -176,8 +177,7 @@ const I18N = {
     zoneHint: 'Glissez les coins du rectangle. Une source hors zone est ignorée quand sa couverture est connue. GFS, GFS-Wave et les serveurs Signal K compatibles découpent les données avant transfert.',
     north: 'Nord', south: 'Sud', west: 'Ouest', east: 'Est',
     save: 'Enregistrer', saved: 'Enregistré ✓', dirty: 'Modifications non enregistrées',
-    deletePending: 'Suppression des données en attente. Réessayez après le transfert.',
-    deleteError: 'Impossible de supprimer les données : ',
+    deletePending: 'Suppression des données en attente',
     saveError: 'Erreur : ', downloadAll: 'Tout télécharger', download: '⬇',
     stUpToDate: 'à jour', stStale: 'en retard', stRunning: 'téléchargement…', stError: 'erreur',
     stExportError: 'erreur export', stExporting: 'export fichiers…', stExportPending: 'export en attente', legacyExport: 'Export historique',
@@ -236,8 +236,7 @@ const I18N = {
     zoneHint: 'Drag the rectangle corners. Sources outside the area are skipped when coverage is known. GFS, GFS-Wave and compatible Signal K servers crop files before transfer.',
     north: 'North', south: 'South', west: 'West', east: 'East',
     save: 'Save', saved: 'Saved ✓', dirty: 'Unsaved changes',
-    deletePending: 'Data deletion pending. Retry after the transfer.',
-    deleteError: 'Could not delete the data: ',
+    deletePending: 'Data deletion pending',
     saveError: 'Error: ', downloadAll: 'Download all', download: '⬇',
     stUpToDate: 'up to date', stStale: 'behind', stRunning: 'downloading…', stError: 'error',
     stExportError: 'export error', stExporting: 'exporting files…', stExportPending: 'export pending', legacyExport: 'Legacy export',
@@ -352,7 +351,7 @@ let internetState = 'unknown'
 let legacyExportEnabled = false
 let nextAutoTickAt = null
 let expanded = new Set()
-let pendingDataDeletions = new Set()
+const requestedDataDeletions = new Set()
 let dirty = false
 let editRevision = 0
 
@@ -361,6 +360,12 @@ function renderSaveBar() {
   const note = document.getElementById('save-note')
   note.textContent = dirty ? t.dirty : ''
   note.className = dirty ? 'dirty' : ''
+}
+
+function renderPendingDeletions(names = []) {
+  document.getElementById('pending-deletions').textContent = names.length
+    ? t.deletePending + ' · ' + names.join(', ')
+    : ''
 }
 
 function escapeHtml(value) {
@@ -848,7 +853,7 @@ function renderSources() {
     })
     card.querySelector('[data-act="del"]').addEventListener('click', () => {
       if (!confirm(t.confirmDelete)) return
-      if (name && confirm(t.confirmDeleteData(name))) pendingDataDeletions.add(name)
+      if (name && confirm(t.confirmDeleteData(name))) requestedDataDeletions.add(name)
       config.sources.splice(idx, 1)
       renderSources()
       markDirty()
@@ -909,8 +914,7 @@ const saveButton = document.getElementById('btn-save')
 saveButton.addEventListener('click', async () => {
   const note = document.getElementById('save-note')
   const revision = editRevision
-  const deletions = [...pendingDataDeletions]
-  let savedSettings = false
+  const deletions = [...requestedDataDeletions]
   saveButton.disabled = true
   try {
     if (config.sources.some(s => s.remoteServer && !s.remoteModel && !sourceNames.has(s)))
@@ -918,15 +922,16 @@ saveButton.addEventListener('click', async () => {
     const r = await fetch(`${API}/settings`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(config),
+      body: JSON.stringify({ ...config, deleteSources: deletions }),
     })
     if (!r.ok) {
       const body = await r.json().catch(() => ({}))
       throw new Error(body.error || `HTTP ${r.status}`)
     }
     const saved = await r.json()
-    savedSettings = true
+    renderPendingDeletions(saved.pendingDataDeletions)
     if (revision === editRevision) {
+      requestedDataDeletions.clear()
       config.sources.forEach((s, index) => {
         if (saved.sourceNames?.[index]) sourceNames.set(s, saved.sourceNames[index])
       })
@@ -935,18 +940,9 @@ saveButton.addEventListener('click', async () => {
       renderSources()
       note.textContent = t.saved
     }
-    for (const name of deletions) {
-      const deletion = await fetch(`${API}/source-data/${encodeURIComponent(name)}`, { method: 'DELETE' })
-      if (deletion.status === 409) {
-        note.textContent += ' · ' + t.deletePending
-        return
-      }
-      if (!deletion.ok) throw new Error((await deletion.json()).error || `HTTP ${deletion.status}`)
-      pendingDataDeletions.delete(name)
-    }
     setTimeout(() => { if (!dirty && note.textContent === t.saved) note.textContent = '' }, 3000)
   } catch (e) {
-    note.textContent = savedSettings ? note.textContent + ' · ' + t.deleteError + e.message : t.saveError + e.message
+    note.textContent = t.saveError + e.message
     note.className = 'dirty'
   } finally {
     saveButton.disabled = false
@@ -1000,6 +996,7 @@ async function pollStatus() {
       return
     }
     const data = await r.json()
+    renderPendingDeletions(data.pendingDataDeletions)
     legacyExportEnabled = data.legacyExportEnabled === true
     schedulerError = data.schedulerError || null
     if (data.catalogueAccess?.state === 'pending') schedulerError = t.cataloguePending
