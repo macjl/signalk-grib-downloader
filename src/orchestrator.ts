@@ -3,6 +3,7 @@ import { Bbox, InternetState, SourceSetting, SourceStatus } from './types'
 import { candidateRuns, expectedRunStamp, fetchFingerprint, fingerprintsEqual, nextPublishAt, probeRunStamp, remoteModelName, sourceDirName, MODEL_MAX_HOURS, MODEL_SCHEDULES } from './scheduler'
 import { RemoteCatalogue, remoteZone } from './remote-catalogue'
 import { planRun, runAvailable, toDownloadSource, type Outcome } from './downloader'
+import { directCoverage, mapZone, overlap } from './coverage'
 
 // Per-source download timeout — equivalent to the previous container job
 // timeout (JOB_TIMEOUT_S = 3600). Firing it aborts the run's AbortController,
@@ -68,10 +69,10 @@ export class Orchestrator {
     if (!stamp) return true
     const latest = this.catalogue.latest(source)?.params
     if (source.remoteServer) {
-      const prior = latest as { remoteEndpoint?: string; area?: string; requestedHours?: number } | undefined
+      const prior = latest as { remoteEndpoint?: string; area?: string; requestedArea?: string; requestedHours?: number } | undefined
       return prior?.remoteEndpoint === this.remotes.get(source.remoteServer)?.endpoint &&
         prior?.requestedHours === source.remoteHours &&
-        (prior?.area === undefined || prior.area === JSON.stringify(remoteZone(this.bbox)))
+        (prior?.area === undefined || (prior.requestedArea ?? prior.area) === JSON.stringify(remoteZone(this.bbox)))
     }
     return fingerprintsEqual(latest, fetchFingerprint(source, this.bbox))
   }
@@ -180,6 +181,12 @@ export class Orchestrator {
     )
 
     try {
+      const domain = !source.remoteServer && directCoverage(source)
+      if (domain && this.bbox && !overlap(mapZone(this.bbox), domain).length) {
+        st.lastOutcome = 'unavailable'
+        onProgress('The model does not cover the requested map area')
+        return true
+      }
       // Check the provider and existing receipt before opening an upstream body.
       // A generic 404 must never erase a committed acquisition's identity.
       await this.catalogue.check(controller.signal)
@@ -194,7 +201,7 @@ export class Orchestrator {
         st.lastProbeRun = candidate?.stamp ?? null
         if (!candidate) {
           st.lastOutcome = 'unavailable'
-          onProgress('No complete matching GRIB dataset on the remote server')
+          onProgress('No complete matching GRIB dataset covering the requested map area on the remote server')
           return true
         }
         if (((expectedSubset === 'area' || expectedSubset === 'both') && !candidate.selection?.bbox) ||

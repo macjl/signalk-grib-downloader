@@ -3,6 +3,7 @@ import { setTimeout as delay } from 'node:timers/promises'
 import { remoteModelName, runStamp, sourceDirName } from './scheduler'
 import type { Bbox, RemoteServerSetting, SourceSetting } from './types'
 import type { RunPlan } from './downloader'
+import { mapZone, overlap, validZone, type Zone } from './coverage'
 
 const api = '/plugins/signalk-forecast-dataset-provider'
 const uuid = /^[a-f\d]{8}(?:-[a-f\d]{4}){3}-[a-f\d]{12}$/i
@@ -10,13 +11,13 @@ const hash = /^[a-f\d]{64}$/
 const assetName = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$/
 export const remoteId = /^[a-z0-9][a-z0-9-]{0,31}$/
 
-type Zone = [number, number, number, number]
 type Field = { parameter: string; level?: { type: string; value?: number; unit?: string } }
 type Selection = { bbox?: Zone; fields?: Field[]; from?: string; to?: string }
 interface ExportOperation {
   operation: string
   href?: string
   selectors?: string[]
+  pendingSelectors?: string[]
   fields?: Field[]
   forecastInterval?: { stepSeconds: number; maxHours: number }
 }
@@ -28,8 +29,10 @@ interface Horizon {
 }
 interface Availability {
   area: boolean
+  bounds?: Zone
   horizon?: Horizon
-  reason?: 'processing-unavailable' | 'write-required'
+  reason?: 'processing-unavailable' | 'write-required' | 'outside-coverage' | 'split-area' | 'coverage-pending'
+  areaClipped?: boolean
 }
 interface Asset {
   id: string
@@ -65,10 +68,11 @@ export interface RemoteCandidate {
   operation?: string
   exactForecastEndpoints?: boolean
   requestedHours?: number
+  requestedArea?: Zone
 }
 interface Job { id: string; href: string; state: string; result?: Dataset }
 class RemoteError extends Error {
-  constructor(readonly status: number, readonly code?: string) {
+  constructor(readonly status: number, readonly code?: string, readonly retryAfter?: string | null) {
     super(`Remote Signal K: HTTP ${status}${code ? ' (' + code + ')' : ''}`)
   }
 }
@@ -81,7 +85,12 @@ export function normalizeRemoteUrl(value: string): string {
   return parsed.href.replace(/\/$/, '')
 }
 export const remoteZone = (bbox?: Bbox): Zone | undefined =>
-  bbox ? [bbox.lonMin, bbox.latMin, bbox.lonMax, bbox.latMax] : undefined
+  bbox ? mapZone(bbox) : undefined
+
+function availableArea(dataset: Dataset, requested?: Zone): Zone[] | undefined {
+  if (!requested) return
+  return validZone(dataset.bounds) ? overlap(requested, dataset.bounds) : [requested]
+}
 
 export function validRemoteModel(value: unknown): value is string {
   return typeof value === 'string' && value.length <= 512 && value.trim().length > 0 &&
@@ -223,7 +232,7 @@ export class RemoteCatalogue {
     if (!response.ok) {
       const error = await response.json().catch(() => undefined) as { code?: unknown } | undefined
       const code = typeof error?.code === 'string' && /^[A-Z0-9_]{1,60}$/.test(error.code) ? error.code : undefined
-      throw new RemoteError(response.status, code)
+      throw new RemoteError(response.status, code, response.headers.get('Retry-After'))
     }
     return await response.json() as T
   }
@@ -283,12 +292,13 @@ export class RemoteCatalogue {
     }
   }
 
-  private async availability(dataset: Dataset, signal: AbortSignal): Promise<Availability & { operation?: ExportOperation }> {
+  private async availability(dataset: Dataset, signal: AbortSignal, checkArea: boolean): Promise<Availability & { operation?: ExportOperation }> {
     const operation = dataset.capabilities?.operations?.find(op => op.operation === 'export')
     if (!operation) return { area: false }
     const area = operation.selectors?.includes('bbox') ?? false
+    const pendingArea = checkArea && operation.pendingSelectors?.includes('bbox')
     const horizon = forecastHorizon(dataset, operation)
-    if (!area && !horizon) return { area: false }
+    if (!area && !horizon && !pendingArea) return { area: false }
     if (!operation.href) return { area: false, reason: 'processing-unavailable' }
     if (operation.href !== versionPath(dataset) + '/requests')
       throw new Error('Unexpected remote processor link')
@@ -303,6 +313,7 @@ export class RemoteCatalogue {
     if (!Array.isArray(status?.operations)) throw new Error('Invalid remote processing status')
     if (status.processing !== 'available' || !status.operations.includes('export'))
       return { area: false, reason: 'processing-unavailable' }
+    if (pendingArea) return { area: false, horizon, reason: 'coverage-pending' }
     if (!this.token()) return { area: false, reason: 'write-required' }
     try {
       const login = await this.request<{ status?: string; userLevel?: string }>('/skServer/loginStatus', signal)
@@ -316,20 +327,32 @@ export class RemoteCatalogue {
     return { area, horizon, operation }
   }
 
-  async preview(model: string, resolution: string | undefined, signal: AbortSignal): Promise<Availability | null> {
+  async preview(model: string, resolution: string | undefined, signal: AbortSignal, requested?: Zone): Promise<Availability | null> {
     const dataset = await this.match(model, resolution, signal)
     if (!dataset) return null
-    const { area, horizon, reason } = await this.availability(dataset, signal)
-    return { area, horizon, reason }
+    const coverage = validZone(dataset.bounds) ? { bounds: dataset.bounds } : {}
+    const areas = availableArea(dataset, requested)
+    if (areas?.length === 0) return { ...coverage, area: false, reason: 'outside-coverage' }
+    const { area, horizon, reason } = await this.availability(dataset, signal, Boolean(requested))
+    if (area && areas && areas.length > 1) return { ...coverage, area: false, reason: 'split-area' }
+    const clipped = area && areas?.[0]?.some((value, i) => value !== requested?.[i])
+    return { ...coverage, area, horizon, reason, ...(clipped ? { areaClipped: true } : {}) }
   }
 
   async find(source: SourceSetting, bbox: Bbox | undefined, signal: AbortSignal): Promise<RemoteCandidate | undefined> {
     const dataset = await this.match(remoteModelName(source), source.resolution, signal)
     if (!dataset) return
-    const { area, horizon, operation } = await this.availability(dataset, signal)
+    const requestedArea = remoteZone(bbox)
+    const areas = availableArea(dataset, requestedArea)
+    if (areas?.length === 0) return
+    const { area, horizon, operation, reason } = await this.availability(dataset, signal, Boolean(requestedArea))
+    if (reason === 'coverage-pending') throw new Error('Remote GRIB coverage is still being analyzed')
     const selection: Selection = {}
     const exactForecastEndpoints = Boolean(operation?.forecastInterval || horizon?.leads)
-    if (area && bbox) selection.bbox = remoteZone(bbox)
+    if (area && areas) {
+      if (areas.length > 1) throw new Error('Coverage intersects the map in two areas across the antimeridian; select one side at a time')
+      selection.bbox = areas[0]
+    }
     if (horizon && source.remoteHours !== undefined) {
       const { minHours, maxHours, stepHours = 1, leads } = horizon
       if (leads && source.remoteHours < minHours)
@@ -350,6 +373,7 @@ export class RemoteCatalogue {
       dataset,
       stamp: runStamp(runDate(dataset)!),
       requestedHours: source.remoteHours,
+      ...(selection.bbox?.some((value, i) => value !== requestedArea?.[i]) ? { requestedArea } : {}),
       ...(selection.bbox || selection.from ? { selection, operation: operation!.href, exactForecastEndpoints } : {})
     }
   }
@@ -361,17 +385,33 @@ export class RemoteCatalogue {
     return { remoteEndpoint: this.endpoint, remoteId: dataset.id, remoteVersion: dataset.version,
       mode: selection ? 'subset' : 'complete',
       ...(selection?.bbox ? { area: JSON.stringify(selection.bbox) } : {}),
+      ...(candidate.requestedArea ? { requestedArea: JSON.stringify(candidate.requestedArea) } : {}),
       ...(selection?.from ? { from: selection.from, to: selection.to } : {}),
       ...(selection?.fields ? { fields: selection.fields } : {}),
       ...(requestedHours === undefined ? {} : { requestedHours }) }
   }
 
+  private async startCrop(candidate: RemoteCandidate, signal: AbortSignal): Promise<Job> {
+    const waiting = AbortSignal.any([signal, AbortSignal.timeout(150_000)])
+    for (;;) {
+      try {
+        return await this.request<Job>(candidate.operation!, waiting, {
+          operation: 'export', output: { format: 'grib2', layout: 'single-file' }, selection: candidate.selection
+        })
+      } catch (error) {
+        if (!(error instanceof RemoteError && error.status === 429 && error.code === 'PROCESSING_BUSY')) throw error
+        const raw = error.retryAfter ?? ''
+        const wait = /^\d+$/.test(raw) ? Number(raw) * 1000 : Date.parse(raw) - Date.now()
+        const backoff = Math.max(250, Number.isFinite(wait) ? wait : 1000) + Math.random() * 250
+        await delay(Math.min(backoff, 150_000), undefined, { signal: waiting })
+      }
+    }
+  }
+
   private async crop(candidate: RemoteCandidate, signal: AbortSignal): Promise<Dataset> {
-    const active = AbortSignal.any([signal, AbortSignal.timeout(180_000)])
     const selection = candidate.selection!
-    let job = await this.request<Job>(candidate.operation!, active, {
-      operation: 'export', output: { format: 'grib2', layout: 'single-file' }, selection
-    })
+    let job = await this.startCrop(candidate, signal)
+    const active = AbortSignal.any([signal, AbortSignal.timeout(180_000)])
     const href = uuid.test(job?.id) ? `${api}/requests/${job.id}` : undefined
     if (!href || job.href !== href) throw new Error('Invalid remote processor job link')
     while (job.state === 'running') {

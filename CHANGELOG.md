@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.7.0-beta.4] - 2026-11-20
+
+- Show configured model coverage and the requested area on the map.
+- Clip remote GRIB requests to the known intersection and skip sources with
+  no overlap. Skip out-of-area direct regional products.
+- Retry when all remote processing slots are busy.
+
 ## [0.7.0-beta.3] - 2026-11-20
 
 - Use verified GRIB validity times for the remote forecast slider and cutoff,

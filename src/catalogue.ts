@@ -8,6 +8,7 @@ import { SourceSetting } from './types'
 import { fingerprintsEqual, sourceDirName } from './scheduler'
 import { readAsset, RunPlan, RemoteAsset } from './downloader'
 import { LegacyGribExporter, LegacyExportStatus } from './legacy-export'
+import { directCoverage } from './coverage'
 
 const API = '/plugins/signalk-forecast-dataset-provider'
 const PRODUCER = 'signalk-grib-downloader'
@@ -262,10 +263,11 @@ export class CataloguePublisher {
       if (matches.length) stage = matches[0]
       else {
         const stamp = plan.stamp, run = `${stamp.slice(0, 4)}-${stamp.slice(4, 6)}-${stamp.slice(6, 8)}T${stamp.slice(9)}:00:00Z`
+        const bounds = !plan.remote && directCoverage(source)
         stage = await this.request('/publications', 'POST', signal, {
           kind: 'forecast', format: 'grib2', producer: PRODUCER,
           ...((source.retentionDays ?? 0) > 0 ? { expiresInSeconds: source.retentionDays! * 86_400 } : {}),
-          metadata: { model: source.model.toUpperCase(), run, ...plan.remote?.metadata,
+          metadata: { model: source.model.toUpperCase(), run, ...(bounds ? { bounds } : {}), ...plan.remote?.metadata,
             name: (source.remoteModel
               ? `Signal K ${source.remoteServer} · ${source.remoteModel}${source.resolution ? ' ' + source.resolution : ''} · ${stamp}`
               : `${sourceDirName(source)} ${stamp}`).slice(0, 512) },

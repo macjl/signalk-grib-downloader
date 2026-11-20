@@ -233,6 +233,15 @@ selectors, the remote processing status and the configured token's write access.
 The webapp shows whether the download will use the map area, a forecast
 interval, or the full GRIB. The refresh button updates this check.
 
+When the dataset reports bounds, the downloader skips an empty intersection
+with the map. With a compatible processor it requests only the intersection.
+A server still analyzing the grid does not trigger a full download. The
+downloader also skips out-of-area direct regional products using published
+model bounds. Direct AROME, ARPEGE and ICON-EU use full-domain files when the
+area overlaps. The direct NOAA sources use NOAA's spatial filter.
+On the map, dashed outlines show the known bounds of the configured models.
+Select a model in the map legend to frame its coverage and your download area.
+
 When a dataset provides a model run and the catalogue advertises time
 selection, the downloader can request all available fields up to a given lead
 hour. It shows a slider when the dataset reports forecast coverage, or a lead

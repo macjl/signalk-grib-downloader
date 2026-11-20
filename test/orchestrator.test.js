@@ -38,6 +38,18 @@ test('auto tick is suppressed while offline', async () => {
   assert.strictEqual(orch.status()[0].lastOutcome, null)
 })
 
+test('direct regional forecasts outside the requested area skip acquisition', async () => {
+  const source = { model: 'arome', resolution: '0025', autoDownload: false }
+  const catalogue = {
+    ...publisher(),
+    check: async () => assert.fail('An out-of-area source must not start an acquisition')
+  }
+  const orch = new Orchestrator([source], catalogue, () => {}, () => {},
+    { lonMin: -45, lonMax: -20, latMin: 36, latMax: 46 })
+  assert.equal(await orch.downloadSource(source), true)
+  assert.equal(orch.status()[0].lastOutcome, 'unavailable')
+})
+
 // Regression: signalk-internet publishes 'captive' behind a captive
 // portal. It used to fall back to 'unknown', which behaves as 'online' —
 // so automatic downloads started, fetching the portal's login page.
