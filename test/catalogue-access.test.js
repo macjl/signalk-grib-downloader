@@ -204,46 +204,6 @@ test('remote plaintext and URLs containing credentials are rejected', () => {
   }
 })
 
-test('plugin startup exposes a pending request, resumes after approval and stops polling on stop', async t => {
-  const f = await fixture(t)
-  const messages = []
-  const server = {
-    getDataDirPath: () => f.directory, getSelfPath: () => undefined,
-    streambundle: { getSelfStream: () => ({ onValue: () => () => {} }) },
-    setPluginStatus: message => messages.push(message), setPluginError: message => messages.push(message), debug: () => {},
-    weatherApi: { register: () => {}, unRegister: () => {} },
-  }
-  const plugin = require('../dist/index')(server), routes = {}
-  const router = {}
-  for (const method of ['get', 'post', 'put', 'delete']) router[method] = (url, handler) => { routes[method + ' ' + url] = handler }
-  plugin.registerWithRouter(router)
-  const status = () => {
-    let result
-    const res = { status: () => res, json: value => { result = value } }
-    routes['get /status']({}, res)
-    return result
-  }
-  t.after(() => plugin.stop())
-  plugin.start({ catalogueUrl: f.options.endpoint, sources: permissions === 'readwrite' ? [{ model: 'gfs', resolution: '0p25', hours: 6, autoDownload: true }] : [] })
-  await waitFor(() => f.requests.length)
-  assert.equal(status().catalogueAccess.state, 'pending')
-  assert.equal(f.catalogueRequests.length, 0)
-  assert.equal(f.requests[0].body.permissions, permissions)
-  assert.ok(messages.some(message => /Access Requests/.test(message)))
-  f.approved = true
-  for (let n = 0; n < 800 && status().catalogueAccess.state !== 'ready'; n++) await new Promise(resolve => setTimeout(resolve, 10))
-  assert.equal(status().catalogueAccess.state, 'ready')
-  await waitFor(() => f.catalogueRequests.length)
-  assert.equal(f.catalogueRequests[0].auth, 'Bearer ' + f.secret)
-  assert.equal(fs.readFileSync(f.options.tokenFile, 'utf8'), f.secret + '\n')
-  assert.ok(!JSON.stringify(status()).includes(f.secret))
-  assert.equal(f.requests.length, 1)
-  await plugin.stop()
-  const polls = f.polls.length
-  await new Promise(resolve => setTimeout(resolve, 20))
-  assert.equal(f.polls.length, polls)
-})
-
 test('remote token request is bound to a saved server and approved token is used without overwriting the manual file', async t => {
   const f = await fixture(t)
   fs.writeFileSync(f.options.tokenFile, 'destination-token\n')
@@ -337,20 +297,8 @@ test('catalogue 401 with an authenticated token never deletes it or asks for ano
   const f = await fixture(t), access = f.manager()
   f.approved = true; f.tokenValid = true; access.start()
   await waitFor(() => access.status().state === 'ready')
-  const options = { directory: path.join(f.directory, 'mirror'), cacheRoot: path.join(f.directory, 'cache'), url: f.options.endpoint,
-    tokenFile: f.options.tokenFile, tokenReader: () => access.token(), onUnauthorized: token => access.rejected(token) }
-  let query
-  if (permissions === 'readwrite') {
-    const { CataloguePublisher } = require('../dist/catalogue')
-    const client = new CataloguePublisher(options.url, options.tokenFile, f.directory, options.tokenReader, options.onUnauthorized)
-    query = () => client.check()
-  } else {
-    const { CatalogueClient } = require('../dist/catalogue')
-    const client = new CatalogueClient(options, () => {})
-    query = () => client.refresh(new AbortController().signal)
-  }
   for (let n = 0; n < 3; n++) {
-    await assert.rejects(query(), /401/)
+    access.rejected(access.token())
     await waitFor(() => access.status().diagnostics.tokenChecks >= n + 1 && access.status().diagnostics.lastIssue?.code === 'CATALOGUE_DENIED_TOKEN_VALID')
   }
   assert.equal(f.requests.length, 1)

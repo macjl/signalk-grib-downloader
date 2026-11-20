@@ -2,7 +2,7 @@ const fs = require('node:fs')
 const os = require('node:os')
 const path = require('node:path')
 const http = require('node:http')
-const assert = require('node:assert/strict')
+const { Readable } = require('node:stream')
 const { createHash, randomUUID } = require('node:crypto')
 const { CataloguePublisher } = require('../../dist/catalogue')
 const { toDownloadSource, planRun } = require('../../dist/downloader')
@@ -27,74 +27,102 @@ async function server(t, handler) {
 async function fixture(t, options = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'direct-grib-'))
   t.after(() => fs.rmSync(root, { recursive: true, force: true }))
-  const tokenFile = path.join(root, 'token')
-  fs.writeFileSync(tokenFile, 'test-readwrite-token', { mode: 0o600 })
   const source = options.source ?? { model: 'gfs', resolution: '0p25', hours: 3 }
   const staged = new Map(), datasets = new Map(), bodies = new Map(), declarations = []
   const flags = { disabled: false, denied: false, failAsset: null, loseCreate: false, loseCommit: false, loseUpload: false, conflict: false, corruptReceipt: false }
-  const provider = await server(t, async (req, res) => {
-    const json = (status, value) => { res.writeHead(status, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(value)) }
-    if (flags.disabled) { res.writeHead(404); return res.end('Plugin temporarily unavailable') }
-    if (flags.denied || req.headers.authorization !== 'Bearer test-readwrite-token') return json(401, {})
-    const [kind, id, action, assetId] = req.url.replace(API + '/', '').split('/')
-    if (kind === 'status') return json(200, { contractVersion: '0.1' })
-    if (kind === 'publications' && !id && req.method === 'GET') return json(200, Object.fromEntries(staged))
-    if (kind === 'publications' && !id && req.method === 'POST') {
-      let body = ''; for await (const chunk of req) body += chunk
-      const declaration = JSON.parse(body), stage = { id: randomUUID(), datasetId: randomUUID(), declaration, uploaded: {} }
-      declarations.push(declaration); staged.set(stage.id, stage)
-      if (flags.loseCreate) { flags.loseCreate = false; return res.destroy() }
-      return json(201, stage)
-    }
-    if (kind === 'publications') {
-      const stage = staged.get(id)
-      if (!stage) return json(404, { code: 'PUBLICATION_NOT_FOUND' })
-      if (req.method === 'DELETE') { staged.delete(id); res.writeHead(204); return res.end() }
-      if (req.method === 'GET') return json(200, stage)
-      if (action === 'assets') {
-        assert.equal(req.headers['content-length'], undefined, 'unknown-size upload is chunked')
-        if (stage.uploaded[assetId]) return json(409, { code: 'ASSET_ALREADY_UPLOADED' })
-        if (options.beforeAssetRead) await options.beforeAssetRead(req)
-        const chunks = []; for await (const chunk of req) chunks.push(chunk)
-        if (flags.failAsset === assetId) return json(503, {})
-        const bytes = Buffer.concat(chunks)
-        const receipt = { id: assetId, size: bytes.length, sha256: hash(bytes), mediaType: 'application/octet-stream' }
-        stage.uploaded[assetId] = receipt; bodies.set(assetId, bytes)
-        if (flags.loseUpload) { flags.loseUpload = false; return res.destroy() }
-        return json(201, flags.corruptReceipt ? { ...receipt, sha256: '0'.repeat(64) } : receipt)
-      }
-      if (action === 'commit') {
-        if (stage.declaration.assets.some(a => !stage.uploaded[a.id])) return json(409, { code: 'INCOMPLETE_PUBLICATION' })
-        const committed = { id: stage.datasetId, version: hash(Buffer.from(JSON.stringify(stage.uploaded))), assets: Object.values(stage.uploaded), ...stage.declaration }
-        committed.assets = Object.values(stage.uploaded)
-        datasets.set(committed.id, committed); staged.delete(id)
-        if (flags.loseCommit) { flags.loseCommit = false; return res.destroy() }
-        return json(201, committed)
-      }
-    }
-    if (kind === 'datasets') {
-      if (!datasets.has(id)) return json(404, { code: 'DATASET_NOT_FOUND' })
-      const parts = req.url.replace(API + '/', '').split('/')
-      if (action === 'versions' && parts[4] === 'assets') {
-        const dataset = datasets.get(id), bytes = bodies.get(parts[5])
-        if (parts[3] !== dataset.version || !dataset.assets.some(a => a.id === parts[5]) || !bytes) return json(404, {})
-        res.writeHead(200, { 'Content-Length': bytes.length }); return res.end(bytes)
-      }
-      if (req.method === 'DELETE') {
-        if (flags.conflict) return json(409, { code: 'DATASET_BUSY' })
-        datasets.delete(id); res.writeHead(204); return res.end()
-      }
-      return json(200, datasets.get(id))
-    }
-    return json(404, {})
-  })
+  const calls = []
+  const fault = (status, code) => Object.assign(new Error(code ? `${status} (${code})` : String(status)), { status, code })
+  const call = (method, url) => {
+    calls.push({ method, url })
+    if (flags.disabled) throw fault(404)
+    if (flags.denied) throw fault(503)
+  }
+  const stageFor = id => {
+    const stage = staged.get(id)
+    if (!stage) throw fault(404, 'PUBLICATION_NOT_FOUND')
+    return stage
+  }
+  const datasetFor = (id, version) => {
+    const dataset = datasets.get(id)
+    if (!dataset || (version && dataset.version !== version)) throw fault(404, 'DATASET_NOT_FOUND')
+    return dataset
+  }
+  const service = {
+    contractVersion: '0.1',
+    publications() {
+      call('GET', '/publications')
+      return structuredClone(Object.fromEntries(staged))
+    },
+    publication(id) {
+      call('GET', `/publications/${id}`)
+      return structuredClone(stageFor(id))
+    },
+    begin(declaration) {
+      call('POST', '/publications')
+      const stage = { id: randomUUID(), datasetId: randomUUID(), declaration, uploaded: {} }
+      declarations.push(declaration)
+      staged.set(stage.id, stage)
+      if (flags.loseCreate) { flags.loseCreate = false; throw fault(503) }
+      return structuredClone(stage)
+    },
+    async upload(id, asset, body) {
+      call('PUT', `/publications/${id}/assets/${asset}`)
+      const stage = stageFor(id)
+      if (stage.uploaded[asset]) throw fault(409, 'ASSET_ALREADY_UPLOADED')
+      if (options.beforeAssetRead) await options.beforeAssetRead(body)
+      const chunks = []
+      for await (const chunk of body) chunks.push(chunk)
+      if (flags.failAsset === asset) throw fault(503)
+      const bytes = Buffer.concat(chunks)
+      const receipt = { id: asset, size: bytes.length, sha256: hash(bytes), mediaType: 'application/octet-stream' }
+      stage.uploaded[asset] = receipt
+      bodies.set(asset, bytes)
+      if (flags.loseUpload) { flags.loseUpload = false; throw fault(503) }
+      return flags.corruptReceipt ? { ...receipt, sha256: '0'.repeat(64) } : structuredClone(receipt)
+    },
+    commit(id) {
+      call('POST', `/publications/${id}/commit`)
+      const stage = stageFor(id)
+      if (stage.declaration.assets.some(a => !stage.uploaded[a.id])) throw fault(409, 'INCOMPLETE_PUBLICATION')
+      const committed = { ...stage.declaration, id: stage.datasetId, version: hash(Buffer.from(JSON.stringify(stage.uploaded))), assets: Object.values(stage.uploaded) }
+      datasets.set(committed.id, committed)
+      staged.delete(id)
+      if (flags.loseCommit) { flags.loseCommit = false; throw fault(503) }
+      return structuredClone(committed)
+    },
+    abort(id) {
+      call('DELETE', `/publications/${id}`)
+      stageFor(id)
+      staged.delete(id)
+    },
+    dataset(id, version) {
+      call('GET', `/datasets/${id}`)
+      return structuredClone(datasetFor(id, version))
+    },
+    remove(id) {
+      call('DELETE', `/datasets/${id}`)
+      datasetFor(id)
+      if (flags.conflict) throw fault(409, 'DATASET_BUSY')
+      datasets.delete(id)
+    },
+    readAsset(id, version, asset) {
+      call('GET', `/datasets/${id}/versions/${version}/assets/${asset}`)
+      if (!datasetFor(id, version).assets.some(a => a.id === asset)) throw fault(404, 'ASSET_NOT_FOUND')
+      return Readable.from([bodies.get(asset)])
+    },
+  }
+  const registry = (globalThis[Symbol.for('macjl.forecast-datasets.catalogues.v1')] ??= new Map())
+  registry.set(root, service)
+  t.after(() => registry.delete(root))
+  const provider = { calls }
   const bytes = options.bytes ?? grib()
   const upstream = await server(t, options.handler ?? ((req, res) => { if (req.method === 'HEAD') return res.end(); res.end(bytes) }))
   const descriptor = toDownloadSource(source, options.bbox)
   descriptor.base = upstream.base
   const plan = (date = candidateRuns(source.model)[0]) => planRun(descriptor, date)
-  const publisher = legacyExport => new CataloguePublisher(provider.base, tokenFile, root, undefined, undefined, legacyExport)
-  return { root, tokenFile, source, provider, upstream, bytes, descriptor, plan, publisher, flags, staged, datasets, bodies, declarations }
+  const dataDir = path.join(root, 'downloader')
+  const publisher = legacyExport => new CataloguePublisher(dataDir, () => registry.get(root), legacyExport)
+  return { root, dataDir, source, provider, upstream, bytes, descriptor, plan, publisher, flags, staged, datasets, bodies, declarations }
 }
 async function waitFor(check) {
   const deadline = Date.now() + 5000

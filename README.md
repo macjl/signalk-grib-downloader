@@ -2,15 +2,16 @@
 
 Signal K plugin that **downloads GRIB forecasts and publishes them as
 `forecastDatasets`** through
-[Forecast Dataset Provider](https://github.com/macjl/signalk-forecast-dataset-provider)'s
-experimental HTTP contract 0.1 with its streaming extension (stable provider 0.1.0 or later).
+[Forecast Dataset Provider](https://github.com/macjl/signalk-forecast-dataset-provider).
+The Downloader publishes to the catalogue on its own Signal K server. It can
+use forecasts from another Signal K server as a download source.
 Automatic publication follows each model run;
 manual downloads remain available for intermittent connections.
 
-**Upgrading from 0.3.x:** update Weather Provider to 0.7.0 in the same maintenance
-window and install Forecast Dataset Provider 0.1.0. The complete chain requires
-Node.js 24+. Follow the [coordinated upgrade guide](docs/upgrading.md) for access
-approval, existing-file handling and verification.
+**Upgrade together:** update Forecast Dataset Provider to 0.4.0 or later before
+updating Downloader. If you use GRIB Weather Provider, update it to 0.8.0 or
+later as well. See the [historical upgrade guide](docs/upgrading.md) for the
+transition from 0.3.x to catalogue-based releases.
 
 ## What it does
 
@@ -159,40 +160,24 @@ not in the plugin config panel:
 
 Settings are stored in the plugin's data directory (`settings.json`), written
 only through the webapp — the admin config panel only holds infrastructure
-(catalogue connection and scheduler settings).
+(remote Signal K sources, file export and scheduler settings).
 
 ## Catalogue connection
 
-Requires **Signal K 2.34.x or later within 2.x, Node 20.19+**, and an enabled
-**Forecast Dataset Provider 0.1.0 or later**, with streamed publications. The previous Weather Provider dependency is
-replaced by Forecast Dataset Provider. Weather API decoding remains a separate
-consumer responsibility; provider 0.1 does not decode, index or subset GRIBs.
-Publication to the catalogue is mandatory for automatic and manual downloads.
-Other plugins consume published datasets through the catalogue API.
+Requires **Signal K 2.34.x or later within 2.x**, **Node.js 22 or later**
+and **Forecast Dataset Provider 0.4.0 or later** on the same server.
+Other plugins can consume published datasets through the catalogue API.
 
-In Plugin Config:
+The Downloader publishes to the Forecast Dataset Provider running in the same
+Signal K instance. It starts downloading when a compatible provider is ready.
+Local publication needs no URL or token. A Signal K server configured as a
+download source still has its own URL and credentials.
 
-- `catalogueUrl`: Signal K server base URL, default `http://127.0.0.1:3000`.
-  Adjust for another port or deployment prefix. Remote endpoints require HTTPS.
-- `catalogueTokenFile`: absolute path to a **readwrite application token**,
-  default `<plugin data directory>/catalogue-token`. When the file is missing,
-  the plugin automatically requests access. In the catalogue server's Signal K
-  Admin UI, open **Security → Access Requests** and approve the
-  **signalk-grib-downloader** request with **readwrite** permissions. The plugin
-  saves the approved token with permissions `0600` and resumes automatic work.
-  No file needs to be created manually. Pending requests survive plugin restarts;
-  a denied request requires a plugin restart to submit a new one.
-
-Existing token files are reused and reread for rotation. After a catalogue HTTP
-401, automatically issued tokens are checked through Signal K's `/loginStatus`.
-A fresh approval is requested only for a confirmed invalid credential; a valid
-token or an unavailable/inconclusive check is preserved. Externally
-configured tokens are preserved for their owner to rotate. Token contents and
-access request IDs never enter the webapp, status responses or logs. On a remote
-catalogue, approve the request on that server and enable device access requests
-there. Configure a separate token file when switching catalogue servers.
-
-For repeated requests, see [redacted access diagnostics](docs/catalogue-access-diagnostics.md).
+On upgrade, the previous destination URL and token settings are ignored.
+Receipts from the former default loopback catalogue remain usable. If the
+Downloader previously published to another catalogue, its datasets and
+unfinished publications remain on that server. New acquisitions and their
+receipts go to the local catalogue.
 
 The provider owns acquisition originals, including unfinished publications and
 archives. The downloader retains settings and a private publication journal,
@@ -215,8 +200,7 @@ on that server. The downloader saves the approved token with file permissions
 request survives a restart. Use **Retry request** after a denial.
 
 You can also enter a path to an existing token file. The approved managed token
-takes precedence for that server and the existing file is preserved. The
-destination catalogue has a separate credential. Loopback URLs can use HTTP
+takes precedence for that server and the existing file is preserved. Loopback URLs can use HTTP
 for tests. The remote server must provide the Forecast Dataset catalogue API.
 Read-only access is enough to retrieve complete datasets. Cropping requires
 read/write access to submit processing jobs.
@@ -330,14 +314,12 @@ These are independent copies: **each GRIB is stored in the provider and in the
 export directory, approximately doubling GRIB disk usage for the same retained
 runs**. The config panel explains this cost, and the webapp displays a warning
 while export is enabled. Other caches and temporary staging use additional
-space. Export also requires a provider-to-export transfer (including network
-traffic if the catalogue is remote). The
-Forecast Dataset Provider and catalogue authorization remain required. This
+space. Export copies bytes from the local Forecast Dataset Provider. This
 option provides a compatibility bridge, not standalone acquisition without a
 catalogue. Deleting catalogue acquisitions does not delete existing exported
 files; removing those copies remains an explicit filesystem operation.
 
-An unavailable provider or invalid token reports an error before any upstream
+An unavailable provider reports an error before any upstream
 body is opened. The next automatic check or manual trigger retries the acquisition.
 Automatic work still obeys offline, captive and metered-connection settings.
 
@@ -378,7 +360,7 @@ Automatic work still obeys offline, captive and metered-connection settings.
   A confirmed deletion in the webapp is saved with the settings and runs
   after active transfers finish. Pending deletions resume after restart.
   Plugin stop
-  aborts both HTTP sides and waits for the active transfer.
+  aborts the upstream stream and catalogue upload and waits for the active transfer.
 
 A source has a one-hour acquisition timeout; upstream streams also have a
 120-second inactivity timeout. GFS/Météo-France use bounded stream buffers.
@@ -387,7 +369,6 @@ variable at a time, with a 128 MiB compressed and 512 MiB decompression ceiling
 per fragment, rather than buffering an entire timestep or model run.
 
 Keep the publication journal with the plugin's settings when moving servers.
-Changing catalogue servers requires preserving that old journal separately.
 Do not edit the provider's managed storage or delete journal files to implement
 retention.
 
@@ -409,8 +390,8 @@ For integration with the actual provider source (build it first):
 FORECAST_DATASET_PROVIDER_PATH=/absolute/path/to/signalk-forecast-dataset-provider npm test
 ```
 
-Without that variable, the four cross-plugin HTTP tests explicitly skip; the
-normal suite still exercises the producer against a fault-injecting HTTP server.
+Without that variable, the cross-plugin tests explicitly skip; the
+normal suite still exercises the producer against a local catalogue test service.
 See [sandbox verification](docs/sandbox-verification.md) for the live checks.
 
 ## License

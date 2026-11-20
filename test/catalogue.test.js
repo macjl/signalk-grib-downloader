@@ -3,7 +3,6 @@ const { test } = require('node:test')
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const path = require('node:path')
-const { CataloguePublisher } = require('../dist/catalogue')
 const { Orchestrator } = require('../dist/orchestrator')
 const { fixture, waitFor, grib } = require('./fixtures/http.cjs')
 
@@ -20,7 +19,7 @@ test('streams unknown-size assets directly with hashes, complete receipts and sp
   for (const key of ['bounds', 'fields', 'inventory']) assert.equal(declaration.metadata[key], undefined)
   for (const asset of plan.assets) assert.deepEqual(f.bodies.get(asset.id), f.bytes)
   assert.ok(f.upstream.calls.every(c => !c.authorization), 'catalogue token never reaches upstream')
-  assert.deepEqual(fs.readdirSync(f.root).sort(), ['catalogue-publications', 'token'])
+  assert.deepEqual(fs.readdirSync(f.dataDir).sort(), ['catalogue-publications'])
   const count = f.upstream.calls.length
   await publish(f)
   assert.equal(f.upstream.calls.length, count, 'committed receipt avoids upstream work')
@@ -89,7 +88,7 @@ for (const flag of ['loseCreate', 'loseUpload', 'loseCommit']) {
 
 test('generic 404 on a committed acquisition preserves its receipt and cannot duplicate it', async t => {
   const f = await fixture(t), ref = await publish(f)
-  const file = path.join(f.root, 'catalogue-publications/gfs-0p25.json'), before = fs.readFileSync(file, 'utf8')
+  const file = path.join(f.dataDir, 'catalogue-publications/local/gfs-0p25.json'), before = fs.readFileSync(file, 'utf8')
   f.flags.disabled = true
   await assert.rejects(publish(f), /404/)
   assert.equal(fs.readFileSync(file, 'utf8'), before)
@@ -102,7 +101,7 @@ test('generic 404 during staging recovery or deletion never discards the acquisi
   const f = await fixture(t), plan = f.plan()
   f.flags.failAsset = plan.assets[1].id
   await assert.rejects(publish(f))
-  const file = path.join(f.root, 'catalogue-publications/gfs-0p25.json'), before = fs.readFileSync(file, 'utf8')
+  const file = path.join(f.dataDir, 'catalogue-publications/local/gfs-0p25.json'), before = fs.readFileSync(file, 'utf8')
   f.flags.disabled = true
   await assert.rejects(publish(f), /404/)
   await assert.rejects(f.publisher().removeSource(f.source), /404/)
@@ -206,15 +205,30 @@ test('stopping aborts both sides of a stalled direct stream and waits for comple
 
 test('legacy committed journals remain usable without any local GRIB or completion marker', async t => {
   const f = await fixture(t), first = await publish(f)
-  const file = path.join(f.root, 'catalogue-publications/gfs-0p25.json')
+  const file = path.join(f.dataDir, 'catalogue-publications/local/gfs-0p25.json')
   const journal = JSON.parse(fs.readFileSync(file))
   const record = journal.records[0]
   record.assets = Object.values(record.received); delete record.received; delete record.acquisitionId
-  fs.writeFileSync(file, JSON.stringify(journal))
+  const oldFile = path.join(f.dataDir, 'catalogue-publications/gfs-0p25.json')
+  fs.writeFileSync(oldFile, JSON.stringify(journal))
+  fs.unlinkSync(file)
   assert.deepEqual(await publish(f, f.publisher()), first)
   assert.equal(f.upstream.calls.length, 2)
 })
 
-test('catalogue endpoints reject credentials, query strings and unencrypted remote transport', () => {
-  for (const url of ['http://remote.test', 'https://user:secret@remote.test', 'https://remote.test?token=secret']) assert.throws(() => new CataloguePublisher(url, '', '/tmp'))
+test('a journal from a former remote destination is preserved separately from new local receipts', async t => {
+  const f = await fixture(t), first = await publish(f)
+  const file = path.join(f.dataDir, 'catalogue-publications/local/gfs-0p25.json')
+  const oldFile = path.join(f.dataDir, 'catalogue-publications/gfs-0p25.json')
+  const journal = JSON.parse(fs.readFileSync(file, 'utf8'))
+  const remoteJournal = JSON.stringify({ ...journal, endpoint: 'https://former-catalogue.example' })
+  fs.writeFileSync(oldFile, remoteJournal)
+  fs.unlinkSync(file)
+  const publisher = f.publisher()
+  assert.equal(publisher.latest(f.source), null)
+  const second = await publish(f, publisher)
+  assert.notEqual(first.datasetId, second.datasetId)
+  await publisher.removeSource(f.source)
+  assert.ok(f.datasets.has(first.datasetId))
+  assert.equal(fs.readFileSync(oldFile, 'utf8'), remoteJournal)
 })

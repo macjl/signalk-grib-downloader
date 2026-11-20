@@ -163,10 +163,10 @@ test('disabled legacy export creates no directories and reads no catalogue asset
   await publisher.exportLatest(f.source, () => {})
   assert.equal(f.provider.calls.length, before)
   assert.equal(publisher.legacyExportStatus(f.source), undefined)
-  assert.deepEqual(fs.readdirSync(f.root).sort(), ['catalogue-publications', 'token'])
+  assert.deepEqual(fs.readdirSync(f.dataDir).sort(), ['catalogue-publications'])
 })
 
-test('committed catalogue originals export with version-bound authenticated URLs and no upstream reacquisition', async t => {
+test('committed catalogue originals export the requested version without upstream reacquisition', async t => {
   const f = await fixture(t), exporter = new LegacyGribExporter(path.join(f.root, 'gribs')), publisher = f.publisher(exporter)
   const plan = f.plan(), ref = await publisher.publish(f.source, plan, f.descriptor.fingerprint, () => {})
   assert.equal(fs.existsSync(exporter.root), false)
@@ -177,7 +177,7 @@ test('committed catalogue originals export with version-bound authenticated URLs
   assert.equal(f.upstream.calls.length, upstreamCalls)
   const reads = f.provider.calls.filter(call => call.method === 'GET' && call.url.includes('/assets/'))
   assert.equal(reads.length, plan.assets.length)
-  assert.ok(reads.every(call => call.url.includes(`/datasets/${ref.datasetId}/versions/${ref.version}/assets/`) && call.authorization === 'Bearer test-readwrite-token'))
+  assert.ok(reads.every(call => call.url.includes(`/datasets/${ref.datasetId}/versions/${ref.version}/assets/`)))
   const filename = path.join(exporter.root, 'gfs-0p25', legacyFilename('gfs-0p25', plan.stamp, plan.assets[0].id))
   assert.deepEqual(fs.readFileSync(filename), f.bytes)
   fs.writeFileSync(filename, Buffer.alloc(f.bytes.length, 9))
@@ -212,14 +212,14 @@ test('legacy export defaults to enabled and backfills an already-current catalog
   const plan = f.plan()
   await publisher.publish(f.source, plan, f.descriptor.fingerprint, () => {})
   const root = path.join(f.root, 'legacy'), routes = {}
-  const server = { getDataDirPath: () => f.root, getSelfPath: () => 'online', debug: () => {}, setPluginStatus: () => {},
+  const server = { getDataDirPath: () => f.dataDir, getSelfPath: () => 'online', debug: () => {}, setPluginStatus: () => {},
     streambundle: { getSelfStream: () => ({ onValue: () => () => {} }) } }
   const plugin = require('../dist/index')(server), router = {}
   for (const method of ['get', 'post', 'put', 'delete']) router[method] = (url, handler) => { routes[method + ' ' + url] = handler }
   plugin.registerWithRouter(router)
   t.after(() => plugin.stop())
   const upstream = f.upstream.calls.length
-  plugin.start({ catalogueUrl: f.provider.base, catalogueTokenFile: f.tokenFile, gribsRoot: root, sources: [f.source], bbox })
+  plugin.start({ gribsRoot: root, sources: [f.source], bbox })
   const marker = path.join(root, 'gfs-0p25', `.run-${plan.stamp}.complete`)
   const { waitFor } = require('./fixtures/http.cjs')
   await waitFor(() => fs.existsSync(marker))
@@ -269,12 +269,12 @@ test('explicitly disabling the transition export is respected and leaves the tar
   const f = await fixture(t, { bbox }), plan = f.plan()
   await f.publisher().publish(f.source, plan, f.descriptor.fingerprint, () => {})
   const root = path.join(f.root, 'disabled-export'), routes = {}
-  const server = { getDataDirPath: () => f.root, getSelfPath: () => 'online', debug: () => {}, setPluginStatus: () => {}, streambundle: { getSelfStream: () => ({ onValue: () => () => {} }) } }
+  const server = { getDataDirPath: () => f.dataDir, getSelfPath: () => 'online', debug: () => {}, setPluginStatus: () => {}, streambundle: { getSelfStream: () => ({ onValue: () => () => {} }) } }
   const plugin = require('../dist/index')(server), router = {}
   for (const method of ['get', 'post', 'put', 'delete']) router[method] = (url, handler) => { routes[method + ' ' + url] = handler }
   plugin.registerWithRouter(router); t.after(() => plugin.stop())
   const before = f.provider.calls.length
-  plugin.start({ catalogueUrl: f.provider.base, catalogueTokenFile: f.tokenFile, legacyExportEnabled: false, gribsRoot: root, sources: [f.source], bbox })
+  plugin.start({ legacyExportEnabled: false, gribsRoot: root, sources: [f.source], bbox })
   await new Promise(resolve => setTimeout(resolve, 25))
   let status
   const res = { status: () => res, json: value => { status = value } }

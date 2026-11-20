@@ -3,10 +3,6 @@ import React, { useEffect, useState } from 'react'
 const api = '/plugins/signalk-grib-downloader/remote-access'
 const french = navigator.language.toLowerCase().startsWith('fr')
 const t = french ? {
-  catalogue: 'Catalogue de destination',
-  catalogueUrl: 'URL du serveur Signal K',
-  catalogueToken: 'Fichier du jeton du catalogue',
-  catalogueHint: 'Vide pour demander automatiquement un jeton au catalogue.',
   remotes: 'Sources Signal K distantes',
   add: 'Ajouter un serveur',
   remove: 'Supprimer le serveur',
@@ -30,10 +26,6 @@ const t = french ? {
   directory: 'Répertoire d’export GRIB',
   save: 'Enregistrer la configuration',
 } : {
-  catalogue: 'Destination catalogue',
-  catalogueUrl: 'Signal K server URL',
-  catalogueToken: 'Catalogue token file',
-  catalogueHint: 'Leave blank to request a token from the catalogue automatically.',
   remotes: 'Remote Signal K sources',
   add: 'Add a server',
   remove: 'Remove server',
@@ -111,7 +103,12 @@ function RemoteToken({ access, refresh }) {
 }
 
 export default function PluginConfigurationPanel({ configuration, save }) {
-  const [config, setConfig] = useState(() => configuration ?? {})
+  const [config, setConfig] = useState(() => {
+    const current = { ...configuration }
+    delete current.catalogueUrl
+    delete current.catalogueTokenFile
+    return current
+  })
   const [accesses, setAccesses] = useState([])
   const peers = config.remoteServers ?? []
   const hasPeers = peers.length > 0
@@ -145,13 +142,6 @@ export default function PluginConfigurationPanel({ configuration, save }) {
   }
 
   return <form onSubmit={event => { event.preventDefault(); save(config) }}>
-    <fieldset className="mb-4">
-      <legend className="h6">{t.catalogue}</legend>
-      <Field label={t.catalogueUrl} type="url" value={config.catalogueUrl} placeholder="http://127.0.0.1:3000"
-        onChange={event => set('catalogueUrl', event.target.value)} />
-      <Field label={t.catalogueToken} value={config.catalogueTokenFile} hint={t.catalogueHint}
-        onChange={event => set('catalogueTokenFile', event.target.value)} />
-    </fieldset>
     <fieldset className="mb-4">
       <legend className="h6">{t.remotes}</legend>
       {peers.map((peer, index) => {

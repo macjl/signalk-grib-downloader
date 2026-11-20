@@ -27,9 +27,6 @@ const tmpDir = () => fs.mkdtempSync(path.join(os.tmpdir(), 'grib-host-'))
 
 // Mock Signal K server with just the surface the plugin host touches.
 const makeServer = (dataDir, { seed } = {}) => {
-  // These scheduling fixtures already have catalogue access; onboarding is
-  // exercised separately through the actual Access Requests HTTP lifecycle.
-  fs.writeFileSync(path.join(dataDir, 'catalogue-token'), 'scheduler-test-token\n')
   const stateHandlers = []
   const pluginStatuses = []
   const debugs = []
@@ -112,10 +109,16 @@ test('default legacy export does not treat historical files as a standalone acqu
   assert.ok(fs.existsSync(path.join(retiredRoot, 'icon-eu')))
 })
 
-test('entering captive pauses the auto scheduler; leaving it catches up', async () => {
+test('entering captive pauses the auto scheduler; leaving it catches up', async context => {
   // Source up to date from the start: every 'online'-like tick finds
   // nothing to download, so no network is ever touched.
-  const t = startPlugin({ prepare: writeCommittedReceipt })
+  const t = startPlugin({ prepare: (root, dataDir) => {
+    writeCommittedReceipt(root, dataDir)
+    const registry = (globalThis[Symbol.for('macjl.forecast-datasets.catalogues.v1')] ??= new Map())
+    const scope = path.dirname(dataDir)
+    registry.set(scope, { contractVersion: '0.1', publications: () => ({}) })
+    context.after(() => registry.delete(scope))
+  } })
   try {
     // Sanity: online-like state schedules the next auto check.
     await settle()

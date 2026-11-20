@@ -9,8 +9,8 @@ import { fingerprintsEqual, sourceDirName } from './scheduler'
 import { readAsset, RunPlan, RemoteAsset } from './downloader'
 import { LegacyGribExporter, LegacyExportStatus } from './legacy-export'
 import { directCoverage } from './coverage'
+import { DEFAULT_CATALOGUE_URL, LocalCatalogue, WAITING_FOR_LOCAL_CATALOGUE } from './local-catalogue'
 
-const API = '/plugins/signalk-forecast-dataset-provider'
 const PRODUCER = 'signalk-grib-downloader'
 const UUID = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i
 interface Asset { id: string; size?: number; sha256?: string; mediaType: string }
@@ -29,37 +29,41 @@ interface RecordEntry {
 interface Journal { endpoint: string; records: RecordEntry[] }
 export interface CatalogueReference { datasetId: string; version: string; href: string }
 export interface CompletedRun { stamp: string; params: unknown }
-export class CatalogueHttpError extends Error {
-  constructor(readonly status: number, readonly code?: string) {
-    super(`Forecast Dataset Provider: HTTP ${status}${code ? ` (${code})` : ''}${status === 401 || status === 403 ? ' (check the readwrite token file)' : ''}`)
-  }
-}
 const expired = (record: RecordEntry) => record.expiresAt !== undefined && Date.parse(record.expiresAt) <= Date.now()
-const missing = (error: unknown, code: string) => error instanceof CatalogueHttpError && error.status === 404 && error.code === code
+const missing = (error: unknown, code: string) => error instanceof Error &&
+  'status' in error && error.status === 404 && 'code' in error && error.code === code
 
 export class CataloguePublisher {
-  readonly endpoint: string
-  constructor(endpoint: string, private tokenFile: string, private dataDir: string, private tokenReader?: () => string, private onUnauthorized?: (token: string) => void, private legacyExport?: LegacyGribExporter) {
-    const url = new URL(endpoint)
-    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) throw new Error('Catalogue URL must be HTTP(S), without credentials, query or fragment')
-    if (url.protocol === 'http:' && !['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)) throw new Error('Use HTTPS for a remote catalogue server')
-    this.endpoint = url.href.replace(/\/$/, '')
+  constructor(private dataDir: string, private findLocal: () => LocalCatalogue | undefined, private legacyExport?: LegacyGribExporter) {}
+
+  get connection(): 'local' | 'waiting' {
+    return this.findLocal() ? 'local' : 'waiting'
   }
-  private file(source: SourceSetting | string): string {
+
+  private file(source: SourceSetting | string, legacy = false): string {
     const name = typeof source === 'string' ? source : sourceDirName(source)
     if (!/^[A-Za-z0-9_-]+$/.test(name)) throw new Error('Invalid source name')
-    return path.join(this.dataDir, 'catalogue-publications', `${name}.json`)
+    const directory = path.join(this.dataDir, 'catalogue-publications')
+    return path.join(legacy ? directory : path.join(directory, 'local'), `${name}.json`)
   }
+
   private read(source: SourceSetting | string): Journal {
     try {
-      const journal = JSON.parse(fs.readFileSync(this.file(source), 'utf8')) as Journal
-      if (journal.endpoint !== this.endpoint) throw new Error('Catalogue URL changed: preserve the old publication journal before switching servers')
-      return journal
+      return JSON.parse(fs.readFileSync(this.file(source), 'utf8'))
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { endpoint: this.endpoint, records: [] }
-      throw error
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
     }
+    // Reuse receipts from the old default loopback catalogue. Keep journals
+    // for other servers intact, including publications left there unfinished.
+    try {
+      const journal = JSON.parse(fs.readFileSync(this.file(source, true), 'utf8')) as Journal
+      if (journal.endpoint === DEFAULT_CATALOGUE_URL) return journal
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+    }
+    return { endpoint: DEFAULT_CATALOGUE_URL, records: [] }
   }
+
   private save(source: SourceSetting | string, journal: Journal): void {
     const file = this.file(source)
     fs.mkdirSync(path.dirname(file), { recursive: true })
@@ -86,28 +90,17 @@ export class CataloguePublisher {
     const record = this.read(source).records.find(r => r.stamp === stamp && r.version && !expired(r) && fingerprintsEqual(r.params, params))
     return record?.version && record.datasetId ? { datasetId: record.datasetId, version: record.version, href: `/signalk/v2/api/resources/forecastDatasets/${record.datasetId}` } : null
   }
-  private async response(route: string, method: string, signal?: AbortSignal, json?: unknown, stream?: Readable): Promise<Response> {
-    const token = this.tokenReader ? this.tokenReader() : this.tokenFile ? fs.readFileSync(this.tokenFile, 'utf8').trim() : ''
-    const headers: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {}
-    headers['Accept-Encoding'] = 'identity'
-    if (json !== undefined) headers['Content-Type'] = 'application/json'
-    if (stream) headers['Content-Type'] = 'application/octet-stream'
-    const response = await fetch(this.endpoint + API + route, {
-      method, headers, body: (stream ?? (json !== undefined ? JSON.stringify(json) : undefined)) as any,
-      ...(stream ? { duplex: 'half' } : {}), redirect: 'error',
-      signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(stream ? 3600_000 : 300_000)]) : AbortSignal.timeout(stream ? 3600_000 : 300_000),
-    })
-    if (response.status === 401) this.onUnauthorized?.(token)
-    if (!response.ok) {
-      let code: string | undefined
-      try { const body = await response.json() as { code?: unknown }; if (typeof body.code === 'string' && /^[A-Z_]+$/.test(body.code)) code = body.code } catch { /* generic proxy/plugin error */ }
-      throw new CatalogueHttpError(response.status, code)
-    }
-    return response
+  private async request(operation: (service: LocalCatalogue) => unknown, signal?: AbortSignal): Promise<any> {
+    signal?.throwIfAborted()
+    const service = this.findLocal()
+    if (!service) throw new Error(WAITING_FOR_LOCAL_CATALOGUE)
+    return operation(service)
   }
-  private async request(route: string, method: string, signal?: AbortSignal, json?: unknown, stream?: Readable): Promise<any> {
-    const response = await this.response(route, method, signal, json, stream)
-    return response.status === 204 ? undefined : response.json()
+  private dataset(id: string, signal?: AbortSignal, version?: string) {
+    return this.request(service => service.dataset(id, version), signal)
+  }
+  private abortPublication(id: string, signal?: AbortSignal) {
+    return this.request(service => service.abort(id), signal)
   }
   legacyExportStatus(source: SourceSetting): LegacyExportStatus | undefined {
     return this.legacyExport?.status(sourceDirName(source))
@@ -135,15 +128,7 @@ export class CataloguePublisher {
           if (!receipt) throw new Error('Cannot export a catalogue asset without its size and SHA-256 receipt')
           return receipt
         }),
-      }, async asset => {
-        const response = await this.response(`/datasets/${record.datasetId}/versions/${record.version}/assets/${asset.id}`, 'GET', active)
-        const length = response.headers.get('content-length')
-        if (response.status !== 200 || !response.body || response.headers.get('content-encoding') || (length !== null && Number(length) !== asset.size)) {
-          await response.body?.cancel()
-          throw new Error('Unexpected catalogue representation for legacy export')
-        }
-        return Readable.fromWeb(response.body as any)
-      }, active)
+      }, asset => this.request(service => service.readAsset(record.datasetId!, record.version!, asset.id, active), active), active)
       log(`legacy export: ${sourceDirName(source)} ${record.stamp} complete`)
     } catch (error) {
       this.legacyExport.failed(sourceDirName(source), error)
@@ -153,13 +138,13 @@ export class CataloguePublisher {
     }
   }
   async check(signal?: AbortSignal): Promise<void> {
-    const status = await this.request('/status', 'GET', signal)
-    if (status.contractVersion !== '0.1') throw new Error('Forecast catalogue contract 0.1 is required')
-    // This endpoint is available with the unknown-size streaming extension.
+    const contractVersion = await this.request(service => service.contractVersion, signal)
+    if (contractVersion !== '0.1') throw new Error('Forecast catalogue contract 0.1 is required')
+    // The publication listing is needed to recover interrupted acquisitions.
     await this.publications(signal)
   }
   private async publications(signal?: AbortSignal): Promise<any[]> {
-    const list = await this.request('/publications', 'GET', signal)
+    const list = await this.request(service => service.publications(), signal)
     if (!list || typeof list !== 'object' || Array.isArray(list)) throw new Error('Forecast Dataset Provider streaming publication listing is required')
     return Object.values(list)
   }
@@ -167,7 +152,7 @@ export class CataloguePublisher {
     const journal = this.read(source)
     const record = journal.records.find(r => r.stamp === stamp && r.version && fingerprintsEqual(r.params, params))
     if (!record) return false
-    try { await this.request(`/datasets/${record.datasetId}/versions/${record.version}`, 'GET', signal); return true }
+    try { await this.dataset(record.datasetId!, signal, record.version); return true }
     catch (error) {
       if (!missing(error, 'DATASET_NOT_FOUND')) throw error
       journal.records = journal.records.filter(r => r !== record)
@@ -219,7 +204,7 @@ export class CataloguePublisher {
       // The prior upload may have committed just before a response was lost.
       if (record.datasetId) {
         try {
-          const committed = await this.request(`/datasets/${record.datasetId}`, 'GET', signal)
+          const committed = await this.dataset(record.datasetId, signal)
           this.finish(source, journal, record, committed)
           await this.prune(source, journal, log, signal)
           return this.reference(source, plan.stamp, params)!
@@ -242,11 +227,12 @@ export class CataloguePublisher {
     }
     let stage: any
     if (record.publicationId) {
-      try { stage = await this.request(`/publications/${record.publicationId}`, 'GET', signal) }
+      const id = record.publicationId
+      try { stage = await this.request(service => service.publication(id), signal) }
       catch (error) {
         if (!missing(error, 'PUBLICATION_NOT_FOUND')) throw error
         let committed
-        try { committed = await this.request(`/datasets/${record.datasetId}`, 'GET', signal) }
+        try { committed = await this.dataset(record.datasetId!, signal) }
         catch (absent) {
           if (!missing(absent, 'DATASET_NOT_FOUND')) throw absent
           journal.records = journal.records.filter(r => r !== record)
@@ -264,7 +250,7 @@ export class CataloguePublisher {
       else {
         const stamp = plan.stamp, run = `${stamp.slice(0, 4)}-${stamp.slice(4, 6)}-${stamp.slice(6, 8)}T${stamp.slice(9)}:00:00Z`
         const bounds = !plan.remote && directCoverage(source)
-        stage = await this.request('/publications', 'POST', signal, {
+        const declaration = {
           kind: 'forecast', format: 'grib2', producer: PRODUCER,
           ...((source.retentionDays ?? 0) > 0 ? { expiresInSeconds: source.retentionDays! * 86_400 } : {}),
           metadata: { model: source.model.toUpperCase(), run, ...(bounds ? { bounds } : {}), ...plan.remote?.metadata,
@@ -273,7 +259,8 @@ export class CataloguePublisher {
               : `${sourceDirName(source)} ${stamp}`).slice(0, 512) },
           requested: { source: sourceDirName(source), parameters: params },
           provenance: { channel: plan.remote ? 'signalk' : 'internet', source: sourceDirName(source), run, ...plan.remote?.provenance, downloaderAcquisitionId: record.acquisitionId }, assets,
-        })
+        }
+        stage = await this.request(service => service.begin(JSON.parse(JSON.stringify(declaration))), signal)
       }
       this.validateStage(source, record, stage)
       record.datasetId = stage.datasetId; record.publicationId = stage.id
@@ -291,7 +278,8 @@ export class CataloguePublisher {
       log(`catalogue: streaming ${asset.id}`)
       await this.upload(source, journal, record, asset, signal)
     }
-    const committed = await this.request(`/publications/${record.publicationId}/commit`, 'POST', signal)
+    const id = record.publicationId!
+    const committed = await this.request(service => service.commit(id), signal)
     this.finish(source, journal, record, committed)
     log(`catalogue: published ${record.datasetId} (${assets.length} assets)`)
     await this.prune(source, journal, log, signal)
@@ -317,7 +305,8 @@ export class CataloguePublisher {
       } catch (error) { upstreamError = error; throw error }
     })(), { objectMode: false, highWaterMark: 64 * 1024 })
     try {
-      const received = await this.request(`/publications/${record.publicationId}/assets/${asset.id}`, 'PUT', active, undefined, body)
+      const id = record.publicationId!
+      const received = await this.request(service => service.upload(id, asset.id, body, active), active)
       if (!complete || !this.same(record.received![asset.id], received)) throw new Error('Provider upload receipt differs from the completed upstream stream')
     } catch (error) { throw upstreamError ?? error }
     finally { controller.abort(); body.destroy() }
@@ -326,17 +315,18 @@ export class CataloguePublisher {
     // An interrupted creation may have no publication ID locally yet.
     if (!record.publicationId && !record.version && record.acquisitionId) {
       const stages = (await this.publications(signal)).filter(p => p.declaration?.provenance?.downloaderAcquisitionId === record.acquisitionId && p.declaration?.producer === PRODUCER)
-      for (const stage of stages) await this.request(`/publications/${stage.id}`, 'DELETE', signal)
+      for (const stage of stages) await this.abortPublication(stage.id, signal)
     }
     if (record.publicationId) {
-      try { await this.request(`/publications/${record.publicationId}`, 'DELETE', signal) }
+      try { await this.abortPublication(record.publicationId, signal) }
       catch (error) { if (!missing(error, 'PUBLICATION_NOT_FOUND')) throw error }
     }
   }
   private async deleteRecord(record: RecordEntry, signal?: AbortSignal): Promise<void> {
     await this.abortStaging(record, signal)
     if (record.datasetId) {
-      try { await this.request(`/datasets/${record.datasetId}`, 'DELETE', signal) }
+      const id = record.datasetId
+      try { await this.request(service => service.remove(id), signal) }
       catch (error) { if (!missing(error, 'DATASET_NOT_FOUND')) throw error }
     }
   }

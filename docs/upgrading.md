@@ -2,7 +2,8 @@
 
 Stable versions: Forecast Dataset Provider **0.1.0**, GRIB Downloader **0.4.0**,
 GRIB Weather Provider **0.7.0**, Forecast Dataset Browser **0.1.0**.
-The catalogue HTTP contract remains **0.1**; it is not an adopted Signal K standard.
+These instructions describe that historical release set. Current local access
+is described in the [README](../README.md).
 
 ## Requirements and upgrade from local-file releases
 
@@ -39,8 +40,8 @@ together: Downloader 0.4.x publishes only to the catalogue, and Weather Provider
    explicit `legacyExportEnabled: false` opts out. It restores the former source
    directories, GRIB names and completion markers from committed datasets;
    see [export configuration and retention](../README.md#optional-historical-grib-export).
-   The provider and access approval are still required. This bridge does not
-   import old files or provide standalone downloads without the catalogue.
+   The provider is still required. This bridge does not import old files or
+   provide standalone downloads without the catalogue.
 6. In Browser, check that acquisition progress becomes a complete dataset. Check
    the Weather Provider's status and a Weather API point request inside its actual
    forecast area and time range. Existing source-based Weather API provider IDs

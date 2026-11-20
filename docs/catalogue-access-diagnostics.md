@@ -1,5 +1,8 @@
 # Repeated catalogue access requests
 
+These diagnostics apply to releases that configured catalogue access over HTTP.
+Current local catalogue access does not use a token.
+
 This concerns both GRIB Downloader and GRIB Weather Provider (downloader issue #20).
 
 ## Reproduced failure and scope

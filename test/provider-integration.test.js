@@ -11,11 +11,86 @@ const { server, grib, waitFor, hash, API } = require('./fixtures/http.cjs')
 const providerPath = process.env.FORECAST_DATASET_PROVIDER_PATH
 const integration = { skip: !providerPath && 'Set FORECAST_DATASET_PROVIDER_PATH to test against the actual streaming provider source' }
 
+test('a fresh local AROME source publishes and exports without creating a catalogue token', integration, async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'actual-local-provider-'))
+  const data = path.join(root, 'downloader')
+  const exportRoot = path.join(root, 'gribs')
+  const tokenFile = path.join(data, 'catalogue-token')
+  const bytes = grib(1024)
+  const upstream = []
+  t.mock.method(globalThis, 'fetch', async (url, options) => {
+    assert.equal(new URL(url).hostname, 'meteofrance-pnt.s3.rbx.io.cloud.ovh.net', 'no catalogue HTTP or device request')
+    upstream.push(options.method ?? 'GET')
+    return new Response(options.method === 'HEAD' ? null : bytes)
+  })
+
+  const requireProvider = createRequire(path.join(path.resolve(providerPath), 'package.json'))
+  let resources
+  const provider = requireProvider('./dist')({
+    getDataDirPath: () => path.join(root, 'provider'), registerResourceProvider: resource => { resources = resource.methods },
+    handleMessage() {}, setPluginStatus() {}, setPluginError: message => { throw new Error(message) }, error() {},
+  })
+  const downloader = require('../dist')({
+    getDataDirPath: () => data, getSelfPath: () => 'online',
+    streambundle: { getSelfStream: () => ({ onValue: () => () => {} }) },
+    setPluginStatus() {}, debug() {},
+  })
+  const routes = new Map()
+  const router = Object.fromEntries(['get', 'post', 'put', 'delete'].map(method =>
+    [method, (route, handler) => routes.set(method + route, handler)]))
+  const call = async (method, route, req = {}) => {
+    let result
+    const res = { status: () => res, json: value => { result = value } }
+    await routes.get(method + route)(req, res)
+    return result
+  }
+  t.after(async () => {
+    await downloader.stop()
+    await provider.stop()
+    fs.rmSync(root, { recursive: true, force: true })
+  })
+
+  downloader.registerWithRouter(router)
+  const source = { model: 'arome', resolution: '0025', hours: 6 }
+  downloader.start({ catalogueUrl: 'https://former-catalogue.example', catalogueTokenFile: '/old/token', sources: [source], gribsRoot: exportRoot })
+  assert.equal((await call('get', '/status')).catalogueTransport, 'waiting')
+  assert.deepEqual(upstream, [])
+
+  await provider.start({})
+  const sourceFolder = path.join(exportRoot, 'arome-0025')
+  let marker
+  await waitFor(() => {
+    if (!fs.existsSync(sourceFolder)) return false
+    marker = fs.readdirSync(sourceFolder).find(name => name.endsWith('.complete'))
+    return marker
+  })
+  const status = await call('get', '/status')
+  const [published] = Object.values(await resources.listResources({}))
+  assert.equal(status.catalogueTransport, 'local')
+  assert.equal(status.catalogueAccess, undefined)
+  assert.equal(downloader.schema().properties.catalogueUrl, undefined)
+  assert.equal(downloader.schema().properties.catalogueTokenFile, undefined)
+  assert.equal(published.model, 'AROME')
+  assert.equal(published.id, status.sources[0].catalogue.datasetId)
+  assert.equal(fs.existsSync(tokenFile), false)
+  const exported = fs.readdirSync(sourceFolder).filter(name => name.endsWith('.grb2'))
+  assert.equal(exported.length, published.assetCount)
+  for (const file of exported) assert.deepEqual(fs.readFileSync(path.join(sourceFolder, file)), bytes)
+
+  // A saved credential from an older installation never triggers HTTP.
+  fs.writeFileSync(tokenFile, 'previous-http-credential')
+  await provider.stop()
+  assert.equal((await call('get', '/status')).catalogueTransport, 'waiting')
+  await provider.start({})
+  assert.equal((await call('get', '/status')).catalogueTransport, 'local')
+  assert.equal((await resources.listResources({}))[published.id].version, published.version)
+  assert.equal(upstream.filter(method => method === 'GET').length, exported.length)
+})
+
 async function setup(t, options = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'actual-direct-provider-'))
   const data = path.join(root, 'downloader')
   fs.mkdirSync(data)
-  const tokenFile = path.join(data, 'token'); fs.writeFileSync(tokenFile, 'integration-token')
   const requireProvider = createRequire(path.join(path.resolve(providerPath), 'package.json'))
   const express = requireProvider('express'), createProvider = requireProvider('./dist')
   const plugin = createProvider({ getDataDirPath: () => path.join(root, 'provider'), registerResourceProvider: () => {},
@@ -28,10 +103,6 @@ async function setup(t, options = {}) {
   let loseCommit = false
   app.use((req, res, next) => {
     if (req.headers.authorization !== 'Bearer integration-token') return res.status(401).end()
-    if (loseCommit && req.url.endsWith('/commit')) {
-      loseCommit = false
-      res.json = () => { res.destroy(); return res }
-    }
     next()
   })
   app.use(API, router)
@@ -40,7 +111,16 @@ async function setup(t, options = {}) {
   const source = { model: 'gfs', hours: 3, ...options.source }
   const descriptor = toDownloadSource(source); descriptor.base = upstream.base
   const plan = planRun(descriptor, new Date('2026-10-21T00:00:00Z'))
-  const publisher = legacyExport => new CataloguePublisher(provider.base, tokenFile, data, undefined, undefined, legacyExport)
+  const registry = globalThis[Symbol.for('macjl.forecast-datasets.catalogues.v1')]
+  const publisher = legacyExport => new CataloguePublisher(data, () => {
+    const local = registry.get(root)
+    if (!local) return
+    return { ...local, async commit(id) {
+      const record = await local.commit(id)
+      if (loseCommit) { loseCommit = false; throw new Error('Commit acknowledgement lost') }
+      return record
+    } }
+  }, legacyExport)
   const publish = (signal) => publisher().publish(source, plan, descriptor.fingerprint, () => {}, signal)
   const get = async route => { const response = await fetch(provider.base + API + route, { headers: { Authorization: 'Bearer integration-token' } }); assert.equal(response.status, 200); return response.json() }
   t.after(() => fs.rmSync(root, { recursive: true, force: true }))
@@ -73,7 +153,7 @@ test('actual provider: interrupted second asset preserves the first and resumes 
   assert.equal(f.upstream.calls.filter(c => c.url.includes('f000')).length, 1)
   const detail = await f.get('/datasets/' + ref.datasetId)
   assert.ok(detail.assets.every(a => a.size === bytes.length && a.sha256 === hash(bytes)))
-  assert.deepEqual(fs.readdirSync(f.data).sort(), ['catalogue-publications', 'token'])
+  assert.deepEqual(fs.readdirSync(f.data).sort(), ['catalogue-publications'])
 })
 
 test('actual provider: receiving progress has unknown total, and cancellation never publishes partial data', integration, async t => {
@@ -153,7 +233,7 @@ test('actual provider: wave retries, publication and retention never replace atm
   assert.deepEqual(Object.keys(await f.get('/datasets')).sort(), [atmospheric.datasetId, next.datasetId].sort())
   await f.publisher().removeSource(source)
   assert.deepEqual(Object.keys(await f.get('/datasets')), [atmospheric.datasetId])
-  assert.deepEqual(fs.readdirSync(f.data).sort(), ['catalogue-publications', 'token'])
+  assert.deepEqual(fs.readdirSync(f.data).sort(), ['catalogue-publications'])
 })
 
 test('actual provider: legacy export reads immutable committed originals and writes the historical marker without upstream downloads', integration, async t => {
@@ -186,7 +266,7 @@ test('actual provider: day-based retention preserves multiple acquisitions with 
   assert.deepEqual(Object.keys(list).sort(), [first.datasetId, second.datasetId].sort())
   for (const dataset of Object.values(list))
     assert.equal(Date.parse(dataset.expiresAt) - Date.parse(dataset.createdAt), 3 * 86_400_000)
-  const journal = JSON.parse(fs.readFileSync(path.join(f.data, 'catalogue-publications', 'gfs-0p25.json'), 'utf8'))
+  const journal = JSON.parse(fs.readFileSync(path.join(f.data, 'catalogue-publications', 'local', 'gfs-0p25.json'), 'utf8'))
   assert.equal(journal.records.length, 2)
   for (const entry of journal.records) assert.equal(entry.expiresAt, list[entry.datasetId].expiresAt)
 })

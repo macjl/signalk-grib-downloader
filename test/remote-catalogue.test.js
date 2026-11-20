@@ -159,7 +159,6 @@ for (const [options, reason] of [
     assert.equal(requests.filter(([, url]) => url.includes('/assets/')).length, previousRequests)
     assert.equal(f.datasets.size, 1)
     assert.equal(received.length, 0)
-    assert.ok(f.provider.calls.every(call => call.authorization === 'Bearer test-readwrite-token'))
   })
 }
 
