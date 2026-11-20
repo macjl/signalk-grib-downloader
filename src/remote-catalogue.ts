@@ -23,7 +23,8 @@ interface ExportOperation {
 interface Horizon {
   minHours: number
   maxHours?: number
-  stepHours: number
+  stepHours?: number
+  leads?: number[]
 }
 interface Availability {
   area: boolean
@@ -48,10 +49,10 @@ interface Dataset {
   model: string
   producer: string
   expiresAt?: string
-  requested?: { source?: string }
+  requested?: { source?: string; parameters?: { groups?: unknown; steps?: unknown } }
   provenance?: { channel?: string; source?: { id: string; version: string } }
   bounds?: Zone
-  forecast?: { from: string; to: string }
+  forecast?: { from: string; to: string; times?: string[]; stepSeconds?: number }
   fields?: unknown[]
   grid?: Record<string, unknown>
   assets: Asset[]
@@ -116,12 +117,49 @@ function versionPath(dataset: Pick<Dataset, 'id' | 'version'>): string {
 }
 
 const hour = 3_600_000
+
+function acquisitionHorizon(dataset: Dataset, run: number): Horizon | undefined {
+  if (dataset.producer !== 'signalk-grib-downloader') return
+  const parameters = dataset.requested?.parameters
+  const lead = (value: unknown): value is number =>
+    typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 &&
+    Number.isFinite(new Date(run + value * hour).getTime())
+  const groups = parameters?.groups
+  if (Array.isArray(groups) && groups.length) {
+    const ranges: [number, number][] = []
+    for (const group of groups) {
+      const range = typeof group === 'string' && /^(\d{2,4})H(\d{2,4})H$/.exec(group)
+      if (!range || Number(range[1]) > Number(range[2])) return
+      ranges.push([Number(range[1]), Number(range[2])])
+    }
+    return { minHours: Math.min(...ranges.map(r => r[0])), maxHours: Math.max(...ranges.map(r => r[1])), stepHours: 1 }
+  }
+  const steps = parameters?.steps
+  if (Array.isArray(steps)) {
+    if (steps.length && steps.every(lead))
+      return { minHours: Math.min(...steps), maxHours: Math.max(...steps), stepHours: 1 }
+  } else if (steps && typeof steps === 'object' && 'from' in steps && 'to' in steps && 'by' in steps) {
+    const { from, to, by } = steps
+    if (lead(from) && lead(to) && lead(by) && by > 0 && to >= from)
+      return { minHours: from, maxHours: from + Math.floor((to - from) / by) * by, stepHours: 1 }
+  }
+}
+
 function forecastHorizon(dataset: Dataset, operation: ExportOperation): Horizon | undefined {
-  if (!operation.selectors?.includes('from') || !operation.selectors.includes('to') || !dataset.run) return
-  const run = Date.parse(dataset.run)
+  if (!operation.selectors?.includes('from') || !operation.selectors.includes('to')) return
+  const forecast = dataset.forecast
+  const run = Date.parse(dataset.run ?? (forecast?.times?.length ? forecast.from : ''))
   if (!Number.isFinite(run)) return
   const interval = operation.forecastInterval
   if (!interval) {
+    if (Array.isArray(forecast?.times) && forecast.times.length && forecast.times.length <= 10000) {
+      const times = forecast.times.map(Date.parse)
+      if (times[0] === Date.parse(forecast.from) && times[times.length - 1] === Date.parse(forecast.to) &&
+          times.every((value, i) => Number.isFinite(value) && (i === 0 || value > times[i - 1]!))) {
+        const leads = times.map(time => (time - run) / hour)
+        return { minHours: leads[0]!, maxHours: leads[leads.length - 1]!, leads }
+      }
+    }
     const from = Date.parse(dataset.forecast?.from ?? '')
     const to = Date.parse(dataset.forecast?.to ?? '')
     if (Number.isFinite(from) && Number.isFinite(to) && to >= Math.max(run, from)) {
@@ -131,8 +169,8 @@ function forecastHorizon(dataset: Dataset, operation: ExportOperation): Horizon 
         stepHours: 1
       }
     }
-    // The server can filter by date even for datasets with no declared horizon.
-    return { minHours: 0, stepHours: 1 }
+    // Direct acquisitions can describe their original lead hours without a verified inventory.
+    return acquisitionHorizon(dataset, run) ?? { minHours: 0, stepHours: 1 }
   }
   if (!operation.selectors.includes('fields') || !Array.isArray(operation.fields) ||
       !operation.fields.length || operation.fields.some(field => typeof field?.parameter !== 'string' || !field.parameter) ||
@@ -290,19 +328,23 @@ export class RemoteCatalogue {
     if (!dataset) return
     const { area, horizon, operation } = await this.availability(dataset, signal)
     const selection: Selection = {}
-    const exactForecastEndpoints = Boolean(operation?.forecastInterval)
+    const exactForecastEndpoints = Boolean(operation?.forecastInterval || horizon?.leads)
     if (area && bbox) selection.bbox = remoteZone(bbox)
     if (horizon && source.remoteHours !== undefined) {
-      const { minHours, maxHours, stepHours } = horizon
+      const { minHours, maxHours, stepHours = 1, leads } = horizon
+      if (leads && source.remoteHours < minHours)
+        throw new Error('No verified forecast time at or before the configured cutoff')
       const requested = Math.max(minHours, Math.min(maxHours ?? Infinity, source.remoteHours))
-      const end = minHours + Math.floor((requested - minHours) / stepHours) * stepHours
-      const run = Date.parse(dataset.run!)
+      const end = leads
+        ? leads.reduce((latest, lead) => lead <= requested ? lead : latest, minHours)
+        : minHours + Math.floor((requested - minHours) / stepHours) * stepHours
+      const run = Date.parse(dataset.run ?? dataset.forecast!.from)
       const first = Date.parse(dataset.forecast?.from ?? '')
       const from = !exactForecastEndpoints && Number.isFinite(first) && first <= run + end * hour
         ? Math.max(run, first) : run + minHours * hour
-      if (exactForecastEndpoints) selection.fields = operation!.fields
-      selection.from = new Date(from).toISOString()
-      selection.to = new Date(run + end * hour).toISOString()
+      if (operation?.forecastInterval) selection.fields = operation.fields
+      selection.from = new Date(Math.round(from)).toISOString()
+      selection.to = new Date(run + Math.round(end * hour)).toISOString()
     }
     return {
       dataset,
@@ -394,7 +436,8 @@ export class RemoteCatalogue {
         metadata: {
           model: candidate.dataset.model,
           run: candidate.dataset.run === undefined ? undefined : new Date(candidate.dataset.run).toISOString(),
-          ...(bounds ? { bounds } : {}), ...(forecast ? { forecast } : {}),
+          ...(bounds ? { bounds } : {}),
+          ...(forecast ? { forecast: { from: forecast.from, to: forecast.to } } : {}),
           ...(fields ? { fields } : {}), ...(grid ? { grid } : {}) },
         provenance: {
           remoteServer: this.setting.id, remoteEndpoint: this.endpoint,
