@@ -1,6 +1,6 @@
 {
   "name": "signalk-grib-downloader",
-  "version": "0.7.0-beta.5",
+  "version": "0.7.0-beta.6",
   "description": "Downloads GRIB forecasts and publishes immutable datasets to signalk-forecast-dataset-provider",
   "main": "dist/index.js",
   "scripts": {

@@ -273,3 +273,71 @@ test('saving settings does not interrupt an existing source deletion', async t =
   release()
   assert.deepStrictEqual(await deletion, { ok: true })
 })
+
+test('a deletion confirmed during a transfer is saved with the settings and resumed after restart', async t => {
+  const dataDir = tmpDir()
+  const gfs = { model: 'gfs', resolution: '0p25', autoDownload: false }
+  const removed = { model: 'arome', resolution: '0025', autoDownload: false }
+  const name = 'arome-0025'
+  let release, activeSignal, plugin
+  const blocked = new Promise(resolve => { release = resolve })
+  t.mock.method(CataloguePublisher.prototype, 'check', async signal => {
+    activeSignal = signal
+    await blocked
+    signal.throwIfAborted()
+  })
+  const deleted = []
+  t.mock.method(CataloguePublisher.prototype, 'removeSource', async source => { deleted.push(source) })
+  t.after(async () => {
+    release()
+    await plugin?.stop()
+    fs.rmSync(dataDir, { recursive: true, force: true })
+  })
+  function start() {
+    const { router, call } = makeRouter()
+    plugin = makePlugin(makeServer(dataDir, { seed: 'offline' }))
+    plugin.registerWithRouter(router)
+    plugin.start({ legacyExportEnabled: false, sources: [gfs, removed], bbox: BBOX })
+    return call
+  }
+  let call = start()
+  call('POST', '/download/:name', { params: { name: 'gfs-0p25' } })
+  await waitFor(() => activeSignal)
+  assert.deepStrictEqual(call('PUT', '/settings', { body: { sources: [gfs], deleteSources: [name] } }), {
+    ok: true, pendingDataDeletions: [name]
+  })
+  assert.deepStrictEqual(call('GET', '/status').pendingDataDeletions, [name])
+  assert.deepStrictEqual(JSON.parse(fs.readFileSync(path.join(dataDir, 'settings.json'))).pendingDataDeletions, [name])
+  await settle()
+  assert.deepStrictEqual(deleted, [])
+  assert.strictEqual(activeSignal.aborted, false)
+
+  const stopped = plugin.stop()
+  release()
+  await stopped
+  call = start()
+  assert.deepStrictEqual(call('GET', '/settings').sources, [gfs])
+  await waitFor(() => !call('GET', '/status').pendingDataDeletions.length)
+  assert.deepStrictEqual(deleted, [name])
+  assert.strictEqual(JSON.parse(fs.readFileSync(path.join(dataDir, 'settings.json'))).pendingDataDeletions, undefined)
+})
+
+test('adding a removed source again cancels its queued deletion before it starts', async t => {
+  const dataDir = tmpDir()
+  const source = { model: 'arome', resolution: '0025', autoDownload: false }
+  const { router, call } = makeRouter()
+  const plugin = makePlugin(makeServer(dataDir, { seed: 'offline' }))
+  const deletion = t.mock.method(CataloguePublisher.prototype, 'removeSource', async () => {})
+  t.after(async () => {
+    await plugin.stop()
+    fs.rmSync(dataDir, { recursive: true, force: true })
+  })
+  plugin.registerWithRouter(router)
+  plugin.start({ legacyExportEnabled: false, sources: [source] })
+  const queued = call('PUT', '/settings', { body: { sources: [], deleteSources: ['arome-0025'] } })
+  assert.deepStrictEqual(queued.pendingDataDeletions, ['arome-0025'])
+  assert.deepStrictEqual(call('PUT', '/settings', { body: { sources: [source] } }), { ok: true })
+  await settle()
+  assert.deepStrictEqual(call('GET', '/status').pendingDataDeletions, [])
+  assert.strictEqual(deletion.mock.callCount(), 0)
+})

@@ -269,7 +269,8 @@ export class RemoteCatalogue {
       .map(([model, resolutions]) => ({ model, resolutions: [...resolutions].sort() }))
   }
 
-  private async match(model: string, resolution: string | undefined, signal: AbortSignal): Promise<Dataset | undefined> {
+  private async match(model: string, resolution: string | undefined, signal: AbortSignal, requested?: Zone): Promise<Dataset | undefined> {
+    let outsideCoverage: Dataset | undefined
     for await (const row of this.list(signal, model)) {
       if (row.model !== model) continue
       let dataset: Dataset
@@ -288,8 +289,14 @@ export class RemoteCatalogue {
             dataset.requested?.source !== expected &&
             !dataset.assets.every(asset => typeof asset?.id === 'string' && asset.id.startsWith(expected + '__'))) continue
       }
+      if (availableArea(dataset, requested)?.length === 0) {
+        outsideCoverage ??= dataset
+        continue
+      }
       return dataset
     }
+    // Keep the first disjoint dataset for the map if none overlap.
+    return outsideCoverage
   }
 
   private async availability(dataset: Dataset, signal: AbortSignal, checkArea: boolean): Promise<Availability & { operation?: ExportOperation }> {
@@ -328,7 +335,7 @@ export class RemoteCatalogue {
   }
 
   async preview(model: string, resolution: string | undefined, signal: AbortSignal, requested?: Zone): Promise<Availability | null> {
-    const dataset = await this.match(model, resolution, signal)
+    const dataset = await this.match(model, resolution, signal, requested)
     if (!dataset) return null
     const coverage = validZone(dataset.bounds) ? { bounds: dataset.bounds } : {}
     const areas = availableArea(dataset, requested)
@@ -340,9 +347,9 @@ export class RemoteCatalogue {
   }
 
   async find(source: SourceSetting, bbox: Bbox | undefined, signal: AbortSignal): Promise<RemoteCandidate | undefined> {
-    const dataset = await this.match(remoteModelName(source), source.resolution, signal)
-    if (!dataset) return
     const requestedArea = remoteZone(bbox)
+    const dataset = await this.match(remoteModelName(source), source.resolution, signal, requestedArea)
+    if (!dataset) return
     const areas = availableArea(dataset, requestedArea)
     if (areas?.length === 0) return
     const { area, horizon, operation, reason } = await this.availability(dataset, signal, Boolean(requestedArea))
