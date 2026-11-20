@@ -317,26 +317,14 @@ module.exports = (server: ServerAPI): Plugin => {
     updateStatus()
   }
 
-  // (Re)build the orchestrator and auto scheduler from current settings.
-  const apply = (): void => {
+  // Recalculate scheduling without replacing any active transfer state.
+  const refreshSchedule = (): void => {
     if (timer) { clearTimeout(timer); timer = null }
     nextTickAtMs = null
 
-    const sources = settings.sources ?? []
-    orchestrator?.stop()
-    orchestrator = new Orchestrator(
-      sources,
-      catalogue,
-      (msg: string) => server.debug(msg),
-      updateStatus,
-      settings.bbox,
-      remotes
-    )
-
-    if (sources.some(s => s.autoDownload !== false)) {
+    updateStatus()
+    if (orchestrator?.autoSources().length) {
       runTick() // immediate catch-up; reschedules when it settles
-    } else {
-      updateStatus()
     }
   }
 
@@ -402,7 +390,10 @@ module.exports = (server: ServerAPI): Plugin => {
         .getSelfStream(INTERNET_STATE_PATH)
         .onValue(onInternetState)
 
-      apply()
+      orchestrator?.stop()
+      orchestrator = new Orchestrator(settings.sources ?? [], catalogue,
+        (msg: string) => server.debug(msg), updateStatus, settings.bbox, remotes)
+      refreshSchedule()
       access.start()
       for (const authorizer of remoteAccesses.values()) authorizer.start()
     },
@@ -491,7 +482,6 @@ module.exports = (server: ServerAPI): Plugin => {
       })
 
       router.put('/settings', (req: any, res: any) => {
-        if (orchestrator?.isRunning() || deleting.size) return res.status(409).json({ error: 'Wait for the current transfer or deletion to finish' })
         if (!orchestrator) return res.status(503).json({ error: 'plugin not started' })
         const nextRaw = req.body as AppSettings
         if (!nextRaw || typeof nextRaw !== 'object' || (nextRaw.sources !== undefined && !Array.isArray(nextRaw.sources))) {
@@ -539,7 +529,8 @@ module.exports = (server: ServerAPI): Plugin => {
           return res.status(500).json({ error: String(err) })
         }
         settings = next
-        apply()
+        orchestrator.updateSettings(next.sources ?? [], next.bbox)
+        refreshSchedule()
         res.json((next.sources ?? []).some(s => s.remoteServer) ? { ok: true, sourceNames: names } : { ok: true })
       })
 

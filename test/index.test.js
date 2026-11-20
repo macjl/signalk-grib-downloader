@@ -14,7 +14,10 @@ const os = require('os')
 const path = require('path')
 
 const makePlugin = require('../dist/index.js')
+const { CataloguePublisher } = require('../dist/catalogue')
+const downloader = require('../dist/downloader')
 const { probeRunStamp, fetchFingerprint } = require('../dist/scheduler.js')
+const { waitFor } = require('./fixtures/http.cjs')
 
 const BBOX = { latMin: 35, lonMin: -6, latMax: 45, lonMax: 17 }
 const SOURCE = { model: 'icon-eu', autoDownload: true }
@@ -190,4 +193,83 @@ test('settings enforce the GFS-Wave resolution only for direct downloads', async
   const remote = { ...sources[1], remoteServer: 'shore', remoteModel: 'AROME', resolution: '0025' }
   assert.strictEqual(call('PUT', '/settings', { body: { sources: [remote], bbox: BBOX } }).ok, true)
   assert.deepStrictEqual(call('GET', '/settings').sources, [remote])
+})
+
+test('settings save during a transfer and take effect on the next acquisition', async t => {
+  const dataDir = tmpDir()
+  const { router, call } = makeRouter()
+  const plugin = makePlugin(makeServer(dataDir, { seed: 'offline' }))
+  const source = { model: 'gfs', resolution: '0p25', hours: 3, autoDownload: false }
+  const updated = { ...source, hours: 6, retentionDays: 2 }
+  const newArea = { ...BBOX, lonMin: -7 }
+  const acquisitions = [], signals = []
+  let release
+  const blocked = new Promise(resolve => { release = resolve })
+  t.mock.method(CataloguePublisher.prototype, 'check', async signal => {
+    signals.push(signal)
+    if (signals.length === 1) await blocked
+    signal.throwIfAborted()
+  })
+  t.mock.method(downloader, 'runAvailable', async () => true)
+  t.mock.method(CataloguePublisher.prototype, 'publish', async (settings, _plan, params) => {
+    acquisitions.push({ settings, params })
+  })
+  t.after(async () => {
+    release()
+    await plugin.stop()
+    fs.rmSync(dataDir, { recursive: true, force: true })
+  })
+  plugin.registerWithRouter(router)
+  plugin.start({ legacyExportEnabled: false, sources: [source], bbox: BBOX })
+  const download = () => call('POST', '/download/:name', { params: { name: 'gfs-0p25' } })
+  const status = () => call('GET', '/status').sources[0]
+
+  download()
+  await waitFor(() => signals.length === 1)
+  assert.strictEqual(status().running, true)
+  assert.deepStrictEqual(call('PUT', '/settings', { body: { sources: [], bbox: newArea } }), { ok: true })
+  assert.deepStrictEqual(call('PUT', '/settings', { body: { sources: [updated], bbox: newArea } }), { ok: true })
+  assert.deepStrictEqual(call('GET', '/settings').sources, [updated])
+  assert.deepStrictEqual(JSON.parse(fs.readFileSync(path.join(dataDir, 'settings.json'))).bbox, newArea)
+  assert.strictEqual(status().running, true)
+  assert.strictEqual(signals[0].aborted, false)
+
+  download()
+  assert.strictEqual(signals.length, 1)
+  release()
+  await waitFor(() => !status().running)
+  assert.strictEqual(status().lastOutcome, 'downloaded')
+  assert.deepStrictEqual(acquisitions[0], { settings: source, params: fetchFingerprint(source, BBOX) })
+
+  download()
+  await waitFor(() => !status().running)
+  assert.deepStrictEqual(acquisitions[1], { settings: updated, params: fetchFingerprint(updated, newArea) })
+})
+
+test('saving settings does not interrupt an existing source deletion', async t => {
+  const dataDir = tmpDir()
+  const { router, call } = makeRouter()
+  const plugin = makePlugin(makeServer(dataDir, { seed: 'offline' }))
+  let release, activeSignal
+  const blocked = new Promise(resolve => { release = resolve })
+  t.mock.method(CataloguePublisher.prototype, 'removeSource', async (_source, signal) => {
+    activeSignal = signal
+    await blocked
+    signal.throwIfAborted()
+  })
+  t.after(async () => {
+    release()
+    await plugin.stop()
+    fs.rmSync(dataDir, { recursive: true, force: true })
+  })
+  plugin.registerWithRouter(router)
+  plugin.start({ legacyExportEnabled: false })
+  const deletion = call('DELETE', '/source-data/:name', { params: { name: 'gfs-0p25' } })
+  await waitFor(() => activeSignal)
+  const source = { model: 'arome', resolution: '0025', autoDownload: false }
+  assert.deepStrictEqual(call('PUT', '/settings', { body: { sources: [source], bbox: BBOX } }), { ok: true })
+  assert.deepStrictEqual(call('GET', '/settings').sources, [source])
+  assert.strictEqual(activeSignal.aborted, false)
+  release()
+  assert.deepStrictEqual(await deletion, { ok: true })
 })

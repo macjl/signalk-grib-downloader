@@ -52,8 +52,19 @@ export class Orchestrator {
     private remotes: ReadonlyMap<string, RemoteCatalogue> = new Map()
   ) {
     if (!catalogue) throw new Error('Forecast Dataset Provider publisher is required')
-    for (const s of sources) {
-      this.states.set(sourceDirName(s), {
+    this.updateSettings(sources, bbox)
+  }
+
+  updateSettings(sources: SourceSetting[], bbox?: Bbox): void {
+    this.sources = sources
+    this.bbox = bbox
+    const names = new Set(sources.map(sourceDirName))
+    for (const [name, state] of this.states) {
+      if (!names.has(name) && !state.running) this.states.delete(name)
+    }
+    for (const name of names) {
+      if (this.states.has(name)) continue
+      this.states.set(name, {
         running: false, lastError: null, lastOutcome: null, lastFinishedAt: null, lastLog: [],
         lastProbeAt: null, lastProbeRun: null,
       })
@@ -65,16 +76,16 @@ export class Orchestrator {
   }
 
   // The provider owns GRIB bytes. Scheduling reads only durable publication receipts.
-  private paramsOk(source: SourceSetting, stamp: string | null): boolean {
+  private paramsOk(source: SourceSetting, stamp: string | null, bbox?: Bbox): boolean {
     if (!stamp) return true
     const latest = this.catalogue.latest(source)?.params
     if (source.remoteServer) {
       const prior = latest as { remoteEndpoint?: string; area?: string; requestedArea?: string; requestedHours?: number } | undefined
       return prior?.remoteEndpoint === this.remotes.get(source.remoteServer)?.endpoint &&
         prior?.requestedHours === source.remoteHours &&
-        (prior?.area === undefined || (prior.requestedArea ?? prior.area) === JSON.stringify(remoteZone(this.bbox)))
+        (prior?.area === undefined || (prior.requestedArea ?? prior.area) === JSON.stringify(remoteZone(bbox)))
     }
-    return fingerprintsEqual(latest, fetchFingerprint(source, this.bbox))
+    return fingerprintsEqual(latest, fetchFingerprint(source, bbox))
   }
 
   lastRunStamp(source: SourceSetting): string | null {
@@ -88,7 +99,7 @@ export class Orchestrator {
       const lastRun = this.lastRunStamp(s)
       const expected = s.remoteServer ? st.lastProbeRun ?? lastRun ?? '' : expectedRunStamp(s.model)
       const target = s.remoteServer ? null : probeRunStamp(s.model)
-      const paramsOk = this.paramsOk(s, lastRun)
+      const paramsOk = this.paramsOk(s, lastRun, this.bbox)
       return {
         name,
         model: s.remoteServer ? remoteModelName(s) : s.model,
@@ -116,8 +127,8 @@ export class Orchestrator {
   // whose last publication used different parameters.
   private isBehind(source: SourceSetting): boolean {
     const last = this.lastRunStamp(source)
-    if (source.remoteServer) return last === null || !this.paramsOk(source, last) || !this.published(source, last)
-    return last === null || last < expectedRunStamp(source.model) || !this.paramsOk(source, last) || !this.published(source, last)
+    if (source.remoteServer) return last === null || !this.paramsOk(source, last, this.bbox) || !this.published(source, last)
+    return last === null || last < expectedRunStamp(source.model) || !this.paramsOk(source, last, this.bbox) || !this.published(source, last)
   }
 
   staleSources(sources: SourceSetting[] = this.autoSources()): SourceSetting[] {
@@ -127,7 +138,7 @@ export class Orchestrator {
   private needsProbe(source: SourceSetting): boolean {
     const last = this.lastRunStamp(source)
     if (source.remoteServer) return this.remotes.has(source.remoteServer)
-    return last === null || last < probeRunStamp(source.model) || !this.paramsOk(source, last) || !this.published(source, last) || !!this.catalogue.exportPending?.(source)
+    return last === null || last < probeRunStamp(source.model) || !this.paramsOk(source, last, this.bbox) || !this.published(source, last) || !!this.catalogue.exportPending?.(source)
   }
 
   // Per-source probe cadence is anchored to the last attempt, so another
@@ -153,8 +164,9 @@ export class Orchestrator {
   // Returns true if a fetch was executed.
   async downloadSource(source: SourceSetting, expectedSubset?: 'area' | 'time' | 'both'): Promise<boolean> {
     const name = sourceDirName(source)
-    const st = this.states.get(name)!
-    if (st.running || this.stopped) return false
+    const st = this.states.get(name)
+    if (!st || st.running || this.stopped || !this.findSource(name)) return false
+    const bbox = this.bbox
 
     st.running = true
     st.lastError = null
@@ -182,7 +194,7 @@ export class Orchestrator {
 
     try {
       const domain = !source.remoteServer && directCoverage(source)
-      if (domain && this.bbox && !overlap(mapZone(this.bbox), domain).length) {
+      if (domain && bbox && !overlap(mapZone(bbox), domain).length) {
         st.lastOutcome = 'unavailable'
         onProgress('The model does not cover the requested map area')
         return true
@@ -197,7 +209,7 @@ export class Orchestrator {
         const remote = this.remotes.get(source.remoteServer)
         if (!remote) throw new Error('This remote Signal K server is no longer configured')
         const signal = controller.signal
-        const candidate = await remote.find(source, this.bbox, signal)
+        const candidate = await remote.find(source, bbox, signal)
         st.lastProbeRun = candidate?.stamp ?? null
         if (!candidate) {
           st.lastOutcome = 'unavailable'
@@ -210,7 +222,7 @@ export class Orchestrator {
         const latest = this.catalogue.latest(source)
         const params = remote.fingerprint(candidate)
         if ((latest?.stamp === candidate.stamp && fingerprintsEqual(latest.params, params)) ||
-            (latest && latest.stamp > candidate.stamp && this.paramsOk(source, latest.stamp))) {
+            (latest && latest.stamp > candidate.stamp && this.paramsOk(source, latest.stamp, bbox))) {
           st.lastOutcome = 'up-to-date'
           return true
         }
@@ -226,7 +238,7 @@ export class Orchestrator {
         return true
       }
 
-      const ds = toDownloadSource(source, this.bbox)
+      const ds = toDownloadSource(source, bbox)
       let outcome: Outcome = 'unavailable'
       const pending = this.catalogue.pendingStamp(source, ds.fingerprint)
       if (pending) {
@@ -260,15 +272,17 @@ export class Orchestrator {
       clearTimeout(timer)
       st.running = false
       st.lastFinishedAt = new Date(Date.now()).toISOString()
+      if (!this.findSource(name)) this.states.delete(name)
       this.onChange()
     }
   }
 
   // Download the given sources sequentially (bandwidth-friendly).
   async downloadAll(sources?: SourceSetting[]): Promise<void> {
-    for (const s of sources ?? this.sources) {
+    for (const queued of sources ?? this.sources) {
       if (this.stopped) break
-      await this.downloadSource(s)
+      const source = this.findSource(sourceDirName(queued))
+      if (source) await this.downloadSource(source)
     }
   }
 
@@ -298,8 +312,10 @@ export class Orchestrator {
     if (due.length > 0) {
       this.log(`auto: ${due.length} source(s) to check: ${due.map(s => sourceDirName(s)).join(', ')}`)
       // Re-evaluate after each download: sources share a sequential queue.
-      for (const source of due) {
-        if (this.nextTickAt(source, timing).getTime() <= Date.now()) await this.downloadSource(source)
+      for (const queued of due) {
+        const source = this.findSource(sourceDirName(queued))
+        if (source && source.autoDownload !== false &&
+            this.nextTickAt(source, timing).getTime() <= Date.now()) await this.downloadSource(source)
       }
     }
   }
