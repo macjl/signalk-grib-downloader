@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.7.0-beta.3] - 2026-11-20
+
+- Use verified GRIB validity times for the remote forecast slider and cutoff,
+  including irregular and sub-hourly steps.
+- Refresh remote capabilities after token approval and when a verified
+  inventory becomes available. Use acquisition metadata when only an
+  estimated forecast horizon is available.
+- Wrap source controls and long text within the webapp cards on narrow screens.
+
 ## [0.7.0-beta.2] - 2026-11-19
 
 - Keep the Catalogue link clickable when the webapp refreshes a source status.

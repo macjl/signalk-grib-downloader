@@ -193,6 +193,17 @@ module.exports = (server: ServerAPI): Plugin => {
     fs.writeFileSync(settingsPath(), JSON.stringify(s, null, 2))
   }
 
+  const remoteAccessStatus = () => Array.from(remoteAccesses, ([id, authorizer]) => {
+    const { state, diagnostics } = authorizer.status()
+    let visibleState = state
+    if (state === 'ready') {
+      try { if (!authorizer.currentToken()) visibleState = 'idle' }
+      catch { visibleState = 'error' }
+    }
+    return { id, endpoint: remotes.get(id)!.endpoint, state: visibleState,
+      httpStatus: state === 'error' ? diagnostics.lastIssue?.httpStatus : undefined }
+  })
+
   const updateStatus = () => {
     if (!orchestrator) return
     if (access && access.status().state !== 'ready') {
@@ -418,6 +429,7 @@ module.exports = (server: ServerAPI): Plugin => {
         res.json({
           catalogueUrl: catalogue.endpoint,
           catalogueAccess: access?.status(),
+          remoteAccess: remoteAccessStatus(),
           legacyExportEnabled: infra.legacyExportEnabled === true,
           checkIntervalMinutes: intervalMinutes(),
           internetState,
@@ -444,16 +456,7 @@ module.exports = (server: ServerAPI): Plugin => {
       })
 
       router.get('/remote-access', (_req: any, res: any) => {
-        res.set('Cache-Control', 'no-store').json(Array.from(remoteAccesses, ([id, authorizer]) => {
-          const { state, diagnostics } = authorizer.status()
-          let visibleState = state
-          if (state === 'ready') {
-            try { if (!authorizer.currentToken()) visibleState = 'idle' }
-            catch { visibleState = 'error' }
-          }
-          return { id, endpoint: remotes.get(id)!.endpoint, state: visibleState,
-            httpStatus: state === 'error' ? diagnostics.lastIssue?.httpStatus : undefined }
-        }))
+        res.set('Cache-Control', 'no-store').json(remoteAccessStatus())
       })
 
       router.post('/remote-access/:server', (req: any, res: any) => {
@@ -505,8 +508,9 @@ module.exports = (server: ServerAPI): Plugin => {
           return res.status(400).json({ error: 'Choose a valid model advertised by the remote catalogue' })
         }
         if ((next.sources ?? []).some(s => s.remoteHours !== undefined &&
-            (!s.remoteServer || !Number.isSafeInteger(s.remoteHours) || s.remoteHours < 0))) {
-          return res.status(400).json({ error: 'Remote forecast duration must be a nonnegative whole number of hours' })
+            (!s.remoteServer || typeof s.remoteHours !== 'number' ||
+              !Number.isSafeInteger(Math.round(s.remoteHours * 3_600_000))))) {
+          return res.status(400).json({ error: 'Invalid remote forecast cutoff' })
         }
         const names = (next.sources ?? []).map(s => sourceDirName(s))
         if (names.some(name => !/^[A-Za-z0-9_-]+$/.test(name))) return res.status(400).json({ error: 'invalid source name' })

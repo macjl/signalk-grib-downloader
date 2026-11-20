@@ -20,7 +20,8 @@ const originalPath = root(datasetId, version), croppedPath = root(croppedId, cro
 const jobPath = `${API}/requests/${jobId}`
 
 async function setup(t, { processor = false, time = false, area = true, statusAvailable = true,
-  userLevel = 'readwrite', missing = false, broken = false, unsafe = false, badHash = false, customModel = false } = {}) {
+  userLevel = 'readwrite', missing = false, broken = false, unsafe = false, badHash = false, customModel = false,
+  parameters, verifiedForecast } = {}) {
   const original = grib(2048), crop = grib(256)
   const tokenDir = fs.mkdtempSync(path.join(os.tmpdir(), 'remote-signalk-token-'))
   const tokenFile = path.join(tokenDir, 'token')
@@ -45,8 +46,9 @@ async function setup(t, { processor = false, time = false, area = true, statusAv
     { parameter: 'eastward_wind', level: { type: 'heightAboveGround', value: 10, unit: 'm' } },
     { parameter: 'air_pressure_at_mean_sea_level' }
   ]
-  const main = { ...row, requested: { source: 'arome-0025' },
+  const main = { ...row, requested: { source: 'arome-0025', parameters },
     ...(time === true ? { forecast: { from: '2026-11-09T15:00:00Z', to: '2026-11-10T03:00:00Z' } } : {}),
+    ...(verifiedForecast ? { forecast: verifiedForecast } : {}),
     assets: [
       manifest(datasetId, version, 'arome-0025__run__first_grb2', original),
       manifest(datasetId, version, 'arome-0025__run__second_grb2', original)
@@ -201,6 +203,37 @@ test('uses a remote time range without published fields or a fixed forecast cade
   })
   assert.deepEqual(f.declarations[0].metadata.forecast, {
     from: '2026-11-09T15:30:00Z', to: '2026-11-09T20:15:00Z'
+  })
+})
+
+test('uses the acquisition groups of a complete remote run to bound the slider', async t => {
+  const { adapter } = await setup(t, { processor: true, time: 'range',
+    parameters: { groups: ['00H06H', '07H12H', '13H18H', '19H24H'] } })
+  const signal = AbortSignal.timeout(5000)
+  assert.deepEqual((await adapter.preview('AROME', '0025', signal)).horizon, {
+    minHours: 0, maxHours: 24, stepHours: 1
+  })
+  const candidate = await adapter.find({ ...source, remoteHours: 8 }, bbox, signal)
+  assert.deepEqual(candidate.selection, {
+    bbox: [-6, 44, -1, 48], from: '2026-11-09T15:00:00.000Z', to: '2026-11-09T23:00:00.000Z'
+  })
+})
+
+test('prefers verified irregular validity times over the acquisition groups and snaps the export cutoff', async t => {
+  const times = ['2026-11-09T15:30:00Z', '2026-11-09T17:00:00Z', '2026-11-09T20:15:00Z']
+  const { adapter, orchestrator, received } = await setup(t, { processor: true, time: 'range', area: false,
+    parameters: { groups: ['00H06H'] }, verifiedForecast: { from: times[0], to: times.at(-1), times } })
+  const signal = AbortSignal.timeout(5000)
+  assert.deepEqual((await adapter.preview('AROME', '0025', signal)).horizon, {
+    minHours: 0.5, maxHours: 5.25, leads: [0.5, 2, 5.25]
+  })
+  const lower = await adapter.find({ ...source, remoteHours: 3 }, bbox, signal)
+  assert.equal(lower.selection.to, '2026-11-09T17:00:00.000Z')
+  const configured = { ...source, remoteHours: 5.25 }
+  const orch = orchestrator(bbox, configured)
+  assert.equal(await orch.downloadSource(configured, 'time'), true, orch.status()[0].lastError)
+  assert.deepEqual(received[0].selection, {
+    from: '2026-11-09T15:30:00.000Z', to: '2026-11-09T20:15:00.000Z'
   })
 })
 

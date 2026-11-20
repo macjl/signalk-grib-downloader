@@ -8,10 +8,10 @@
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     html, body { height: 100%; font-family: system-ui, -apple-system, sans-serif; background: #1a2535; color: #e8edf4; }
-    #layout { display: grid; grid-template-columns: minmax(470px, 620px) 1fr; height: 100%; }
-    @media (max-width: 900px) { #layout { grid-template-columns: 1fr; grid-template-rows: auto 50vh; } }
+    #layout { display: grid; grid-template-columns: minmax(470px, 620px) minmax(0, 1fr); height: 100%; }
+    @media (max-width: 900px) { #layout { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto 50vh; } }
 
-    #side { overflow-y: auto; padding: 16px; }
+    #side { overflow-y: auto; min-width: 0; overflow-wrap: anywhere; padding: 16px; }
     #map  { height: 100%; min-height: 300px; }
 
     h1 { font-size: 17px; margin-bottom: 12px; display: flex; align-items: center; gap: 8px; }
@@ -65,22 +65,25 @@
     .log { font-family: ui-monospace, monospace; font-size: 11px; background: #131c29; border-radius: 6px;
            padding: 8px; margin-top: 6px; white-space: pre-wrap; max-height: 130px; overflow-y: auto; color: #b8c6d9; }
 
-    #bbox-inputs { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; margin-top: 8px; }
-    #save-bar { position: sticky; bottom: 0; background: #1a2535; padding: 10px 0 2px; display: flex; gap: 8px; align-items: center; }
+    #bbox-inputs { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; margin-top: 8px; }
+    @media (max-width: 420px) { #bbox-inputs { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+    #save-bar { position: sticky; bottom: 0; background: #1a2535; padding: 10px 0 2px; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
     #save-note { font-size: 12px; color: #9fb0c5; }
     #save-note.dirty { color: #e3c47f; font-weight: 600; }
-    .row-actions { display: flex; gap: 4px; }
+    .row-actions { display: flex; gap: 4px; margin-left: auto; }
 
     .src-card { border-top: 1px solid rgba(255,255,255,0.07); padding: 8px 0 6px; }
-    .src-main { display: flex; align-items: center; gap: 8px; }
-    .src-main select { width: auto; }
+    .src-main { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+    .src-main select { width: auto; max-width: 100%; text-overflow: ellipsis; }
+    .source-name { min-width: 0; color: #9fb0c5; font-size: 12px; }
     .auto-toggle { display: inline-flex; align-items: center; gap: 4px; color: #e8edf4; font-weight: 700; white-space: nowrap; }
-    .src-sub { display: flex; align-items: center; gap: 10px; margin-top: 7px; padding-left: 24px; }
-    .src-sub input[type="range"] { flex: 1; accent-color: #4d9fff; padding: 0; }
+    .src-sub { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin-top: 7px; padding-left: 24px; }
+    .src-sub input[type="range"] { flex: 1 1 140px; width: auto; min-width: 0; accent-color: #4d9fff; padding: 0; }
     .hours-label { font-size: 12px; color: #e8edf4; white-space: nowrap; min-width: 110px; }
     .hours-label .max { color: #9fb0c5; }
     .hours-label.at-max { color: #7fe39a; font-weight: 600; }
     .vol { font-size: 12px; color: #e3c47f; white-space: nowrap; min-width: 70px; text-align: right; }
+    .sources-footer { margin-top: 8px; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
     #total-vol { font-size: 12px; color: #9fb0c5; margin-top: 8px; text-align: right; }
     #total-vol b { color: #e3c47f; }
   </style>
@@ -106,7 +109,7 @@
     <h2 data-i18n="sources">Sources</h2>
     <div class="card">
       <div id="src-list"></div>
-      <div style="margin-top:8px; display:flex; align-items:center;">
+      <div class="sources-footer">
         <button class="secondary small" id="btn-add" data-i18n="addSource">+ Ajouter une source</button>
         <div id="total-vol" style="flex:1; margin-top:0"></div>
       </div>
@@ -168,7 +171,7 @@ const I18N = {
     catalogueDenied: 'Accès au catalogue refusé. Redémarrez le plugin pour envoyer une nouvelle demande d’autorisation.',
     lastRun: 'dernier run', expected: 'attendu', confirmDelete: 'Supprimer cette source ?',
     lastAttempt: 'dernière tentative', noAttempt: 'aucune tentative depuis le démarrage', logTitle: 'Journal du dernier téléchargement',
-    maxLbl: 'max', totalVol: 'Volume estimé par run :', perRun: '/ run',
+    maxLbl: 'max', maxEstimated: 'max estimé', totalVol: 'Volume estimé par run :', perRun: '/ run',
     volumeUnknown: 'estimation indisponible',
     archivesLbl: 'archives', archivesTitle: 'Nombre d’acquisitions précédentes sans expiration et, si activé, d’exports historiques (0 = aucune)',
     upstreamOrigin: 'Source',
@@ -182,8 +185,8 @@ const I18N = {
     remoteAllHours: 'Toutes',
     remoteArea: 'GRIB découpé à la zone de la carte',
     remoteAreaNoTime: 'GRIB découpé à la zone de la carte · découpe par échéance indisponible',
-    remoteTime: 'GRIB découpé par échéance · champs annoncés par le serveur',
-    remoteAreaTime: 'GRIB découpé par zone et par échéance · champs annoncés par le serveur',
+    remoteTime: 'GRIB découpé par échéance',
+    remoteAreaTime: 'GRIB découpé par zone et par échéance',
     remoteSaveFirst: 'Enregistrez les réglages avant de télécharger depuis un serveur Signal K.',
     anyResolution: 'Toute résolution',
     chooseRemoteModel: 'Choisir un modèle', remoteLoading: 'Lecture du catalogue…',
@@ -220,7 +223,7 @@ const I18N = {
     catalogueDenied: 'Catalogue access denied. Restart the plugin to submit a new access request.',
     lastRun: 'last run', expected: 'expected', confirmDelete: 'Delete this source?',
     lastAttempt: 'last attempt', noAttempt: 'no attempt since startup', logTitle: 'Last download log',
-    maxLbl: 'max', totalVol: 'Estimated volume per run:', perRun: '/ run',
+    maxLbl: 'max', maxEstimated: 'estimated max', totalVol: 'Estimated volume per run:', perRun: '/ run',
     volumeUnknown: 'estimate unavailable',
     archivesLbl: 'archives', archivesTitle: 'Number of previous datasets without an expiration and, when enabled, legacy exports (0 = none)',
     upstreamOrigin: 'Source',
@@ -234,8 +237,8 @@ const I18N = {
     remoteAllHours: 'All',
     remoteArea: 'GRIB cropped to the map area',
     remoteAreaNoTime: 'GRIB cropped to the map area · lead-time subsetting unavailable',
-    remoteTime: 'GRIB subset by lead time · fields advertised by the server',
-    remoteAreaTime: 'GRIB subset by area and lead time · fields advertised by the server',
+    remoteTime: 'GRIB subset by lead time',
+    remoteAreaTime: 'GRIB subset by area and lead time',
     remoteSaveFirst: 'Save your settings before downloading from a Signal K server.',
     anyResolution: 'Any resolution',
     chooseRemoteModel: 'Choose a model', remoteLoading: 'Reading catalogue…',
@@ -297,10 +300,19 @@ function fmtEstimate(mb) {
   return Number.isFinite(mb) ? '≈ ' + fmtVol(mb) : t.volumeUnknown
 }
 
+function formatLead(hours) {
+  const seconds = Math.round(Math.abs(hours) * 3600)
+  const remaining = seconds % 3600
+  return `${hours < 0 ? '−' : ''}${Math.floor(seconds / 3600)} h` +
+    (remaining ? ` ${Math.floor(remaining / 60)} min` : '') +
+    (remaining % 60 ? ` ${remaining % 60} s` : '')
+}
+
 // ── State ────────────────────────────────────────────────────────────────────
 let config = { bbox: { latMin: 35, lonMin: -6, latMax: 45, lonMax: 17 }, sources: [] }
 const modelCatalogues = new Map()
 const remotePreviews = new Map()
+const remoteWriteAccess = new Map()
 const sourceNames = new WeakMap()
 let statusBySource = {}
 let schedulerError = null
@@ -466,40 +478,49 @@ function renderSourceStatus(card, s) {
 }
 
 async function readRemoteModels(id, refresh = false) {
-  if (!id || modelCatalogues.get(id)?.loading || (!refresh && modelCatalogues.has(id))) return
+  if (!id || (!refresh && modelCatalogues.has(id))) return
   remotePreviews.delete(id)
-  modelCatalogues.set(id, { loading: true })
+  const pending = { loading: true }
+  modelCatalogues.set(id, pending)
   renderSources()
   try {
     const response = await fetch(`${API}/remote-models/${encodeURIComponent(id)}`, { cache: 'no-store' })
     const body = await response.json()
     if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`)
+    if (modelCatalogues.get(id) !== pending) return
     modelCatalogues.set(id, { models: body.models })
   } catch (error) {
+    if (modelCatalogues.get(id) !== pending) return
     modelCatalogues.set(id, { error: error.message })
   }
   renderSources()
 }
 
-function remotePreview(server, model, resolution) {
+function remotePreview(server, model, resolution, recheck = false) {
   if (!remotePreviews.has(server)) remotePreviews.set(server, new Map())
   const previews = remotePreviews.get(server)
   const query = new URLSearchParams({ model })
   if (resolution) query.set('resolution', resolution)
   const key = query.toString()
-  if (!previews.has(key)) {
-    const state = { loading: true }
+  const previous = previews.get(key)
+  const delay = previous?.dataset?.horizon && !previous.dataset.horizon.leads ? 30_000 : 300_000
+  if (!previous || (recheck && !previous.loading && Date.now() - previous.checkedAt >= delay)) {
+    const state = { loading: true, dataset: previous?.dataset, error: previous?.error }
     previews.set(key, state)
     fetch(`${API}/remote-preview/${encodeURIComponent(server)}?${key}`, { cache: 'no-store' })
       .then(async response => {
         const body = await response.json()
         if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`)
         state.dataset = body
+        state.error = undefined
       })
-      .catch(error => { state.error = error.message })
+      .catch(error => { state.dataset = undefined; state.error = error.message })
       .finally(() => {
         state.loading = false
-        if (remotePreviews.get(server) === previews) renderSources()
+        state.checkedAt = Date.now()
+        if (remotePreviews.get(server) === previews &&
+            (!previous || previous.error !== state.error ||
+              JSON.stringify(previous.dataset) !== JSON.stringify(state.dataset))) renderSources()
       })
   }
   return previews.get(key)
@@ -507,7 +528,7 @@ function remotePreview(server, model, resolution) {
 
 function remoteDownloadLabel(catalogue, model, preview, hours) {
   if (catalogue?.error) return t.remoteFailed
-  if (!catalogue || catalogue.loading || preview?.loading) return t.remoteChecking
+  if (!catalogue || catalogue.loading || (preview?.loading && !preview.dataset)) return t.remoteChecking
   if (!model) return catalogue.models?.length ? t.chooseRemoteModel : t.remoteNoDataset
   if (preview?.error) return t.remoteCheckFailed
   const dataset = preview?.dataset
@@ -541,10 +562,12 @@ function renderSources() {
     const horizon = s.remoteServer ? preview?.dataset?.horizon
       : { minHours: model.sliderStep, maxHours: model.maxHours, stepHours: model.sliderStep }
     const configuredHours = s.remoteServer ? s.remoteHours : s.hours
+    const leads = horizon?.leads
+    const sliderIndex = leads ? Math.max(0, leads.filter(lead => lead <= (configuredHours ?? Infinity)).length - 1) : undefined
     const areaSubset = preview?.dataset?.area
     const timeSubset = preview?.dataset?.horizon && configuredHours !== undefined
     const expectedSubset = areaSubset ? (timeSubset ? 'both' : 'area') : (timeSubset ? 'time' : '')
-    const hours = horizon?.maxHours !== undefined ? horizon.minHours + Math.floor(
+    const hours = leads ? leads[sliderIndex] : horizon?.maxHours !== undefined ? horizon.minHours + Math.floor(
       (Math.max(horizon.minHours, Math.min(horizon.maxHours, configuredHours ?? horizon.maxHours)) - horizon.minHours) /
       horizon.stepHours) * horizon.stepHours : undefined
     const showHours = horizon?.maxHours !== undefined && horizon.minHours < horizon.maxHours
@@ -570,7 +593,8 @@ function renderSources() {
           ${remoteModel && !available ? `<option selected disabled value="${escapeHtml(remoteModel)}">${escapeHtml(remoteModel)} · ${t.remoteMissing}</option>` : ''}
           ${advertised.map(entry => `<option value="${escapeHtml(entry.model)}" ${entry.model === remoteModel ? 'selected' : ''}>${escapeHtml(entry.model)}</option>`).join('')}
         </select>
-        <button type="button" class="small secondary" data-act="refresh-models" title="${escapeHtml(catalogue?.error || t.refreshModels)}" aria-label="${t.refreshModels}">↻</button>`
+        <button type="button" class="small secondary" data-act="refresh-models" title="${escapeHtml(catalogue?.error || t.refreshModels)}"
+          aria-label="${t.refreshModels}" ${catalogue?.loading ? 'disabled' : ''}>↻</button>`
           : `<select data-f="model" aria-label="${t.thModel}">
           ${Object.entries(MODELS).filter(([, entry]) => entry.provider === model.provider).map(([id, entry]) => `<option value="${id}" ${id === s.model ? 'selected' : ''}>${entry.label}</option>`).join('')}
         </select>`}
@@ -578,8 +602,7 @@ function renderSources() {
           ${s.remoteServer && resOpts.length ? `<option value="" ${!s.resolution ? 'selected' : ''}>${t.anyResolution}</option>` : ''}
           ${resOpts.map(r => `<option ${r === s.resolution ? 'selected' : ''}>${escapeHtml(r)}</option>`).join('')}
         </select>
-        <code style="font-size:12px;color:#9fb0c5">${escapeHtml(name || (s.remoteServer ? s.remoteServer : ''))}</code>
-        <span style="flex:1"></span>
+        <code class="source-name">${escapeHtml(name || (s.remoteServer ? s.remoteServer : ''))}</code>
         <span class="badge-slot">${sourceStateBadge(s)}</span>
         <span class="row-actions">
           <button class="small" data-act="dl" title="${t.download}" ${s.remoteServer && (!name || !preview?.dataset) ? 'disabled' : ''}>⬇</button>
@@ -588,14 +611,15 @@ function renderSources() {
         </span>
       </div>
       <div class="src-sub">
-        ${showHours ? `<input type="range" data-f="hours" aria-label="${t.forecastHours}" min="${horizon.minHours}" max="${horizon.maxHours}"
-               step="${horizon.stepHours}" value="${hours}">
+        ${showHours ? `<input type="range" data-f="hours" aria-label="${t.forecastHours}" min="${leads ? 0 : horizon.minHours}" max="${leads ? leads.length - 1 : horizon.maxHours}"
+               step="${leads ? 1 : horizon.stepHours}" value="${leads ? sliderIndex : hours}" aria-valuetext="${formatLead(hours)}">
         <span class="hours-label ${hours >= horizon.maxHours ? 'at-max' : ''}">
-          <b data-r="hval">${hours}</b> h <span class="max">/ ${t.maxLbl} ${horizon.maxHours} h</span>
+          <b data-r="hval">${formatLead(hours)}</b> <span class="max">/ ${s.remoteServer && !leads ? t.maxEstimated : t.maxLbl} ${formatLead(horizon.maxHours)}</span>
         </span>` : ''}
+        ${leads?.length === 1 ? `<span class="hours-label">${t.forecastHours} · ${formatLead(leads[0])}</span>` : ''}
         ${showOpenHours ? `<label class="hours-label">${t.forecastHours}
-          <input type="number" data-f="remoteHours" aria-label="${t.forecastHours}" min="0" step="1"
-                 placeholder="${t.remoteAllHours}" value="${Number.isSafeInteger(configuredHours) ? configuredHours : ''}"
+          <input type="number" data-f="remoteHours" aria-label="${t.forecastHours}" step="any"
+                 placeholder="${t.remoteAllHours}" value="${Number.isFinite(configuredHours) ? configuredHours : ''}"
                  style="width:80px;display:inline-block"> h
         </label>` : ''}
         ${s.remoteServer ? '' : `<span class="vol" data-r="vol">${fmtEstimate(mb)}</span>`}
@@ -623,7 +647,7 @@ function renderSources() {
         el.addEventListener('change', () => {
           if (!el.reportValidity()) return
           if (el.value === '') delete s.remoteHours
-          else if (Number.isSafeInteger(el.valueAsNumber)) s.remoteHours = el.valueAsNumber
+          else if (Number.isFinite(el.valueAsNumber)) s.remoteHours = el.valueAsNumber
           else return
           renderSources()
           markDirty()
@@ -633,15 +657,16 @@ function renderSources() {
       if (f === 'hours') {
         // live label/volume update while sliding; commit on release
         el.addEventListener('input', () => {
-          const h = parseInt(el.value, 10)
+          const h = leads ? leads[Number(el.value)] : Number(el.value)
           const lbl = card.querySelector('[data-r="hval"]')
-          lbl.textContent = h
+          lbl.textContent = formatLead(h)
+          el.setAttribute('aria-valuetext', formatLead(h))
           lbl.parentElement.classList.toggle('at-max', h >= horizon.maxHours)
           if (!s.remoteServer)
             card.querySelector('[data-r="vol"]').textContent = fmtEstimate(estimateMB({ ...s, hours: h }))
         })
         el.addEventListener('change', () => {
-          const h = Number(el.value)
+          const h = leads ? leads[Number(el.value)] : Number(el.value)
           if (!s.remoteServer) s.hours = h
           else if (h < horizon.maxHours) s.remoteHours = h
           else delete s.remoteHours
@@ -846,6 +871,18 @@ async function pollStatus() {
     statusBySource = {}
     for (const s of data.sources) statusBySource[s.name] = s
     updateStatusUI()
+    for (const { id, state } of data.remoteAccess ?? []) {
+      const ready = state === 'ready'
+      const changed = (remoteWriteAccess.get(id) ?? false) !== ready
+      remoteWriteAccess.set(id, ready)
+      if (changed && config.sources.some(s => s.remoteServer === id))
+        void readRemoteModels(id, true)
+    }
+    for (const source of config.sources) {
+      const model = source.remoteModel ?? (sourceNames.has(source) ? source.model.toUpperCase() : '')
+      if (source.remoteServer && modelCatalogues.get(source.remoteServer)?.models?.some(item => item.model === model))
+        remotePreview(source.remoteServer, model, source.resolution, true)
+    }
   } catch { /* server unreachable — keep last state */ }
 }
 
