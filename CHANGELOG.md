@@ -1,56 +1,43 @@
 # Changelog
 
-All notable changes to this project will be documented in this file.
+This changelog groups changes by stable release. See [GitHub Releases](https://github.com/macjl/signalk-grib-downloader/releases) for prerelease notes.
+
+## [0.8.0] - 2026-11-21
+
+- Publish GRIBs to Forecast Dataset Provider 0.4.0 or later on the same Signal K instance, without device access approval or a catalogue token.
+- Remove the destination URL and token settings. Existing receipts from the default loopback catalogue are reused. If you previously published to a different server, that server keeps its data.
+- Keep the historical GRIB filesystem export and downloads from remote Signal K sources, including on-demand cropping on a compatible source server.
 
 ## [0.7.0] - 2026-11-20
 
-- Add remote Signal K sources with model discovery, verified coverage and optional geographic and forecast-time selection.
-- Show model coverage on the map and skip the download when the latest matching run is outside the requested area.
-- Allow settings changes during transfers and honour the last data-deletion choice when editing sources.
-- Keep legacy GRIB export available for existing consumers.
+**Download smaller AROME, ARPÈGE and ECMWF GRIBs over the boat's limited connection.**
 
-## [0.7.0-beta.6] - 2026-11-20
+A Signal K server ashore or in the cloud downloads the full GRIB2 forecast and
+stores it in Forecast Dataset Provider 0.3.0. On board, GRIB Downloader on the
+boat's Signal K server requests only the sailing area and forecast hours you
+need. GRIB Processor 0.1.0 trims the GRIB on the source server before transfer,
+so only the smaller file uses the boat's connection.
 
-- Check other remote datasets when published bounds rule out the requested area.
-- Save confirmed source data deletions with the settings. Resume pending cleanup
-  after active downloads finish, including after a reload or plugin restart.
+The source catalogue must contain the model's GRIB2 files and advertise the
+requested selections. Geographic cropping requires a compatible grid. ECMWF
+files can come from any producer publishing to that catalogue.
 
-## [0.7.0-beta.5] - 2026-11-20
-
-- Save operational settings while a transfer is running. The active transfer
-  keeps its original settings and subsequent transfers use the updated ones.
-- Report source data deletion separately from saving settings.
-- Explain when a remote catalogue does not publish geographic coverage.
-
-## [0.7.0-beta.4] - 2026-11-20
-
-- Show configured model coverage and the requested area on the map.
-- Clip remote GRIB requests to the known intersection and skip sources with
-  no overlap. Skip out-of-area direct regional products.
-- Retry when all remote processing slots are busy.
-
-## [0.7.0-beta.3] - 2026-11-20
-
-- Use verified GRIB validity times for the remote forecast slider and cutoff,
-  including irregular and sub-hourly steps.
-- Refresh remote capabilities after token approval and when a verified
-  inventory becomes available. Use acquisition metadata when only an
-  estimated forecast horizon is available.
-- Wrap source controls and long text within the webapp cards on narrow screens.
-
-## [0.7.0-beta.2] - 2026-11-19
-
-- Keep the Catalogue link clickable when the webapp refreshes a source status.
-
-## [0.7.0-beta.1] - 2026-11-19
-
-- Add remote Signal K catalogues as a download source alongside NOAA,
-  Météo-France and DWD. Discover GRIB2 models from the selected catalogue.
-- Request a read/write token from the remote Signal K server in Plugin Config
-  and show which selections the source can serve before downloading.
-- Use the remote GRIB export API for area and time selections. Read the actual
-  retained forecast range from the result, including irregular time steps.
-- Configure the catalogue lifetime for downloads per source.
+- Discover remote models and resolutions automatically and request a read/write
+  token from Plugin Config. The webapp shows available selections before
+  downloading and retrieves the original assets when the server offers no
+  applicable selection.
+- See published model coverage on the map. Skip sources outside the requested
+  area, including when the latest remote run is out of range. The forecast
+  slider uses verified validity times when available, including irregular and
+  sub-hourly steps.
+- **Retention.** Set a lifetime in days for new catalogue acquisitions per
+  source. The archive count applies to acquisitions without an expiration and
+  to historical filesystem exports.
+- **Settings and cleanup.** Save settings during active transfers. Confirmed
+  source data deletions follow the last choice made before saving and resume
+  after transfers finish or Signal K restarts.
+- Keep Catalogue links clickable during status refreshes and wrap source
+  controls within their cards on narrow screens.
 
 ## [0.6.1] - 2026-11-08
 
@@ -95,61 +82,23 @@ All notable changes to this project will be documented in this file.
 
 ## [0.4.0] - 2026-10-30
 
-- First stable catalogue-based downloader, including direct streaming,
-  asset-level restart recovery and automatic readwrite access requests.
+- First stable catalogue-based downloader. Stream NOAA and Météo-France files
+  directly into the Forecast Dataset Provider and decompress ICON-EU in memory.
+  The catalogue measures each asset's size and SHA-256 during receipt and
+  exposes progress and links to completed datasets.
+- Recover missing assets and interrupted publication responses after a restart.
+  Reject empty, truncated or invalid GRIB2 streams before commit and preserve
+  previously committed forecasts when replacement fails (#15).
+- Request catalogue read/write access in Signal K when no token is configured.
+  Approval resumes downloads, including after a restart. The webapp reports
+  pending or denied access and supports archive retention and explicit deletion
+  of the datasets this Downloader published.
 - Breaking upgrade from 0.3.x: publish only to Forecast Dataset Provider 0.1.0;
   update GRIB Weather Provider to 0.7.0 in the same maintenance window. Existing
   local GRIB files are preserved but not imported automatically.
 - Document installation, access approvals, verification and rollback in
   docs/upgrading.md. The complete weather chain requires Node 24+.
-- Failed replacement acquisitions retain previously committed forecasts (#15).
-
-## [0.4.0-beta.3] - 2026-10-21
-
-- Request catalogue access automatically through Signal K Access Requests when
-  no token is configured; require administrator approval with this plugin's
-  least-privilege permissions and persist the token privately.
-- Resume pending requests across restarts, report waiting/denied states and
-  resume catalogue work immediately after approval. Stop polling on plugin stop.
-- Renew automatically issued tokens rejected with HTTP 401 while preserving
-  manually configured or concurrently rotated tokens.
-- Cover the access lifecycle, plugin startup and approval-driven resumption;
-  validate both permission levels against an actual Signal K server.
-
-## [0.4.0-beta.2] - 2026-10-21
-
-- Keep journal writes compatible with Windows: flush the file before rename,
-  and flush the containing directory on systems that support directory fsync.
-- Stream GFS and Météo-France bodies directly to Forecast Dataset Provider 0.1.1+;
-  declare asset IDs without sizes and let the provider measure size and SHA-256.
-- Decompress ICON-EU in memory one variable at a time and stream concatenated
-  GRIB messages without temporary GRIB files, markers or local archives.
-- Schedule from durable catalogue receipts, preserving beta.1 publication journals.
-- Resume only missing provider assets; recover lost create, upload and commit
-  responses using acquisition IDs and fsynced stream receipts.
-- Preserve publication references on generic 404 responses; require explicit
-  provider not-found codes before discarding an identity.
-- Reject empty, truncated or non-GRIB2 streams before commit and abort both
-  upstream and upload on cancellation. Preserve previous committed acquisitions.
-- Add actual provider integration tests for progress, interruption, limits and
-  lost commit responses; retain publication-window and connectivity tests.
-
-## [0.4.0-beta.1] - 2026-10-21
-
-- Require catalogue publication in every orchestrator path; remove the internal
-  standalone local-output bypass and the shared-directory `gribsRoot` setting.
-- Keep downloads in the private `<plugin data directory>/downloads/` workspace.
-  Existing directories remain untouched and can be copied into that workspace.
-- Publish completed GRIB runs to Forecast Dataset Provider 0.1 via authenticated,
-  streaming multi-asset HTTP publication with SHA-256 validation.
-- Persist publication journals for asset-level restart recovery and lost commit
-  responses; publish existing completed runs without downloading them again.
-- Expose publication-pending state and committed dataset links in the webapp.
-- Apply archive retention and explicit source-data deletion to owned catalogue
-  acquisitions, respecting provider conflicts and preserving local cache use.
-- Use a readwrite token file; replace the Weather Provider requirement with
-  Forecast Dataset Provider. Require Node 20.19+ and Signal K 2.34+ within 2.x.
-- Abort transfers on stop and reject configuration/deletion races while busy.
+- Require Node.js 20.19 or later and Signal K 2.34 or later within 2.x.
 
 ## [0.3.0] - 2026-10-20
 

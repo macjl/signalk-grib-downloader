@@ -39,8 +39,6 @@ export interface RemoteServerSetting {
 
 export interface PluginSettings {
   remoteServers?: RemoteServerSetting[]
-  catalogueUrl?: string             // Signal K server URL, default loopback:3000
-  catalogueTokenFile?: string       // readwrite bearer token; never exposed via settings/status
   legacyExportEnabled?: boolean     // opt-in bridge for historical file consumers
   gribsRoot?: string                // export root only; catalogue remains authoritative
   checkIntervalMinutes?: number      // optional override of every model's probe interval

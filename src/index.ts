@@ -11,6 +11,7 @@ import { sourceDirName } from './scheduler'
 import { RemoteCatalogue, normalizeRemoteUrl, remoteId, validRemoteModel } from './remote-catalogue'
 import { AppSettings, InternetState, PluginSettings, SourceSetting } from './types'
 import { directDomains, mapZone, validZone } from './coverage'
+import { DEFAULT_CATALOGUE_URL, findLocalCatalogue, WAITING_FOR_LOCAL_CATALOGUE } from './local-catalogue'
 
 const PLUGIN_ID = 'signalk-grib-downloader'
 const DEFAULT_CHECK_INTERVAL_MINUTES = 5
@@ -60,16 +61,6 @@ const buildSchema = (defaultInterval: number, defaultMultiplier: number) => ({
         'Manual downloads are never blocked.',
       default: defaultMultiplier,
       minimum: 1,
-    },
-    catalogueUrl: {
-      type: 'string', title: 'Forecast catalogue server URL',
-      description: 'Signal K server running Forecast Dataset Provider with streamed publications (0.1.0-beta.1 or later). Remote servers require HTTPS.',
-      default: 'http://127.0.0.1:3000',
-    },
-    catalogueTokenFile: {
-      type: 'string', title: 'Catalogue token file',
-      description: 'Token file, default <plugin data directory>/catalogue-token. When missing, approve the automatic readwrite request in Signal K Security > Access Requests. File contents are never returned by the webapp.',
-      default: '',
     },
     remoteServers: {
       type: 'array',
@@ -125,7 +116,6 @@ module.exports = (server: ServerAPI): Plugin => {
   let remotes = new Map<string, RemoteCatalogue>()
   let remoteAccesses = new Map<string, CatalogueAccess>()
   let catalogue: CataloguePublisher
-  let access: CatalogueAccess | null = null
   const deleting = new Map<string, AbortController>()
   let deletionTimer: ReturnType<typeof setTimeout> | undefined
   let settings: SavedSettings = { ...DEFAULT_APP_SETTINGS }
@@ -218,8 +208,8 @@ module.exports = (server: ServerAPI): Plugin => {
 
   const updateStatus = () => {
     if (!orchestrator) return
-    if (access && access.status().state !== 'ready') {
-      server.setPluginStatus(access.status().message)
+    if (catalogue.connection === 'waiting') {
+      server.setPluginStatus(WAITING_FOR_LOCAL_CATALOGUE)
       return
     }
     const parts = orchestrator.status().map(s => {
@@ -282,9 +272,10 @@ module.exports = (server: ServerAPI): Plugin => {
   const scheduleNextTick = (): void => {
     if (timer) { clearTimeout(timer); timer = null }
     nextTickAtMs = null
-    if (!orchestrator || autoPaused() || (access && access.status().state !== 'ready')) return
-    const delay = nextAutoTickDelayMs()
-    if (delay === null) return
+    if (!orchestrator || autoPaused()) return
+    const next = nextAutoTickDelayMs()
+    if (next === null) return
+    const delay = catalogue.connection === 'waiting' ? 2000 : next
     nextTickAtMs = Date.now() + delay
     timer = setTimeout(runTick, delay)
     server.debug(`auto: next check in ${Math.round(delay / 60_000)} min`)
@@ -297,7 +288,11 @@ module.exports = (server: ServerAPI): Plugin => {
     if (timer) { clearTimeout(timer); timer = null }
     nextTickAtMs = null
     if (!orchestrator || ticking || deleting.size) return
-    if (access && access.status().state !== 'ready') { updateStatus(); return }
+    if (catalogue.connection === 'waiting') {
+      updateStatus()
+      scheduleNextTick()
+      return
+    }
     ticking = true
     orchestrator.tick(internetState, probeTiming())
       .catch((err: unknown) => server.debug(`tick error: ${err}`))
@@ -386,31 +381,25 @@ module.exports = (server: ServerAPI): Plugin => {
 
     start: (options: PluginSettings & AppSettings) => {
       infra = {
-        catalogueUrl: options?.catalogueUrl,
-        catalogueTokenFile: options?.catalogueTokenFile,
         legacyExportEnabled: options?.legacyExportEnabled !== false,
         gribsRoot: options?.gribsRoot,
         checkIntervalMinutes: validInterval(options?.checkIntervalMinutes),
         meteredIntervalMultiplier: validMultiplier(options?.meteredIntervalMultiplier),
       }
-      const tokenFile = expandHome(infra.catalogueTokenFile || path.join(server.getDataDirPath(), 'catalogue-token'))
-      if (!path.isAbsolute(tokenFile)) throw new Error('Catalogue token file must be absolute')
+      const dataDir = server.getDataDirPath()
       remotes = new Map()
       remoteAccesses = new Map()
-      const destination = normalizeRemoteUrl(infra.catalogueUrl || 'http://127.0.0.1:3000')
       for (const peer of options?.remoteServers ?? []) {
         if (!peer || typeof peer.id !== 'string' || !remoteId.test(peer.id) || remotes.has(peer.id))
           throw new Error('Remote Signal K server identifiers must be valid and unique')
         const remoteToken = peer.tokenFile ? expandHome(peer.tokenFile) : undefined
-        if (remoteToken && (!path.isAbsolute(remoteToken) || path.resolve(remoteToken) === path.resolve(tokenFile)))
-          throw new Error('Configure a separate absolute token file for the remote Signal K source')
+        if (remoteToken && !path.isAbsolute(remoteToken))
+          throw new Error('Configure an absolute token file for the remote Signal K source')
         const endpoint = normalizeRemoteUrl(peer.url)
-        if (endpoint === destination) throw new Error('Use a different server for the remote source and destination catalogue')
+        if (endpoint === DEFAULT_CATALOGUE_URL) throw new Error('Use a different Signal K server as the remote source')
         const key = createHash('sha256').update(endpoint).digest('hex')
         const dataDir = path.join(server.getDataDirPath(), 'remote-access', peer.id + '-' + key)
         const managedToken = path.join(dataDir, 'token')
-        if (path.resolve(managedToken) === path.resolve(tokenFile))
-          throw new Error('Configure a separate token file for the destination catalogue')
         const authorizer = new CatalogueAccess({
           endpoint, tokenFile: managedToken, dataDir,
           pluginId: PLUGIN_ID, permissions: 'readwrite', manualRequest: true,
@@ -422,13 +411,8 @@ module.exports = (server: ServerAPI): Plugin => {
         remoteAccesses.set(peer.id, authorizer)
       }
       const legacyExport = infra.legacyExportEnabled ? new LegacyGribExporter(expandHome(infra.gribsRoot || '~/.signalk/gribs')) : undefined
-      catalogue = new CataloguePublisher(infra.catalogueUrl || 'http://127.0.0.1:3000', tokenFile, server.getDataDirPath(), () => authorizer.token(), token => authorizer.rejected(token), legacyExport)
-      const authorizer = new CatalogueAccess({
-        endpoint: catalogue.endpoint, tokenFile, dataDir: server.getDataDirPath(),
-        pluginId: PLUGIN_ID, permissions: 'readwrite', onChange: updateStatus,
-        onReady: () => { orchestrator?.retryAfterAccessApproval(); updateStatus(); if (orchestrator && !autoPaused()) runTick() },
-      })
-      access = authorizer
+      const localScope = path.dirname(dataDir)
+      catalogue = new CataloguePublisher(dataDir, () => findLocalCatalogue(localScope), legacyExport)
       settings = loadSettings(options ?? {})
 
       // Follow network.internet.state if some plugin publishes it: seed
@@ -445,7 +429,6 @@ module.exports = (server: ServerAPI): Plugin => {
       orchestrator = new Orchestrator(settings.sources ?? [], catalogue,
         (msg: string) => server.debug(msg), updateStatus, settings.bbox, remotes)
       refreshSchedule()
-      access.start()
       scheduleDataDeletions()
       for (const authorizer of remoteAccesses.values()) authorizer.start()
     },
@@ -453,11 +436,9 @@ module.exports = (server: ServerAPI): Plugin => {
     stop: async () => {
       const active = orchestrator
       orchestrator = null
-      const previousAccess = access
       const previousRemoteAccess = remoteAccesses
-      access = null
       remoteAccesses = new Map()
-      await Promise.all([previousAccess?.stop(), ...Array.from(previousRemoteAccess.values(), authorizer => authorizer.stop())])
+      await Promise.all(Array.from(previousRemoteAccess.values(), authorizer => authorizer.stop()))
       stopInternetStream?.()
       stopInternetStream = null
       if (timer) { clearTimeout(timer); timer = null }
@@ -471,9 +452,10 @@ module.exports = (server: ServerAPI): Plugin => {
     registerWithRouter: (router: any) => {
       router.get('/status', (_req: any, res: any) => {
         if (!orchestrator) return res.status(503).json({ error: 'plugin not started' })
+        const transport = catalogue.connection
         res.json({
-          catalogueUrl: catalogue.endpoint,
-          catalogueAccess: access?.status(),
+          catalogueTransport: transport,
+          ...(transport === 'waiting' ? { schedulerError: WAITING_FOR_LOCAL_CATALOGUE } : {}),
           remoteAccess: remoteAccessStatus(),
           legacyExportEnabled: infra.legacyExportEnabled === true,
           checkIntervalMinutes: intervalMinutes(),
