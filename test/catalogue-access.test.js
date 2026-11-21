@@ -9,6 +9,7 @@ const path = require('node:path')
 const http = require('node:http')
 const { randomUUID, createHash } = require('node:crypto')
 const { CatalogueAccess } = require('../dist/catalogue-access')
+const { remoteHttpEndpoint } = require('./fixtures/http.cjs')
 const pkg = require('../package.json')
 
 const permissions = pkg.name === 'signalk-grib-downloader' ? 'readwrite' : 'readonly'
@@ -200,12 +201,13 @@ test('access request redirects are refused and never followed', async t => {
 
 test('remote plaintext and URLs containing credentials are rejected', () => {
   for (const endpoint of ['http://example.org', 'https://user:secret@example.org', 'https://example.org?token=secret']) {
-    assert.throws(() => new CatalogueAccess({ endpoint, tokenFile: path.join(os.tmpdir(), 'catalogue-token'), dataDir: os.tmpdir(), pluginId: pkg.name, permissions }), /Invalid catalogue access URL/)
+    assert.throws(() => new CatalogueAccess({ endpoint, tokenFile: path.join(os.tmpdir(), 'catalogue-token'), dataDir: os.tmpdir(), pluginId: pkg.name, permissions }), /Remote Signal K/)
   }
 })
 
-test('remote token request is bound to a saved server and approved token is used without overwriting the manual file', async t => {
+test('an opted-in HTTP source can request and use a token without overwriting the manual file', async t => {
   const f = await fixture(t)
+  const endpoint = remoteHttpEndpoint(t, f.options.endpoint)
   fs.writeFileSync(f.options.tokenFile, 'destination-token\n')
   const manual = path.join(f.directory, 'shore-manual-token')
   fs.writeFileSync(manual, 'manual-token\n')
@@ -225,17 +227,19 @@ test('remote token request is bound to a saved server and approved token is used
     await routes[route](req, res)
     return { status, body }
   }
-  plugin.start({ legacyExportEnabled: false, remoteServers: [{ id: 'shore', url: f.options.endpoint, tokenFile: manual }] })
+  const peer = { id: 'shore', url: endpoint, tokenFile: manual }
+  assert.throws(() => plugin.start({ remoteServers: [peer] }), /requires HTTPS/)
+  plugin.start({ legacyExportEnabled: false, remoteServers: [{ ...peer, allowHttp: true }] })
   const status = async () => (await call('get /remote-access')).body[0]
   const request = (server, endpoint) => call('post /remote-access/:server', { params: { server }, body: { endpoint } })
   const models = () => call('get /remote-models/:server', { params: { server: 'shore' } })
   assert.equal((await status()).state, 'idle')
-  assert.equal((await request('unknown', f.options.endpoint)).status, 404)
+  assert.equal((await request('unknown', endpoint)).status, 404)
   assert.equal((await request('shore', 'https://other.example')).status, 409)
   assert.equal(f.requests.length, 0)
   await models()
   assert.equal(f.catalogueRequests.at(-1).auth, 'Bearer manual-token')
-  assert.equal((await request('shore', f.options.endpoint)).status, 202)
+  assert.equal((await request('shore', endpoint)).status, 202)
   f.approved = true
   for (let i = 0; i < 700 && (await status()).state !== 'ready'; i++)
     await new Promise(resolve => setTimeout(resolve, 10))

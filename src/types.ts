@@ -34,6 +34,7 @@ export type InternetState = 'online' | 'offline' | 'metered' | 'captive' | 'unkn
 export interface RemoteServerSetting {
   id: string
   url: string
+  allowHttp?: boolean
   tokenFile?: string
 }
 

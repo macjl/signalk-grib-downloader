@@ -2,12 +2,14 @@
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 import { randomUUID, createHash } from 'node:crypto'
+import { normalizeRemoteUrl } from './remote-url'
 
 type Permission = 'readonly' | 'readwrite'
 type State = 'idle' | 'pending' | 'ready' | 'denied' | 'error'
 interface Pending { endpoint: string; clientId: string; requestId?: string; denied?: boolean; tokenHash?: string }
 interface Options {
   endpoint: string; tokenFile: string; dataDir: string; pluginId: string
+  allowHttp?: boolean
   permissions: Permission; onChange?: () => void; onReady?: () => void
   manualRequest?: boolean; description?: string
   pollMs?: number; retryMs?: number
@@ -37,10 +39,7 @@ export class CatalogueAccess {
   private counters = { requestAttempts: 0, approvalResponses: 0, tokenWrites: 0, tokenChecks: 0, renewals: 0 }
 
   constructor(private options: Options) {
-    const url = new URL(options.endpoint)
-    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash ||
-        (url.protocol === 'http:' && !['localhost', '127.0.0.1', '[::1]'].includes(url.hostname))) throw new Error('Invalid catalogue access URL: remote servers require HTTPS')
-    options.endpoint = url.href.replace(/\/$/, '')
+    options.endpoint = normalizeRemoteUrl(options.endpoint, options.allowHttp)
     if (!path.isAbsolute(options.tokenFile)) throw new Error('Catalogue token file must be absolute')
     this.stateFile = path.join(options.dataDir, 'catalogue-access-' + createHash('sha256').update(options.tokenFile).digest('hex').slice(0, 16) + '.json')
     try { this.pending = JSON.parse(fs.readFileSync(this.stateFile, 'utf8')) } catch (error) {

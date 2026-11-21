@@ -4,10 +4,11 @@ const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const os = require('node:os')
 const path = require('node:path')
-const { RemoteCatalogue, normalizeRemoteUrl } = require('../dist/remote-catalogue')
+const { RemoteCatalogue } = require('../dist/remote-catalogue')
+const { normalizeRemoteUrl } = require('../dist/remote-url')
 const { Orchestrator } = require('../dist/orchestrator')
 const { sourceDirName } = require('../dist/scheduler')
-const { server, fixture, grib, hash, API } = require('./fixtures/http.cjs')
+const { server, fixture, grib, hash, API, remoteHttpEndpoint } = require('./fixtures/http.cjs')
 
 const source = { model: 'arome', resolution: '0025', remoteServer: 'shore', autoDownload: false }
 const datasetId = 'e62ec07f-f099-4a94-9e82-ac2fa21fded1'
@@ -23,7 +24,7 @@ const jobPath = `${API}/requests/${jobId}`
 
 async function setup(t, { processor = false, time = false, area = true, statusAvailable = true,
   userLevel = 'readwrite', missing = false, broken = false, unsafe = false, badHash = false, customModel = false,
-  parameters, verifiedForecast, coverage, alternateCoverage, alternateRun, pendingArea = false, busy = 0 } = {}) {
+  parameters, verifiedForecast, coverage, alternateCoverage, alternateRun, pendingArea = false, busy = 0, allowHttp = false } = {}) {
   const original = grib(2048), crop = grib(256)
   const tokenDir = fs.mkdtempSync(path.join(os.tmpdir(), 'remote-signalk-token-'))
   const tokenFile = path.join(tokenDir, 'token')
@@ -121,7 +122,8 @@ async function setup(t, { processor = false, time = false, area = true, statusAv
     return json(404, { code: 'DATASET_NOT_FOUND' })
   })
   const f = await fixture(t)
-  const adapter = new RemoteCatalogue({ id: 'shore', url: peer.base, tokenFile })
+  const url = allowHttp ? remoteHttpEndpoint(t, peer.base) : peer.base
+  const adapter = new RemoteCatalogue({ id: 'shore', url, allowHttp, tokenFile })
   const map = new Map([['shore', adapter]])
   const orchestrator = (area, setting = source) => new Orchestrator([setting], f.publisher(), () => {}, () => {}, area, map)
   return { f, orchestrator, requests, received, original, crop, peer, adapter, tokenFile, fields,
@@ -162,8 +164,9 @@ for (const [options, reason] of [
   })
 }
 
-test('sends the selected map area, downloads only the crop, and repeats on a changed area of the same cycle', async t => {
-  const { f, orchestrator, requests, received, crop } = await setup(t, { processor: true })
+test('sends the selected area to an opted-in HTTP source and downloads only the crop', async t => {
+  const { adapter, f, orchestrator, requests, received, crop } = await setup(t, { processor: true, allowHttp: true })
+  assert.deepEqual(await adapter.models(AbortSignal.timeout(5_000)), [{ model: 'AROME', resolutions: [] }])
   const first = orchestrator(bbox)
   assert.equal(await first.downloadSource(source), true, first.status()[0].lastError)
   assert.deepEqual(received[0].selection.bbox, [-6, 44, -1, 48])
@@ -346,10 +349,16 @@ test('failed crops and invalid remote links or checksums do not silently downloa
   }
 })
 
-test('remote server URLs require HTTPS off loopback and cannot contain credentials', () => {
-  assert.throws(() => normalizeRemoteUrl('http://shore.example'))
-  assert.throws(() => normalizeRemoteUrl('https://user:pass@shore.example'))
-  assert.equal(normalizeRemoteUrl('https://shore.example/signalk/'), 'https://shore.example/signalk')
+test('an explicit HTTP opt-in applies only to the scheme restriction', () => {
+  assert.throws(() => normalizeRemoteUrl('http://shore.example'), /requires HTTPS/)
+  assert.throws(() => normalizeRemoteUrl('http://shore.example', 'true'), /requires HTTPS/)
+  assert.equal(normalizeRemoteUrl('http://shore.example:3000/signalk/', true), 'http://shore.example:3000/signalk')
+  assert.equal(normalizeRemoteUrl('http://127.0.0.1:3000/'), 'http://127.0.0.1:3000')
+  for (const allowHttp of [false, true]) {
+    assert.equal(normalizeRemoteUrl('https://shore.example/signalk/', allowHttp), 'https://shore.example/signalk')
+    for (const url of ['ftp://shore.example', 'http://user:pass@shore.example', 'http://shore.example?token=x', 'http://shore.example/#fragment'])
+      assert.throws(() => normalizeRemoteUrl(url, allowHttp), /without credentials, query or fragment/)
+  }
 })
 
 test('discovers and downloads a named GRIB2 model published by a different producer', async t => {

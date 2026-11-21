@@ -8,6 +8,8 @@ const t = french ? {
   remove: 'Supprimer le serveur',
   server: 'Identifiant du serveur',
   url: 'URL du serveur Signal K distant',
+  allowHttp: 'Autoriser HTTP sur un réseau de confiance',
+  allowHttpHint: 'Pour un réseau privé de confiance comme Tailscale. Le jeton Signal K est transmis en HTTP.',
   optionalToken: 'Fichier d’un jeton existant (facultatif)',
   request: 'Demander un jeton en lecture/écriture',
   retry: 'Réessayer la demande',
@@ -31,6 +33,8 @@ const t = french ? {
   remove: 'Remove server',
   server: 'Server identifier',
   url: 'Remote Signal K server URL',
+  allowHttp: 'Allow HTTP on a trusted network',
+  allowHttpHint: 'For a trusted private network such as Tailscale. The Signal K token is sent over HTTP.',
   optionalToken: 'Existing token file (optional)',
   request: 'Request a read/write token',
   retry: 'Retry request',
@@ -152,6 +156,12 @@ export default function PluginConfigurationPanel({ configuration, save }) {
             onChange={event => setPeer(index, 'id', event.target.value)} />
           <Field label={t.url} type="url" value={peer.url} required placeholder="https://signalk.example.org"
             onChange={event => setPeer(index, 'url', event.target.value)} />
+          <label className="d-block mb-3">
+            <input type="checkbox" className="me-2" checked={peer.allowHttp === true}
+              onChange={event => setPeer(index, 'allowHttp', event.target.checked)} />
+            {t.allowHttp}
+            <small className="form-text d-block">{t.allowHttpHint}</small>
+          </label>
           <Field label={t.optionalToken} value={peer.tokenFile}
             onChange={event => setPeer(index, 'tokenFile', event.target.value)} />
           <RemoteToken access={access} refresh={refresh} key={peer.id + ':' + endpoint} />
