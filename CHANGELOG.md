@@ -2,6 +2,10 @@
 
 This changelog groups changes by stable release. See [GitHub Releases](https://github.com/macjl/signalk-grib-downloader/releases) for prerelease notes.
 
+## [0.9.1] - 2026-11-21
+
+- Recommend GRIB Processor in the Signal K App Store for on-demand GRIB cropping and export.
+
 ## [0.9.0] - 2026-11-21
 
 - Add an opt-in HTTP setting per remote Signal K source for trusted networks such as Tailscale. HTTPS remains the default.

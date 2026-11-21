@@ -1,6 +1,6 @@
 {
   "name": "signalk-grib-downloader",
-  "version": "0.9.0",
+  "version": "0.9.1",
   "description": "Downloads GRIB forecasts and publishes immutable datasets to signalk-forecast-dataset-provider",
   "main": "dist/index.js",
   "scripts": {
@@ -52,7 +52,8 @@
       "./public/screenshot.png"
     ],
     "recommends": [
-      "@meri-imperiumi/signalk-internet"
+      "@meri-imperiumi/signalk-internet",
+      "signalk-grib-processor"
     ],
     "requires": [
       "signalk-forecast-dataset-provider"
