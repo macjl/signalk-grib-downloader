@@ -128,4 +128,19 @@ async function waitFor(check) {
   const deadline = Date.now() + 5000
   while (!check()) { if (Date.now() > deadline) throw new Error('Condition not reached'); await new Promise(resolve => setTimeout(resolve, 10)) }
 }
-module.exports = { fixture, server, grib, waitFor, hash, API }
+
+function remoteHttpEndpoint(t, endpoint) {
+  const local = new URL(endpoint)
+  const remote = new URL(endpoint)
+  remote.hostname = 'shore.example.test'
+  const original = globalThis.fetch
+  t.mock.method(globalThis, 'fetch', (input, options) => {
+    const target = new URL(input)
+    if (target.origin !== remote.origin) return original(input, options)
+    target.hostname = local.hostname
+    return original(target, options)
+  })
+  return remote.href.replace(/\/$/, '')
+}
+
+module.exports = { fixture, server, grib, waitFor, hash, API, remoteHttpEndpoint }

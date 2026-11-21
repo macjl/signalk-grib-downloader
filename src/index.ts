@@ -8,7 +8,8 @@ import { CataloguePublisher } from './catalogue'
 import { CatalogueAccess } from './catalogue-access'
 import { LegacyGribExporter } from './legacy-export'
 import { sourceDirName } from './scheduler'
-import { RemoteCatalogue, normalizeRemoteUrl, remoteId, validRemoteModel } from './remote-catalogue'
+import { RemoteCatalogue, remoteId, validRemoteModel } from './remote-catalogue'
+import { normalizeRemoteUrl } from './remote-url'
 import { AppSettings, InternetState, PluginSettings, SourceSetting } from './types'
 import { directDomains, mapZone, validZone } from './coverage'
 import { DEFAULT_CATALOGUE_URL, findLocalCatalogue, WAITING_FOR_LOCAL_CATALOGUE } from './local-catalogue'
@@ -71,7 +72,9 @@ const buildSchema = (defaultInterval: number, defaultMultiplier: number) => ({
         required: ['id', 'url'],
         properties: {
           id: { type: 'string', title: 'Server identifier', pattern: remoteId.source },
-          url: { type: 'string', title: 'Signal K HTTPS base URL' },
+          url: { type: 'string', title: 'Signal K base URL' },
+          allowHttp: { type: 'boolean', title: 'Allow HTTP on a trusted network', default: false,
+            description: 'Use only on a trusted private network such as Tailscale. The URL and access token are sent over HTTP.' },
           tokenFile: { type: 'string', title: 'Remote token file',
             description: 'Optional file for an existing token. An approved token requested from this panel is stored separately and takes precedence.' },
         },
@@ -395,13 +398,14 @@ module.exports = (server: ServerAPI): Plugin => {
         const remoteToken = peer.tokenFile ? expandHome(peer.tokenFile) : undefined
         if (remoteToken && !path.isAbsolute(remoteToken))
           throw new Error('Configure an absolute token file for the remote Signal K source')
-        const endpoint = normalizeRemoteUrl(peer.url)
+        const endpoint = normalizeRemoteUrl(peer.url, peer.allowHttp)
         if (endpoint === DEFAULT_CATALOGUE_URL) throw new Error('Use a different Signal K server as the remote source')
         const key = createHash('sha256').update(endpoint).digest('hex')
         const dataDir = path.join(server.getDataDirPath(), 'remote-access', peer.id + '-' + key)
         const managedToken = path.join(dataDir, 'token')
         const authorizer = new CatalogueAccess({
           endpoint, tokenFile: managedToken, dataDir,
+          allowHttp: peer.allowHttp,
           pluginId: PLUGIN_ID, permissions: 'readwrite', manualRequest: true,
           description: `GRIB Downloader — remote forecast source ${peer.id}`,
           onReady: () => { orchestrator?.retryAfterAccessApproval(peer.id); updateStatus(); if (orchestrator && !autoPaused()) runTick() },

@@ -2,6 +2,11 @@
 
 This changelog groups changes by stable release. See [GitHub Releases](https://github.com/macjl/signalk-grib-downloader/releases) for prerelease notes.
 
+## [0.9.0] - 2026-11-21
+
+- Add an opt-in HTTP setting per remote Signal K source for trusted networks such as Tailscale. HTTPS remains the default.
+- Support remote token requests, forecast discovery and GRIB downloads, including server-side cropping, over an explicitly enabled HTTP connection.
+
 ## [0.8.0] - 2026-11-21
 
 - Publish GRIBs to Forecast Dataset Provider 0.4.0 or later on the same Signal K instance, without device access approval or a catalogue token.

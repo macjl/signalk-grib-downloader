@@ -4,6 +4,7 @@ import { remoteModelName, runStamp, sourceDirName } from './scheduler'
 import type { Bbox, RemoteServerSetting, SourceSetting } from './types'
 import type { RunPlan } from './downloader'
 import { mapZone, overlap, validZone, type Zone } from './coverage'
+import { normalizeRemoteUrl } from './remote-url'
 
 const api = '/plugins/signalk-forecast-dataset-provider'
 const uuid = /^[a-f\d]{8}(?:-[a-f\d]{4}){3}-[a-f\d]{12}$/i
@@ -75,14 +76,6 @@ class RemoteError extends Error {
   constructor(readonly status: number, readonly code?: string, readonly retryAfter?: string | null) {
     super(`Remote Signal K: HTTP ${status}${code ? ' (' + code + ')' : ''}`)
   }
-}
-export function normalizeRemoteUrl(value: string): string {
-  const parsed = new URL(value)
-  const loopback = ['localhost', '127.0.0.1', '[::1]'].includes(parsed.hostname)
-  if ((parsed.protocol !== 'https:' && !(loopback && parsed.protocol === 'http:')) ||
-      parsed.username || parsed.password || parsed.search || parsed.hash)
-    throw new Error('Remote Signal K requires an HTTPS URL, without credentials, query or fragment (HTTP is allowed on loopback)')
-  return parsed.href.replace(/\/$/, '')
 }
 export const remoteZone = (bbox?: Bbox): Zone | undefined =>
   bbox ? mapZone(bbox) : undefined
@@ -200,7 +193,7 @@ function forecastHorizon(dataset: Dataset, operation: ExportOperation): Horizon 
 export class RemoteCatalogue {
   readonly endpoint: string
   constructor(private readonly setting: RemoteServerSetting, private readonly managedToken?: () => string | undefined) {
-    this.endpoint = normalizeRemoteUrl(setting.url)
+    this.endpoint = normalizeRemoteUrl(setting.url, setting.allowHttp)
   }
 
   private token(): string | undefined {

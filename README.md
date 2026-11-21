@@ -191,7 +191,11 @@ streamed from its upstream source.
 ### Remote Signal K as a download source
 
 Under **Server → Plugin Config → GRIB Downloader → Remote Signal K sources**,
-add a server identifier such as `shore` and its HTTPS base URL, then save.
+add a server identifier such as `shore` and its base URL. Remote sources use
+HTTPS by default. On a trusted private network such as Tailscale, you can
+enter the server's HTTP URL and enable **Allow HTTP on a trusted network** for
+that source. With HTTP, rely on the private network to protect the access token
+and downloads in transit. Save the configuration.
 On the saved server's row, click **Request a read/write token**. In the remote
 server's **Security → Access Requests**, approve the **GRIB Downloader —
 remote forecast source shore** request. Device access requests must be enabled
@@ -200,8 +204,8 @@ on that server. The downloader saves the approved token with file permissions
 request survives a restart. Use **Retry request** after a denial.
 
 You can also enter a path to an existing token file. The approved managed token
-takes precedence for that server and the existing file is preserved. Loopback URLs can use HTTP
-for tests. The remote server must provide the Forecast Dataset catalogue API.
+takes precedence for that server and the existing file is preserved. The remote
+server must provide the Forecast Dataset catalogue API.
 Read-only access is enough to retrieve complete datasets. Cropping requires
 read/write access to submit processing jobs.
 
